@@ -272,8 +272,9 @@ video. Each click is also logged, with a label, in `events.jsonl` and
 `timeline.json`. A click on a form field, an editable region (`contenteditable`, or
 a `textbox`, `searchbox` or `spinbutton` role) or the Monaco code editor is labelled
 by what names the field — its `aria-label` or `aria-labelledby` text, its `<label>`,
-its placeholder, or its name or type — so a click on a filled password field is
-logged as the field's label, not the password. Any other click is labelled by the
+its placeholder, or its name, type or role (a click in the code editor logs as
+`code`) — so a click on a filled password field is logged as the field's label,
+not the password. Any other click is labelled by the
 page's own text, which can repeat what was typed or chosen: the current choice on a
 dropdown's trigger button, a filter token, or an autosuggest option reading
 `Use: "…"` with the typed value in it. Treat `events.jsonl` and `timeline.json` as
