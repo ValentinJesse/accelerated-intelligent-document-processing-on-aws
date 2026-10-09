@@ -1715,6 +1715,7 @@ export type QueryGetTestSetDocumentsArgs = {
   limit?: InputMaybe<Scalars['Int']['input']>;
   nextToken?: InputMaybe<Scalars['String']['input']>;
   objectKey?: InputMaybe<Scalars['String']['input']>;
+  search?: InputMaybe<Scalars['String']['input']>;
   testSetId: Scalars['String']['input'];
 };
 
@@ -2161,7 +2162,9 @@ export type TestSetDocumentSections = {
 export type TestSetDocumentsPage = {
   activeLabelJobId?: Maybe<Scalars['String']['output']>;
   documents: Array<TestSetDocument>;
+  matchCount?: Maybe<Scalars['Int']['output']>;
   nextToken?: Maybe<Scalars['String']['output']>;
+  searchTruncated?: Maybe<Scalars['Boolean']['output']>;
   status?: Maybe<Scalars['String']['output']>;
   totalCount?: Maybe<Scalars['Int']['output']>;
 };

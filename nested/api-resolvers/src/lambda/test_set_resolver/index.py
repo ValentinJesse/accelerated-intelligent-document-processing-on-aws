@@ -4636,6 +4636,11 @@ def get_test_set_documents(args):
     whole `baseline/` prefix is listed once (bulk) and section result.json
     keys are matched to their document in memory — one extra LIST per page
     regardless of page size, and it handles nested input file names.
+
+    `search` is matched against every document in the set rather than against the
+    page, because the page is the thing the caller cannot see past: a table that
+    filtered its own 50 rows reported "no results" for documents that were in the
+    set two pages along. See ``_search_test_set_documents``.
     """
     test_set_id = args["testSetId"]
     limit = args.get("limit") or 100
@@ -4643,6 +4648,10 @@ def get_test_set_documents(args):
     # Optional exact-match filter, so a deep-linked document detail page does not
     # page through the whole set.
     object_key = args.get("objectKey")
+    # Optional case-insensitive substring over the set's document names, for a
+    # search box. Ignored when `objectKey` is given, which is already the narrower
+    # of the two.
+    search = (args.get("search") or "").strip()
 
     # The id is derived from a validated name, so it must satisfy the same charset.
     # This also rejects '/' and '..', which could traverse outside the S3 prefix.
@@ -4650,6 +4659,11 @@ def get_test_set_documents(args):
         raise Exception("Invalid test set id")
     if object_key and ".." in object_key:
         raise Exception("Invalid object key")
+    # No document name approaches this, so a longer search is not a search. Bounded
+    # because the value is echoed into the log line below, and because an
+    # unbounded one is the only input here whose size a caller chooses freely.
+    if len(search) > _SEARCH_MAX_LENGTH:
+        raise Exception("Search text is too long")
     limit = max(1, min(int(limit), 1000))
 
     item = db_client.get_item({"PK": f"testset#{test_set_id}", "SK": "metadata"})
@@ -4659,33 +4673,41 @@ def get_test_set_documents(args):
     test_set_bucket = os.environ["TEST_SET_BUCKET"]
     input_prefix = f"{test_set_id}/input/"
 
-    list_kwargs = {
-        "Bucket": test_set_bucket,
-        # The objectKey equality check below drops same-prefix siblings.
-        "Prefix": f"{input_prefix}{object_key}" if object_key else input_prefix,
-        "MaxKeys": limit,
-    }
-    if next_token:
-        list_kwargs["ContinuationToken"] = next_token
-    response = s3_client.list_objects_v2(**list_kwargs)
-
-    documents = []
-    for obj in response.get("Contents", []):
-        key = obj["Key"]
-        if key.endswith("/"):
-            continue  # skip folder placeholder objects
-        relative_name = key[len(input_prefix) :]
-        if object_key and relative_name != object_key:
-            continue
-        documents.append(
-            {
-                "objectKey": relative_name,
-                "inputKey": key,
-                "size": obj.get("Size"),
-                "lastModified": obj["LastModified"].isoformat(),
-                "sections": [],
-            }
+    match_count = None
+    search_truncated = None
+    if search and not object_key:
+        documents, response_next_token, match_count, search_truncated = (
+            _search_test_set_documents(
+                test_set_bucket, input_prefix, search, limit, next_token
+            )
         )
+    else:
+        # A token minted under a search is an offset into *that* search's matches
+        # and means nothing without it. Refused here rather than handed to S3,
+        # which would reject it as an opaque InvalidArgument and surface as
+        # "Failed to load test set documents" with no indication of why.
+        if next_token and next_token.startswith(_SEARCH_TOKEN_PREFIX):
+            raise Exception("Invalid pagination token without a search")
+        list_kwargs = {
+            "Bucket": test_set_bucket,
+            # The objectKey equality check below drops same-prefix siblings.
+            "Prefix": f"{input_prefix}{object_key}" if object_key else input_prefix,
+            "MaxKeys": limit,
+        }
+        if next_token:
+            list_kwargs["ContinuationToken"] = next_token
+        response = s3_client.list_objects_v2(**list_kwargs)
+
+        documents = []
+        for obj in response.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue  # skip folder placeholder objects
+            relative_name = key[len(input_prefix) :]
+            if object_key and relative_name != object_key:
+                continue
+            documents.append(_document_row(obj, relative_name))
+        response_next_token = response.get("NextContinuationToken")
 
     if documents:
         # Bulk-list baseline section files once and match to this page's docs.
@@ -4724,7 +4746,7 @@ def get_test_set_documents(args):
 
     result = {
         "documents": documents,
-        "nextToken": response.get("NextContinuationToken"),
+        "nextToken": response_next_token,
         # The set's whole size, not this page's. A paginated response that reports
         # only what it returned leaves the caller counting the page and calling it
         # the total: the UI showed "Documents (50)" and offered to "Label 50
@@ -4739,6 +4761,10 @@ def get_test_set_documents(args):
         # (publishing a version) has nothing else to read. Free here — the metadata
         # row is already in hand.
         "status": item.get("status"),
+        # Both `None` unless a search ran, so a caller can tell "no search" from
+        # "a search that matched nothing".
+        "matchCount": match_count,
+        "searchTruncated": search_truncated,
     }
 
     # Surfaced so a page load resumes polling an in-flight job. Labels are harvested
@@ -4749,9 +4775,119 @@ def get_test_set_documents(args):
 
     logger.info(
         f"getTestSetDocuments({test_set_id}): {len(documents)} documents"
+        # !r rather than the bare value: this is caller-supplied text, and repr
+        # escapes the newlines that would otherwise let it forge log lines.
+        f"{f' matching {search!r} ({match_count} in the set)' if match_count is not None else ''}"
         f"{' (more available)' if result['nextToken'] else ''}"
     )
     return result
+
+
+def _document_row(obj, relative_name):
+    """One listing row for an S3 input object, before sections are attached."""
+    return {
+        "objectKey": relative_name,
+        "inputKey": obj["Key"],
+        "size": obj.get("Size"),
+        "lastModified": obj["LastModified"].isoformat(),
+        "sections": [],
+    }
+
+
+# How many S3 keys one search will read before it stops and says so. At the page
+# size below this is 50 LIST calls — well under a second of listing, and larger
+# than any test set this has been built for. Past it the returned page is still
+# correct; `matchCount` becomes a lower bound and `searchTruncated` says that it
+# is.
+_SEARCH_SCAN_KEY_BUDGET = 50_000
+
+# Keys per LIST call: S3's maximum, and the paginator's default. Named because the
+# budget above can only be honoured at this granularity, so the two belong
+# together rather than one of them being whatever default happens to be in force.
+_SEARCH_SCAN_PAGE_SIZE = 1000
+
+# Longest accepted `search`. S3 keys cap at 1024 bytes and a document name is a
+# fraction of that, so this is well clear of any real search while keeping the
+# value a bounded quantity.
+_SEARCH_MAX_LENGTH = 256
+
+# Search pages are an offset into the matches, not an S3 continuation token, and
+# the prefix is what keeps the two kinds of `nextToken` from being replayed as
+# each other. A continuation token resumes at a LIST page boundary: a 1000-key
+# page holding more than `limit` matches would lose every match after the first
+# `limit`, silently, which is the same class of bug as filtering one page.
+_SEARCH_TOKEN_PREFIX = "match:"
+
+
+def _search_test_set_documents(bucket, input_prefix, search, limit, next_token):
+    """Find the documents in a set whose name contains `search`, at any page depth.
+
+    Returns ``(documents, next_token, match_count, truncated)``.
+
+    S3 has no substring match, so the set's `input/` prefix is listed in full and
+    matched here. Only key *names* are read — no GET per document — so a search
+    costs one LIST per 1000 keys and hands back a page of at most `limit`
+    documents, which is what keeps the expensive part of this listing (the
+    per-section reads in ``_attach_label_metadata``) proportional to the page
+    rather than to the set.
+
+    `search` is never used as an S3 `Prefix`, so it needs no path validation: a
+    caller cannot reach outside `input_prefix` through it, and a leading-substring
+    search is not a prefix search.
+
+    Only the rows for the requested page are held, while every match is counted,
+    so memory is proportional to `limit` and the count is still the set's.
+    """
+    needle = search.lower()
+    offset = 0
+    if next_token:
+        if not next_token.startswith(_SEARCH_TOKEN_PREFIX):
+            raise Exception("Invalid pagination token for a search")
+        try:
+            offset = max(0, int(next_token[len(_SEARCH_TOKEN_PREFIX) :]))
+        except ValueError as exc:
+            raise Exception("Invalid pagination token for a search") from exc
+    end = offset + limit
+
+    documents = []
+    match_count = 0
+    scanned = 0
+    truncated = False
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(
+        Bucket=bucket,
+        Prefix=input_prefix,
+        PaginationConfig={"PageSize": _SEARCH_SCAN_PAGE_SIZE},
+    ):
+        for obj in page.get("Contents", []):
+            scanned += 1
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue  # skip folder placeholder objects
+            relative_name = key[len(input_prefix) :]
+            if needle not in relative_name.lower():
+                continue
+            if offset <= match_count < end:
+                documents.append(_document_row(obj, relative_name))
+            match_count += 1
+        if scanned >= _SEARCH_SCAN_KEY_BUDGET:
+            # Truncated only if S3 says keys remain. Reaching the budget on the
+            # last page means the scan finished, and reporting that as truncated
+            # would caption an exact count as a lower bound and ask the user to
+            # narrow a search that already saw the whole set.
+            truncated = bool(page.get("IsTruncated"))
+            break
+
+    # Only matches this scan actually reached are offered as a next page. Offset
+    # paging re-scans from the start and stops at the same budget, so a token past
+    # what was scanned would return the same rows forever; a truncated search says
+    # so instead, and the caller's remedy is a narrower search.
+    return (
+        documents,
+        f"{_SEARCH_TOKEN_PREFIX}{end}" if match_count > end else None,
+        match_count,
+        truncated,
+    )
 
 
 def _attach_label_metadata(test_set_bucket, documents):

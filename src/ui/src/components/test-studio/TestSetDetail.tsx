@@ -71,6 +71,13 @@ const logger = new ConsoleLogger('TestSetDetail');
 const PAGE_SIZE = 50;
 
 /**
+ * How long the search box waits before asking the server. The search covers the
+ * whole set rather than the page on screen, so it is a LIST over the set's keys —
+ * cheap, but not cheap enough to run once per keystroke.
+ */
+const SEARCH_DEBOUNCE_MS = 300;
+
+/**
  * After a bucket or zip add, how often the set's size is re-read and for how long.
  * The copier and extractor report only through the set's status, which this page
  * does not hold, so the size is the signal that documents have landed.
@@ -429,7 +436,18 @@ const TestSetDetail = (): React.JSX.Element => {
   const [setStatus, setSetStatus] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** What is in the search box. */
   const [filterText, setFilterText] = useState('');
+  /**
+   * The search the server is answering, which lags `filterText` by the debounce.
+   * Held separately so the table's copy can distinguish "no search" from "a
+   * search that matched nothing" without reacting to a half-typed word.
+   */
+  const [searchText, setSearchText] = useState('');
+  /** Documents in the whole set matching `searchText`; `null` when none is active. */
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+  /** The search stopped before the end of the set, so `matchCount` is a lower bound. */
+  const [searchTruncated, setSearchTruncated] = useState(false);
   const [labelJob, setLabelJob] = useState<{
     jobId: string;
     status: string;
@@ -496,6 +514,10 @@ const TestSetDetail = (): React.JSX.Element => {
             testSetId,
             limit: PAGE_SIZE,
             nextToken: tokens[pageIndex - 1] ?? undefined,
+            // Searching is the server's job because the set is paginated there:
+            // filtering the 50 rows held here would answer about the page while
+            // looking like it answered about the set.
+            search: searchText || undefined,
           },
         });
         const page = response.data?.getTestSetDocuments;
@@ -503,6 +525,8 @@ const TestSetDetail = (): React.JSX.Element => {
         setHasMore(Boolean(page?.nextToken));
         setTotalCount(page?.totalCount ?? null);
         setSetStatus(page?.status ?? null);
+        setMatchCount(page?.matchCount ?? null);
+        setSearchTruncated(Boolean(page?.searchTruncated));
         setPageTokens((prev) => {
           const next = [...prev];
           next[pageIndex] = page?.nextToken ?? null;
@@ -524,9 +548,24 @@ const TestSetDetail = (): React.JSX.Element => {
         setIsLoading(false);
       }
     },
-    [testSetId],
+    [testSetId, searchText],
   );
 
+  /**
+   * Let the search box settle before asking the server, so a typed word is one
+   * scan of the set rather than one per keystroke.
+   */
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchText(filterText.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [filterText]);
+
+  /**
+   * Loads page 1, and reloads it whenever the search changes — `fetchPage` closes
+   * over `searchText`, so a new search gives this effect a new identity. Page 1 is
+   * the only page a new search can land on: the tokens held are offsets into the
+   * previous search's matches, which say nothing about this one's.
+   */
   useEffect(() => {
     setPageTokens([null]);
     setCurrentPageIndex(1);
@@ -837,7 +876,13 @@ const TestSetDetail = (): React.JSX.Element => {
     fetchPage(currentPageIndex, pageTokens);
   }, [documentsStale, currentPageIndex, pageTokens, fetchPage]);
 
-  const filteredDocs = filterText ? documents.filter((d) => d.objectKey.toLowerCase().includes(filterText.toLowerCase())) : documents;
+  /**
+   * The rows to show, already narrowed by the search. There is no filtering left to
+   * do here: the server searched the whole set and `documents` is a page of the
+   * matches, so filtering it again would be filtering a filter — and when this page
+   * *was* the filter, a document two pages along read as "no results".
+   */
+  const filteredDocs = documents;
 
   /**
    * Why a version cannot be published right now, or `null` when it can. Passed to the
@@ -899,10 +944,50 @@ const TestSetDetail = (): React.JSX.Element => {
       hasConfidence
         ? 'Confidence alerts are the fields below their configured threshold — review the documents with the most first.'
         : null,
-      totalCount !== null && totalCount > filteredDocs.length ? 'Sorting and filtering order this page, not the whole set.' : null,
+      // Sorting only, and only when the rows on screen are not all there is to
+      // order. Search is no longer page-scoped, so the sentence no longer says it
+      // is — and under a search what sorting falls short of is the matches, not
+      // the set.
+      searchText
+        ? (matchCount ?? 0) > filteredDocs.length
+          ? 'Sorting orders this page of matches, not all of them.'
+          : null
+        : totalCount !== null && totalCount > filteredDocs.length
+          ? 'Sorting orders this page, not the whole set.'
+          : null,
+      searchTruncated
+        ? `This set is too large to search in full, so there may be matches beyond the ${matchCount} found. Narrow the search.`
+        : null,
     ]
       .filter(Boolean)
       .join(' ') || undefined;
+
+  /**
+   * The table's count.
+   *
+   * Under a search this counts the matches in the **whole set**, because a page
+   * count next to a search box reads as "this is everything that matches". The
+   * server supplies it; it is not derivable from the rows on screen, which are one
+   * page of the matches.
+   *
+   * No count at all while the first page is loading: '(0)' reads as "this set is
+   * empty", which is a statement we cannot make yet and the one that most misleads.
+   */
+  const tableCounter = (() => {
+    if (isLoading && filteredDocs.length === 0) return undefined;
+    if (searchText) {
+      // A search whose count the server did not return — only possible against an
+      // older resolver — falls back to counting the page rather than claiming a total.
+      if (matchCount === null) return `(${filteredDocs.length})`;
+      // '+' because a truncated search scanned part of the set, so its count is a
+      // floor. Dropping it would report a lower bound as a total.
+      const matches = `${matchCount}${searchTruncated ? '+' : ''}`;
+      return matchCount > filteredDocs.length ? `(${filteredDocs.length} of ${matches} matching)` : `(${matches} matching)`;
+    }
+    return totalCount !== null && totalCount > filteredDocs.length
+      ? `(${filteredDocs.length} of ${totalCount})`
+      : `(${filteredDocs.length})`;
+  })();
 
   return (
     <AppLayout
@@ -1008,16 +1093,7 @@ const TestSetDetail = (): React.JSX.Element => {
             <Table
               header={
                 <Header
-                  counter={
-                    // No count at all while the first page is loading: '(0)' reads
-                    // as "this set is empty", which is a statement we cannot make
-                    // yet and the one that most misleads.
-                    isLoading && filteredDocs.length === 0
-                      ? undefined
-                      : totalCount !== null && totalCount > filteredDocs.length
-                        ? `(${filteredDocs.length} of ${totalCount})`
-                        : `(${filteredDocs.length})`
-                  }
+                  counter={tableCounter}
                   description={tableDescription}
                   actions={
                     <SpaceBetween direction="horizontal" size="xs">
@@ -1199,7 +1275,8 @@ const TestSetDetail = (): React.JSX.Element => {
               filter={
                 <TextFilter
                   filteringText={filterText}
-                  filteringPlaceholder="Find documents on this page"
+                  filteringPlaceholder="Find documents in this set"
+                  filteringAriaLabel="Find documents in this set"
                   onChange={({ detail }) => setFilterText(detail.filteringText)}
                 />
               }
@@ -1215,8 +1292,10 @@ const TestSetDetail = (): React.JSX.Element => {
                 <Box textAlign="center" color="inherit">
                   <b>No documents</b>
                   <Box variant="p" color="inherit">
+                    {/* "in this test set", not "on this page": the search ran over the
+                        whole set, so this is now a statement about the set. */}
                     {filterText
-                      ? 'This test set has no documents matching the filter.'
+                      ? `No document in this test set matches "${filterText}".`
                       : 'This test set has no documents. Use Add documents to bring some in: processed documents, files in a bucket, a zip upload, or generated documents.'}
                   </Box>
                 </Box>
