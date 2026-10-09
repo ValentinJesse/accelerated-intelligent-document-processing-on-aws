@@ -198,15 +198,26 @@ is worse than no demo.
 
 A demo is made to be shared, and a recording of a live stack shows real documents,
 real file names, the signed-in user's email in the navigation, and whatever else is
-on screen. The page URL is not captured (the screencast is the page, not the
+on screen. The video does not show the page URL (the screencast is the page, not the
 browser chrome), but nothing on the page is redacted.
+
+The session directory holds more than the video. Every click is logged, with a
+label, in `events.jsonl` and `timeline.json`, and `render` prints the same labels in
+its click table and warnings. The labels are made the way the Privacy section of
+`.claude/skills/ux-test.md` describes: a click on a field is labelled by the field's
+label, never by what was typed in it, and any other click by the page's own text,
+which can repeat a value that was typed or chosen. A click made while paused is
+logged with no label and left out of the video and the click table. The session
+also records the tab's address, in `session.json`, `timeline.json` and
+`recorder.log`, and its title, in `session.json`.
 
 Default to shipped samples (`samples/`), the pre-deployed test sets and synthetic
 generation. If the storyboard needs anything else — a document already on the
 stack, a real test set — tell the user exactly what will be in frame and ask once.
 If they confirm, record it and repeat the caveat when you hand over the path.
 Everything lands under `scratch/ux-recordings/` (gitignored); **never commit the
-video or attach it to a PR.**
+session directory, the video included, or attach any of it to a PR**, and do not
+paste `render`'s click table or warnings into anything you share.
 
 ---
 

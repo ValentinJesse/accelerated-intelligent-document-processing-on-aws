@@ -63,7 +63,8 @@ clamped, paused stretches dropped, each mark's frame held while the voice starts
 speed-ups capped at 3×, a settle before the next chapter), adds title and end
 cards, and encodes one mp4 plus `review.srt`, `segments.json` and a chapter table
 in `review.md`. Every click is logged with its coordinates and the element under
-the pointer; `render` draws each click as a ring on the last frame before it and
+the pointer, except one made while paused, which is logged with neither and is
+never drawn or listed; `render` draws each click as a ring on the last frame before it and
 holds that frame briefly (the page changes too fast for a live marker to be seen
 on the right screen), prints the click table, and flags clicks that hit nothing
 interactive, which is how a mis-aimed automation click is told apart from a UI bug.

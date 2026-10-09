@@ -37,28 +37,42 @@ moment the agent said it did.
 Why a click on a field is named by its label rather than by what it holds
 -------------------------------------------------------------------------
 Each click the overlay reports is written to the session's ``events.jsonl`` and
-``timeline.json``, so a label must not carry what a person entered. A field is
-what can hold it: an ``input`` other than a ``submit``, ``reset``, ``button`` or
-``image`` button, a ``textarea`` or ``select``, an editable region
-(``contenteditable`` other than ``"false"``, or ``role="textbox"``, ``"searchbox"``
-or ``"spinbutton"``, each in any letter case), the Monaco code editor
-(``.monaco-editor``), and every element of a ``designMode`` document. Monaco is
-named outright because it draws its lines as plain ``span`` elements beside its
-input element rather than inside it, so no other rule reaches them. A field, and
-anything inside one, is named by what labels it: its ``aria-label``, the text its
-``aria-labelledby`` points at, its ``<label>``, then its placeholder, ``name``, type
-or role. No ``value`` property is read, which also covers a custom element that
-keeps typed text in one. A button-like ``input`` holds nothing typed and is named
-by its caption, the ``value`` attribute the page set (``alt`` for an image). Any
-other element keeps its ``aria-label`` or its text, leaving out the text of every
-field inside it, so a click on a panel that holds a filled textarea does not read
-the textarea. That text is gathered node by node, and the walk stops once it has
-the label's 60 characters or has visited 2,000 nodes, so a click on a large chart
-or table costs a bounded amount inside the mousedown listener rather than a read of
-the whole subtree.
+``timeline.json``, and ``render`` prints its labels in the click table and quotes
+them in its warnings, so a label must not carry what a person entered. A click made
+while the recorder is paused is written with no labels at all (``ux_recorder.py``).
 
-Page text is logged as it appears, and it can repeat what was typed word for word:
-a dropdown's trigger shows the current choice, and an autosuggest offers
+A field is what can hold what was entered: an ``input`` other than a ``submit``,
+``reset``, ``button`` or ``image`` button, a ``textarea`` or ``select``, an editable
+region (``contenteditable`` other than ``"false"``, or ``role="textbox"``,
+``"searchbox"`` or ``"spinbutton"``), an element with ``role="combobox"`` (each role
+in any letter case), the Monaco code editor (``.monaco-editor``), and every element
+of a ``designMode`` document. A ``combobox`` shows its value, typed or chosen, as its
+own text, so it is named the way a ``select`` is. Monaco is named outright because
+it draws its lines as plain ``span`` elements beside its input element rather than
+inside it, so no other rule reaches them.
+
+A field, and anything inside one, is named by what labels it: its ``aria-label``,
+the text its ``aria-labelledby`` points at, its ``<label>``, then its placeholder,
+``name``, type or role. Text inside a field is never read, even through
+``aria-labelledby``: an id that points inside the field contributes nothing, and
+the next of those names it, or the label is empty. Monaco gives its root element
+``role="code"`` and puts its ``ariaLabel`` option on its input element rather than
+on the root, so a click on the code it draws is logged as ``code`` whatever
+``ariaLabel`` the page passes; only a label on the root itself would change that. No
+``value`` property is read, which also covers a custom element that keeps typed
+text in one. A button-like ``input`` holds nothing typed and is named by its
+caption, the ``value`` attribute the page set (``alt`` for an image).
+
+Any other element keeps its ``aria-label`` or its text, leaving out the text of
+every field inside it, so a click on a panel that holds a filled textarea does not
+read the textarea. That text is gathered node by node, and the walk stops once it
+has the label's 60 characters or has visited 2,000 nodes, so a click on a large
+chart or table costs a bounded amount inside the mousedown listener rather than a
+read of the whole subtree.
+
+Page text is logged as it appears, and it can repeat what was typed or chosen word
+for word: a dropdown trigger that is a plain button, as Cloudscape's ``Select``
+trigger is, shows the current choice, and an autosuggest offers
 ``Use: "<the typed value>"`` as an option. Two kinds of editor are not recognised:
 an element made editable by the ``-webkit-user-modify`` style, which accepts typing
 in Chrome while its ``isContentEditable`` stays false, and a code editor other than
