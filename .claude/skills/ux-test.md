@@ -266,7 +266,15 @@ in the player (QuickTime: View → Subtitles; VLC: Subtitle menu) — and writte
 
 A recording of a live stack shows real documents. Everything lands under
 `scratch/ux-recordings/` (gitignored); never commit it or attach it to a PR, and
-say so when you hand over the path. Nothing is redacted. Polly receives only the
+say so when you hand over the path. The frames show the page exactly as it looked,
+with nothing redacted: a password revealed by a show-password toggle is in the
+video. A click is logged (in `events.jsonl` and `timeline.json`) by the element's
+label, never by what was typed in it. A form field or editable region is named by
+what labels it — its `aria-label` or `aria-labelledby` text, its `<label>`, its
+placeholder, or its name or type — so a click on a filled password field is logged
+as the field's label, not the password. Text the page itself shows outside a
+field, such as the current choice on a dropdown's trigger button or a filter
+token, is page text and can appear in a click's label. Polly receives only the
 narration text you wrote; frames never leave the machine.
 
 ## What to look for

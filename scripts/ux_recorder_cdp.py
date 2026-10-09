@@ -33,6 +33,29 @@ possible downstream, but it also means a ``mark`` on a quiet screen would have n
 frame of its own. Every boundary therefore also takes a ``Page.captureScreenshot``,
 recorded as a forced frame, so each segment starts on a crisp frame at exactly the
 moment the agent said it did.
+
+Why a click is named by its label and never by what it holds
+------------------------------------------------------------
+Each click the overlay reports is written to the session's ``events.jsonl`` and
+``timeline.json``, so a label must never carry what a person entered. A form control
+(``input`` of any type, ``textarea``, ``select``) or an editable region
+(``contenteditable``, ``role="textbox"`` or ``"searchbox"``), and anything inside
+one, is named by what labels it: its ``aria-label``, the text its
+``aria-labelledby`` points at, its ``<label>``, then its placeholder, ``name``, type
+or role. No element's ``value`` is read, which also covers a custom element that
+keeps typed text in a ``value`` property. Any other element keeps its ``aria-label``
+or its text, leaving out the text of every field inside it, so a click on a panel
+that holds a filled textarea does not read the textarea. That text is gathered node
+by node and the walk stops once it has the label's 60 characters, rather than
+reading the whole subtree as ``textContent`` would. Text the page shows outside a
+field, such as a dropdown's current selection on its trigger, is page text and
+labels a click like any other.
+
+``INTERACTIVE`` names every role it accepts, because ``closest()`` compares
+attribute strings and knows nothing of the ARIA role hierarchy. ``menuitemcheckbox``,
+``menuitemradio`` and ``treeitem`` are subclasses of roles already in the list, and
+without them a click on a checkable item in a Cloudscape ``ButtonDropdown`` reads
+as hitting nothing interactive.
 """
 
 from __future__ import annotations
@@ -518,12 +541,39 @@ CURSOR_OVERLAY_JS = r"""
     setTimeout(() => r.remove(), 600);
   };
   const INTERACTIVE = 'a,button,input,select,textarea,summary,[role="button"],[role="link"],[role="option"],' +
-    '[role="radio"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="switch"],[contenteditable="true"]';
+    '[role="radio"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],' +
+    '[role="menuitemradio"],[role="treeitem"],[role="switch"],[contenteditable="true"]';
+  const FIELD = 'input,textarea,select,[contenteditable]:not([contenteditable="false"]),' +
+    '[role="textbox"],[role="searchbox"]';
+  const LABEL_LENGTH = 60;
+  const attr = (el, name) => (el.getAttribute && el.getAttribute(name)) || '';
+  const textOf = (root) => {
+    if (root.closest(FIELD)) { return ''; }
+    let text = '';
+    const pending = [root];
+    while (pending.length && text.trim().length < LABEL_LENGTH) {
+      const node = pending.pop();
+      if (node.nodeType === 3) {
+        text = (text + node.nodeValue).replace(/\s+/g, ' ');
+      } else if (node.nodeType === 1 && !node.matches(FIELD)) {
+        for (let i = node.childNodes.length - 1; i >= 0; i -= 1) { pending.push(node.childNodes[i]); }
+      }
+    }
+    return text;
+  };
+  const fieldName = (field) => {
+    const textsOf = (els) => els.filter(Boolean).map(textOf).join(' ').trim();
+    const labelledBy = attr(field, 'aria-labelledby').split(/\s+/).filter(Boolean);
+    return attr(field, 'aria-label') || textsOf(labelledBy.map((id) => document.getElementById(id))) ||
+      textsOf(Array.from(field.labels || [])) || attr(field, 'placeholder') || attr(field, 'name') ||
+      (typeof field.type === 'string' ? field.type : '') || attr(field, 'role');
+  };
   const describe = (el) => {
-    if (!el || !el.tagName) { return null; }
-    const label = (el.getAttribute && el.getAttribute('aria-label')) || el.textContent || el.value || '';
+    if (!el || !el.tagName || !el.closest) { return null; }
+    const field = el.closest(FIELD);
+    const label = field ? fieldName(field) : attr(el, 'aria-label') || textOf(el);
     return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' "' +
-      String(label).replace(/\s+/g, ' ').trim().slice(0, 60) + '"';
+      String(label).replace(/\s+/g, ' ').trim().slice(0, LABEL_LENGTH) + '"';
   };
   const report = (e) => {
     if (typeof window.__uxRecorderEvent !== 'function') { return; }

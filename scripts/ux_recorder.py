@@ -60,8 +60,9 @@ Usage (from the repo root; the debug Chrome from the skill must be running):
 
 Everything lands under ``scratch/ux-recordings/<stack>-<timestamp>/`` (gitignored;
 demos under ``demo-<title>-<timestamp>/``).
-Recordings of a live stack show real data; nothing is redacted. Polly receives
-only the narration text.
+Recordings of a live stack show real data, and nothing in the frames is redacted.
+A click is logged by the element's label, never by what was typed in a field (see
+``ux_recorder_cdp.py``). Polly receives only the narration text.
 """
 
 from __future__ import annotations

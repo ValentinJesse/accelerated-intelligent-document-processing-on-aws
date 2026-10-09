@@ -8,9 +8,11 @@ would not catch quickly: the WebSocket client speaks RFC 6455 correctly against
 Chrome, frames are acknowledged without blocking the reader, paused time never
 reaches the video, each segment is paced for a person (pre-roll, action after the
 narrator has started, no fast-forward past the ceiling, a settle at the end),
-captions line up with the voice, and the daemon's control protocol writes the
-files the skill tells the agent to fill in. Nothing here needs AWS, Chrome or a
-network; the one ffmpeg test skips when ffmpeg is absent.
+captions line up with the voice, the daemon's control protocol writes the files
+the skill tells the agent to fill in, and a click is logged by the element's label
+and never by what was typed into a field. Nothing here needs AWS, Chrome or a
+network; the ffmpeg tests skip when ffmpeg is absent, and the click-label tests,
+which run the cursor overlay's JavaScript under node, skip when node is.
 """
 
 from __future__ import annotations
@@ -352,6 +354,535 @@ class TestCursorOverlay:
         assert "z-index:2147483647" in js
         assert "aria-hidden" in js
         assert "mousedown" in js and "pointermove" in js
+
+
+HAS_NODE = shutil.which("node") is not None
+
+CLICK_HARNESS_JS = r"""
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const LABELABLE = ['button', 'input', 'meter', 'output', 'progress', 'select', 'textarea'];
+const failures = [];
+let armed = false;
+
+const fail = (message) => {
+  failures.push(message);
+  throw new Error(message);
+};
+
+const splitTop = (text) => {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) { quote = null; }
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '(' || c === '[') {
+      depth += 1;
+    } else if (c === ')' || c === ']') {
+      depth -= 1;
+    } else if (c === ',' && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+};
+
+const compound = (text) => {
+  const tests = [];
+  let rest = text.trim();
+  const tag = /^[a-z][a-z0-9-]*/.exec(rest);
+  if (tag) {
+    tests.push((el) => el.localName === tag[0]);
+    rest = rest.slice(tag[0].length);
+  }
+  while (rest) {
+    let m = /^\[([a-z-]+)\]/.exec(rest);
+    if (m) {
+      const name = m[1];
+      tests.push((el) => el.getAttribute(name) !== null);
+    } else if ((m = /^\[([a-z-]+)="([^"]*)"\]/.exec(rest))) {
+      const name = m[1];
+      const value = m[2];
+      tests.push((el) => el.getAttribute(name) === value);
+    } else if ((m = /^:not\(([^()]*)\)/.exec(rest))) {
+      const inner = compound(m[1]);
+      tests.push((el) => !inner(el));
+    } else {
+      fail('selector syntax this stub does not implement: ' + JSON.stringify(text));
+    }
+    rest = rest.slice(m[0].length);
+  }
+  if (!tests.length) { fail('empty selector: ' + JSON.stringify(text)); }
+  return (el) => tests.every((test) => test(el));
+};
+
+const matchers = new Map();
+const matches = (el, selector) => {
+  if (!matchers.has(selector)) {
+    const alternatives = splitTop(selector).map(compound);
+    matchers.set(selector, (node) => alternatives.some((test) => test(node)));
+  }
+  return matchers.get(selector)(el);
+};
+
+class TextNode {
+  constructor(data) {
+    this.nodeType = 3;
+    this.nodeValue = data;
+    this.parentNode = null;
+  }
+
+  get textContent() { return this.nodeValue; }
+}
+
+class Element {
+  constructor(doc, tag, attrs, props) {
+    this.nodeType = 1;
+    this.localName = tag;
+    this.tagName = tag.toUpperCase();
+    this.attrs = new Map(Object.entries(attrs || {}));
+    this.childNodes = [];
+    this.parentNode = null;
+    this.style = {};
+    if (LABELABLE.includes(tag)) {
+      Object.defineProperty(this, 'labels', { get: () => doc.labelsFor(this) });
+    }
+    Object.assign(this, props || {});
+  }
+
+  get id() { return this.getAttribute('id') || ''; }
+
+  get parentElement() {
+    return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null;
+  }
+
+  get textContent() { return this.childNodes.map((n) => n.textContent).join(''); }
+
+  set textContent(value) {
+    this.childNodes = [];
+    this.appendChild(new TextNode(String(value)));
+  }
+
+  getAttribute(name) { return this.attrs.has(name) ? String(this.attrs.get(name)) : null; }
+
+  setAttribute(name, value) { this.attrs.set(name, String(value)); }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.childNodes.push(child);
+    return child;
+  }
+
+  remove() {
+    if (this.parentNode) {
+      this.parentNode.childNodes = this.parentNode.childNodes.filter((n) => n !== this);
+      this.parentNode = null;
+    }
+  }
+
+  matches(selector) { return matches(this, selector); }
+
+  closest(selector) {
+    for (let el = this; el; el = el.parentElement) {
+      if (el.matches(selector)) { return el; }
+    }
+    return null;
+  }
+}
+
+class Trap {
+  constructor() { this.parentNode = null; }
+
+  get nodeType() { return this.visit(); }
+
+  get textContent() { return this.visit(); }
+
+  get childNodes() { return this.visit(); }
+
+  visit() {
+    if (armed) { failures.push('read a node after the label already had its text'); }
+    return 1;
+  }
+}
+
+class Document {
+  constructor() {
+    this.listeners = {};
+    this.pointed = null;
+    this.documentElement = new Element(this, 'html');
+    this.head = this.documentElement.appendChild(new Element(this, 'head'));
+    this.body = this.documentElement.appendChild(new Element(this, 'body'));
+  }
+
+  createElement(tag) { return new Element(this, tag); }
+
+  addEventListener(type, listener) {
+    (this.listeners[type] = this.listeners[type] || []).push(listener);
+  }
+
+  removeEventListener() {}
+
+  elementFromPoint() { return this.pointed; }
+
+  elements(root = this.documentElement) {
+    const found = [];
+    const visit = (node) => {
+      if (node instanceof Element) {
+        found.push(node);
+        node.childNodes.forEach(visit);
+      }
+    };
+    visit(root);
+    return found;
+  }
+
+  getElementById(id) {
+    return this.elements().find((el) => el.getAttribute('id') === id) || null;
+  }
+
+  labelled(label) {
+    const target = label.getAttribute('for');
+    if (target !== null) {
+      const el = this.getElementById(target);
+      return el && LABELABLE.includes(el.localName) ? el : null;
+    }
+    return this.elements(label).find((el) => el !== label && LABELABLE.includes(el.localName)) || null;
+  }
+
+  labelsFor(control) {
+    return this.elements().filter((el) => el.localName === 'label' && this.labelled(el) === control);
+  }
+}
+
+const build = (doc, spec, refs) => {
+  if (typeof spec === 'string') { return new TextNode(spec); }
+  if (spec.trap) { return new Trap(); }
+  const el = new Element(doc, spec.tag, spec.attrs, spec.props);
+  spec.children.forEach((child) => el.appendChild(build(doc, child, refs)));
+  if (spec.ref) { refs[spec.ref] = el; }
+  return el;
+};
+
+const run = (scenario) => {
+  failures.length = 0;
+  armed = false;
+  const doc = new Document();
+  const refs = {};
+  scenario.body.forEach((spec) => doc.body.appendChild(build(doc, spec, refs)));
+  const payloads = [];
+  const window = {
+    scrollX: 0,
+    scrollY: 0,
+    __uxRecorderEvent: (text) => payloads.push(JSON.parse(text)),
+  };
+  new Function('window', 'document', 'setTimeout', input.overlay)(window, doc, () => 0);
+  doc.pointed = refs.hit;
+  armed = true;
+  const event = { clientX: 12, clientY: 34, button: 0, target: refs.hit };
+  (doc.listeners.mousedown || []).forEach((listener) => listener(event));
+  armed = false;
+  return { payloads, failures: failures.slice() };
+};
+
+const results = {};
+Object.entries(input.scenarios).forEach(([name, scenario]) => {
+  results[name] = run(scenario);
+});
+process.stdout.write(JSON.stringify(results));
+"""
+
+TYPED = "correct-horse-battery-staple"
+CHOSEN = "Second region"
+
+
+def element(tag, *children, ref=None, attrs=None, props=None):
+    spec = {
+        "tag": tag,
+        "children": list(children),
+        "attrs": attrs or {},
+        "props": props or {},
+    }
+    if ref:
+        spec["ref"] = ref
+    return spec
+
+
+def editable(spelling):
+    return {
+        "body": [
+            element(
+                "div",
+                element("p", TYPED, ref="hit"),
+                attrs={"contenteditable": spelling, "aria-label": "Reply"},
+            )
+        ]
+    }
+
+
+def item(role):
+    return {
+        "body": [
+            element(
+                "ul",
+                element(
+                    "li",
+                    element("span", "Show details", ref="hit"),
+                    attrs={"role": role},
+                ),
+            )
+        ]
+    }
+
+
+CLICK_SCENARIOS = {
+    "password": {
+        "body": [
+            element(
+                "form",
+                element("label", "Password", attrs={"for": "pw"}),
+                element(
+                    "input",
+                    ref="hit",
+                    attrs={"id": "pw", "type": "password", "name": "pass"},
+                    props={"type": "password", "value": TYPED},
+                ),
+            )
+        ]
+    },
+    "text-input": {
+        "body": [
+            element("span", "Document name", attrs={"id": "name-label"}),
+            element(
+                "input",
+                ref="hit",
+                attrs={"aria-labelledby": "name-label", "name": "doc"},
+                props={"type": "text", "value": TYPED},
+            ),
+        ]
+    },
+    "placeholder-input": {
+        "body": [
+            element(
+                "input",
+                ref="hit",
+                attrs={"placeholder": "Search documents", "name": "q"},
+                props={"type": "search", "value": TYPED},
+            )
+        ]
+    },
+    "bare-input": {
+        "body": [
+            element(
+                "input",
+                ref="hit",
+                attrs={"type": "email"},
+                props={"type": "email", "value": TYPED},
+            )
+        ]
+    },
+    "textarea": {
+        "body": [
+            element(
+                "label",
+                "Notes ",
+                element(
+                    "textarea",
+                    TYPED,
+                    ref="hit",
+                    props={"type": "textarea", "value": TYPED},
+                ),
+            )
+        ]
+    },
+    "select": {
+        "body": [
+            element(
+                "select",
+                element("option", "First region", attrs={"value": "first"}),
+                element("option", CHOSEN, attrs={"value": TYPED, "selected": ""}),
+                ref="hit",
+                attrs={"name": "region"},
+                props={"type": "select-one", "value": TYPED},
+            )
+        ]
+    },
+    "contenteditable": editable("true"),
+    "contenteditable-empty": editable(""),
+    "contenteditable-plaintext": editable("plaintext-only"),
+    "textbox": {
+        "body": [
+            element("span", "Search the queue", attrs={"id": "q-label"}),
+            element(
+                "div",
+                TYPED,
+                ref="hit",
+                attrs={"role": "textbox", "aria-labelledby": "q-label"},
+            ),
+        ]
+    },
+    "searchbox": {
+        "body": [
+            element(
+                "div",
+                element("span", TYPED, ref="hit"),
+                attrs={"role": "searchbox", "aria-label": "Find"},
+            )
+        ]
+    },
+    "container": {
+        "body": [
+            element(
+                "div",
+                element("h3", "Comment"),
+                element("textarea", TYPED, props={"type": "textarea", "value": TYPED}),
+                element("div", element("p", TYPED), attrs={"contenteditable": "true"}),
+                element(
+                    "select",
+                    element("option", CHOSEN, attrs={"selected": ""}),
+                    props={"type": "select-one", "value": CHOSEN},
+                ),
+                ref="hit",
+            )
+        ]
+    },
+    "labelled-from-inside": {
+        "body": [
+            element(
+                "div",
+                element("p", TYPED, ref="hit", attrs={"id": "first"}),
+                attrs={"contenteditable": "true", "aria-labelledby": "first"},
+            )
+        ]
+    },
+    "custom-element": {
+        "body": [element("idp-token-input", ref="hit", props={"value": TYPED})]
+    },
+    "button": {"body": [element("button", element("span", "Save changes", ref="hit"))]},
+    "link": {"body": [element("a", "Open the set", ref="hit", attrs={"href": "#/s"})]},
+    "read-only-region": {
+        "body": [
+            element(
+                "div",
+                "Read-only summary",
+                ref="hit",
+                attrs={"contenteditable": "false"},
+            )
+        ]
+    },
+    "long-container": {
+        "body": [
+            element(
+                "div",
+                element("p", "Statements " * 8),
+                {"trap": True},
+                ref="hit",
+            )
+        ]
+    },
+    "menuitemcheckbox": item("menuitemcheckbox"),
+    "menuitemradio": item("menuitemradio"),
+    "treeitem": item("treeitem"),
+}
+
+FIELD_CLICKS = {
+    "password": ('input#pw "Password"', 'input#pw "Password"'),
+    "text-input": ('input "Document name"', 'input "Document name"'),
+    "placeholder-input": ('input "Search documents"', 'input "Search documents"'),
+    "bare-input": ('input "email"', 'input "email"'),
+    "textarea": ('textarea "Notes"', 'textarea "Notes"'),
+    "select": ('select "region"', 'select "region"'),
+    "contenteditable": ('p "Reply"', 'div "Reply"'),
+    "contenteditable-empty": ('p "Reply"', None),
+    "contenteditable-plaintext": ('p "Reply"', None),
+    "textbox": ('div "Search the queue"', None),
+    "searchbox": ('span "Find"', None),
+    "container": ('div "Comment"', None),
+    "labelled-from-inside": ('p#first ""', 'div ""'),
+    "custom-element": ('idp-token-input ""', None),
+}
+
+PAGE_TEXT_CLICKS = {
+    "button": ('span "Save changes"', 'button "Save changes"'),
+    "link": ('a "Open the set"', 'a "Open the set"'),
+    "read-only-region": ('div "Read-only summary"', None),
+}
+
+
+@pytest.fixture(scope="module")
+def clicks(tmp_path_factory):
+    harness = tmp_path_factory.mktemp("overlay") / "harness.js"
+    harness.write_text(CLICK_HARNESS_JS, encoding="utf-8")
+    done = subprocess.run(
+        ["node", str(harness)],
+        input=json.dumps(
+            {"overlay": cdp.CURSOR_OVERLAY_JS, "scenarios": CLICK_SCENARIOS}
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if done.returncode != 0:
+        pytest.fail(f"node could not run the cursor overlay: {done.stderr.strip()}")
+    return json.loads(done.stdout)
+
+
+def click_payload(clicks, name):
+    result = clicks[name]
+    assert result["failures"] == [], result["failures"]
+    assert len(result["payloads"]) == 1, result
+    return result["payloads"][0]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(
+    not HAS_NODE,
+    reason="node is not on PATH, and these tests run the cursor overlay's "
+    "JavaScript under it",
+)
+class TestClickLabels:
+    """The overlay's own JavaScript, run under node against stub elements.
+
+    ``CURSOR_OVERLAY_JS`` is executed as shipped and a mousedown is dispatched to
+    the listener it registers, so what is asserted is the payload the recorder
+    would write to ``events.jsonl``. The stub's selector matcher implements only
+    the syntax the overlay uses and fails the test on anything else, so a selector
+    the stub cannot read is a failure rather than a silent non-match.
+    """
+
+    @pytest.mark.parametrize("name", FIELD_CLICKS)
+    def test_a_click_is_never_labelled_by_what_was_typed_or_chosen(self, clicks, name):
+        label, interactive = FIELD_CLICKS[name]
+        payload = click_payload(clicks, name)
+        recorded = json.dumps(payload)
+        assert TYPED not in recorded and CHOSEN not in recorded, recorded
+        assert payload["target"] == label and payload["under"] == label
+        assert payload["interactive"] == interactive
+
+    @pytest.mark.parametrize("name", PAGE_TEXT_CLICKS)
+    def test_anything_else_is_still_labelled_by_its_text(self, clicks, name):
+        label, interactive = PAGE_TEXT_CLICKS[name]
+        payload = click_payload(clicks, name)
+        assert payload["target"] == label and payload["under"] == label
+        assert payload["interactive"] == interactive
+
+    def test_a_large_container_is_read_only_as_far_as_its_label(self, clicks):
+        payload = click_payload(clicks, "long-container")
+        assert payload["target"] == 'div "' + ("Statements " * 8)[:60].strip() + '"'
+
+    @pytest.mark.parametrize("role", ["menuitemcheckbox", "menuitemradio", "treeitem"])
+    def test_a_click_inside_a_checkable_menu_item_or_tree_item_is_interactive(
+        self, clicks, role
+    ):
+        payload = click_payload(clicks, role)
+        assert payload["target"] == 'span "Show details"'
+        assert payload["interactive"] == 'li "Show details"'
 
 
 def frames_at(times, start_seq=1):
