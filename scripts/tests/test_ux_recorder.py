@@ -12,8 +12,10 @@ captions line up with the voice, the daemon's control protocol writes the files
 the skill tells the agent to fill in, a click on a field is logged by the field's
 label and never by what was typed into it, and a click made while paused is logged
 with no label and never reaches the video. Nothing here needs AWS, Chrome or a
-network; the ffmpeg tests skip when ffmpeg is absent, and the click-label tests,
-which run the cursor overlay's JavaScript under node, skip when node is.
+network; the ffmpeg tests skip when ffmpeg is absent. The click-label tests run the
+cursor overlay's JavaScript under node and skip when node is absent, except in CI,
+where they fail instead: they are the only automated check on what a click label
+can hold, so a skip there would let that check go missing with the job still green.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import struct
@@ -357,8 +360,14 @@ class TestCursorOverlay:
         assert "aria-hidden" in js
         assert "mousedown" in js and "pointermove" in js
 
+    def test_the_docstring_states_the_limits_the_overlay_uses(self):
+        prose = " ".join((cdp.__doc__ or "").split())
+        assert f"the label's {LABEL_LENGTH} characters" in prose
+        assert f"has visited {WALK_LIMIT:,} nodes" in prose
+
 
 HAS_NODE = shutil.which("node") is not None
+IN_CI = bool(os.getenv("CI") or os.getenv("GITLAB_CI") or os.getenv("GITHUB_ACTIONS"))
 
 CLICK_HARNESS_JS = r"""
 const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
@@ -607,7 +616,20 @@ process.stdout.write(JSON.stringify(results));
 
 TYPED = "correct-horse-battery-staple"
 CHOSEN = "Second region"
-WALK_LIMIT = int(re.search(r"const WALK_LIMIT = (\d+);", cdp.CURSOR_OVERLAY_JS)[1])
+
+
+def overlay_constant(name):
+    found = re.search(rf"const {name} = (\d+);", cdp.CURSOR_OVERLAY_JS)
+    assert found, (
+        f"CURSOR_OVERLAY_JS no longer declares `const {name} = <number>;`, which "
+        "these tests read so that their scenarios and expectations move with it"
+    )
+    return int(found[1])
+
+
+LABEL_LENGTH = overlay_constant("LABEL_LENGTH")
+WALK_LIMIT = overlay_constant("WALK_LIMIT")
+LONG_TEXT = "Statements " * (LABEL_LENGTH // len("Statements ") + 2)
 
 
 def element(tag, *children, ref=None, attrs=None, props=None):
@@ -929,7 +951,7 @@ CLICK_SCENARIOS = {
         "body": [
             element(
                 "div",
-                element("p", "Statements " * 8),
+                element("p", LONG_TEXT),
                 {"trap": True},
                 ref="hit",
             )
@@ -939,7 +961,7 @@ CLICK_SCENARIOS = {
         "body": [
             element(
                 "div",
-                *[element("span") for _ in range(WALK_LIMIT)],
+                *[element("span") for _ in range(WALK_LIMIT - 1)],
                 {"trap": True},
                 ref="hit",
             )
@@ -996,6 +1018,14 @@ PAGE_TEXT_CLICKS = {
 
 @pytest.fixture(scope="module")
 def clicks(tmp_path_factory):
+    if not HAS_NODE:
+        reason = (
+            "node is not on PATH, and these tests run the cursor overlay's "
+            "JavaScript under it"
+        )
+        if IN_CI:
+            pytest.fail(f"{reason}. CI must run them, so give this job node.")
+        pytest.skip(reason)
     harness = tmp_path_factory.mktemp("overlay") / "harness.js"
     harness.write_text(CLICK_HARNESS_JS, encoding="utf-8")
     done = subprocess.run(
@@ -1021,11 +1051,6 @@ def click_payload(clicks, name):
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(
-    not HAS_NODE,
-    reason="node is not on PATH, and these tests run the cursor overlay's "
-    "JavaScript under it",
-)
 class TestClickLabels:
     """The overlay's own JavaScript, run under node against stub elements.
 
@@ -1054,7 +1079,7 @@ class TestClickLabels:
 
     def test_a_large_container_is_read_only_as_far_as_its_label(self, clicks):
         payload = click_payload(clicks, "long-container")
-        assert payload["target"] == 'div "' + ("Statements " * 8)[:60].strip() + '"'
+        assert payload["target"] == f'div "{LONG_TEXT[:LABEL_LENGTH].strip()}"'
 
     def test_a_container_without_text_is_walked_only_so_far(self, clicks):
         payload = click_payload(clicks, "wide-container")
