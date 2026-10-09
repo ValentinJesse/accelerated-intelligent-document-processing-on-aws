@@ -9,10 +9,11 @@ Chrome, frames are acknowledged without blocking the reader, paused time never
 reaches the video, each segment is paced for a person (pre-roll, action after the
 narrator has started, no fast-forward past the ceiling, a settle at the end),
 captions line up with the voice, the daemon's control protocol writes the files
-the skill tells the agent to fill in, and a click on a field is logged by the
-field's label and never by what was typed into it. Nothing here needs AWS, Chrome
-or a network; the ffmpeg tests skip when ffmpeg is absent, and the click-label
-tests, which run the cursor overlay's JavaScript under node, skip when node is.
+the skill tells the agent to fill in, a click on a field is logged by the field's
+label and never by what was typed into it, and a click made while paused is logged
+with no label and never reaches the video. Nothing here needs AWS, Chrome or a
+network; the ffmpeg tests skip when ffmpeg is absent, and the click-label tests,
+which run the cursor overlay's JavaScript under node, skip when node is.
 """
 
 from __future__ import annotations
@@ -665,6 +666,30 @@ def item(role):
     }
 
 
+def select_trigger(role=None):
+    attrs = {
+        "id": "region",
+        "type": "button",
+        "aria-haspopup": "listbox",
+        "aria-expanded": "false",
+        "aria-labelledby": "region-label trigger-content",
+    }
+    if role:
+        attrs["role"] = role
+    return {
+        "body": [
+            element("label", "Region", attrs={"id": "region-label", "for": "region"}),
+            element(
+                "button",
+                element("span", CHOSEN, ref="hit", attrs={"id": "trigger-content"}),
+                element("span", element("svg"), attrs={"class": "arrow"}),
+                attrs=attrs,
+                props={"type": "button"},
+            ),
+        ]
+    }
+
+
 CLICK_SCENARIOS = {
     "password": {
         "body": [
@@ -807,6 +832,18 @@ CLICK_SCENARIOS = {
             ),
         ]
     },
+    "combobox": {
+        "body": [
+            element("span", "Time zone", attrs={"id": "tz-label"}),
+            element(
+                "div",
+                TYPED,
+                ref="hit",
+                attrs={"role": "combobox", "aria-labelledby": "tz-label"},
+            ),
+        ]
+    },
+    "combobox-trigger": select_trigger(role="combobox"),
     "monaco": {
         "body": [
             element(
@@ -911,6 +948,7 @@ CLICK_SCENARIOS = {
     "menuitemcheckbox": item("menuitemcheckbox"),
     "menuitemradio": item("menuitemradio"),
     "tree-item": item("treeitem"),
+    "select-trigger": select_trigger(),
 }
 
 FIELD_CLICKS = {
@@ -930,6 +968,8 @@ FIELD_CLICKS = {
     "mixed-case-textbox": ('span "Notes"', 'div "Notes"'),
     "unlabelled-textbox": ('div "textbox"', 'div "textbox"'),
     "spinbutton": ('div "Quantity"', 'div "Quantity"'),
+    "combobox": ('div "Time zone"', 'div "Time zone"'),
+    "combobox-trigger": ('span#trigger-content "Region"', 'button#region "Region"'),
     "monaco": ('span "code"', 'div "code"'),
     "design-mode": ('p ""', 'html ""'),
     "container": ('div "Comment"', None),
@@ -947,6 +987,10 @@ PAGE_TEXT_CLICKS = {
     "read-only-region": ('div "Read-only summary"', None),
     "read-only-region-uppercase": ('div "Read-only summary"', None),
     "tree-item": ('span "Show details"', None),
+    "select-trigger": (
+        f'span#trigger-content "{CHOSEN}"',
+        f'button#region "{CHOSEN}"',
+    ),
 }
 
 
@@ -1061,6 +1105,25 @@ class TestPauses:
     def test_unmatched_pause_runs_to_stop(self):
         events = [ev(0, 0, "start"), ev(1, 2, "pause"), ev(2, 9, "stop")]
         assert render.pause_intervals(events) == [(2, 9)]
+
+    def test_a_click_made_while_paused_reaches_neither_the_video_nor_the_table(self):
+        sign_in = 'button "Sign in"'
+        events = [
+            ev(0, 0, "start"),
+            ev(1, 2, "pause"),
+            ev(2, 3, "click", x=10, y=20, target=sign_in, interactive=sign_in),
+            ev(3, 5, "resume"),
+            ev(4, 6, "click", x=30, y=40, target='a "Set"', interactive='a "Set"'),
+            ev(5, 9, "stop"),
+        ]
+        kept, frames, _ = render.apply_pauses(events, frames_at([0, 1, 2.5, 4, 7]))
+        assert [e.seq for e in kept if e.type == "click"] == [4]
+        marked = render.click_frames(
+            frames, kept, 0.7, lambda click, frame: f"render/clicks/{click.seq:04d}.jpg"
+        )
+        assert [f.file for f in marked if f.hold] == ["render/clicks/0004.jpg"]
+        table, warnings = render.click_table(kept)
+        assert "Sign in" not in table and warnings == []
 
 
 @pytest.mark.unit
@@ -1516,6 +1579,27 @@ def _recorder(tmp_path, kind: str = "review"):
     return rec, session_dir, out_dir
 
 
+PAUSED_TEXT = "Pat Example"
+
+
+def clicker(rec):
+    def click(label, interactive):
+        payload = {
+            "kind": "click",
+            "x": 440,
+            "y": 321,
+            "target": label,
+            "under": label,
+            "interactive": label if interactive else None,
+        }
+        rec._on_event(
+            "Runtime.bindingCalled",
+            {"name": recorder_cli.cdp.CLICK_BINDING, "payload": json.dumps(payload)},
+        )
+
+    return click
+
+
 @pytest.mark.unit
 class TestRecorderCommands:
     def test_mark_note_pause_resume_and_stop_write_the_session_files(self, tmp_path):
@@ -1605,6 +1689,42 @@ class TestRecorderCommands:
         assert len(clicks) == 1
         assert clicks[0]["x"] == 440 and clicks[0]["interactive"].startswith("a ")
         assert rec.status()["clicks"] == 1 and rec.status()["clicks_off_target"] == 0
+
+    def test_a_click_made_while_paused_is_counted_but_not_described(self, tmp_path):
+        rec, session_dir, _ = _recorder(tmp_path)
+        rec.begin()
+        click = clicker(rec)
+        rec.handle_command({"cmd": "pause"})
+        click(f'button "Continue as {PAUSED_TEXT}"', interactive=True)
+        click(f'div "Signed in as {PAUSED_TEXT}"', interactive=False)
+        rec.handle_command({"cmd": "resume"})
+        click('a "Open the set"', interactive=True)
+        click('div "Console"', interactive=False)
+        status = rec.status()
+        rec.handle_command({"cmd": "stop"})
+        clicks = [e for e in rec.events if e["type"] == "click"]
+        assert [sorted(c) for c in clicks[:2]] == [
+            ["paused", "seq", "t", "type"],
+            ["off_target", "paused", "seq", "t", "type"],
+        ]
+        assert clicks[2]["target"] == 'a "Open the set"' and clicks[2]["x"] == 440
+        assert "off_target" not in clicks[2] and clicks[3]["off_target"] is True
+        assert status["clicks"] == 4 and status["clicks_off_target"] == 2
+        written = [p.read_text() for p in session_dir.iterdir() if p.is_file()]
+        assert written and not [text for text in written if PAUSED_TEXT in text]
+
+    def test_a_paused_click_is_not_rendered_when_the_daemon_dies_paused(self, tmp_path):
+        rec, session_dir, _ = _recorder(tmp_path)
+        rec.begin()
+        rec.handle_command({"cmd": "pause"})
+        clicker(rec)('button "Sign in"', interactive=True)
+        timeline = recorder_cli.finalize_from_disk(session_dir)
+        events = [render.Event.from_record(e) for e in timeline["events"]]
+        last_click = [e for e in events if e.type == "click"][-1]
+        windows = render.pause_intervals(events)
+        assert windows and not [w for w in windows if w[0] <= last_click.t < w[1]]
+        kept, _, _ = render.apply_pauses(events, [])
+        assert [e for e in kept if e.type == "click"] == []
 
     def test_visibility_changes_are_recorded(self, tmp_path):
         rec, _, _ = _recorder(tmp_path)

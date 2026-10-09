@@ -559,7 +559,7 @@ CURSOR_OVERLAY_JS = r"""
   };
   const FIELD = 'input:not([type="submit" i]):not([type="reset" i]):not([type="button" i]):not([type="image" i]),' +
     'textarea,select,[contenteditable]:not([contenteditable="false" i]),[role="textbox" i],[role="searchbox" i],' +
-    '[role="spinbutton" i],.monaco-editor';
+    '[role="spinbutton" i],[role="combobox" i],.monaco-editor';
   const INTERACTIVE = FIELD + ',a,button,input,summary,[role="button"],[role="link"],[role="option"],' +
     '[role="radio"],[role="checkbox"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],' +
     '[role="menuitemradio"],[role="switch"]';

@@ -272,15 +272,20 @@ class Recorder:
             return
         if not isinstance(data, dict) or data.get("kind") != "click":
             return
-        self._record(
-            "click",
-            x=data.get("x"),
-            y=data.get("y"),
-            target=data.get("target"),
-            under=data.get("under"),
-            interactive=data.get("interactive"),
-            paused=True if self.paused else None,
-        )
+        off_target = None if data.get("interactive") else True
+        with self.lock:
+            if self.paused:
+                self._record("click", paused=True, off_target=off_target)
+                return
+            self._record(
+                "click",
+                x=data.get("x"),
+                y=data.get("y"),
+                target=data.get("target"),
+                under=data.get("under"),
+                interactive=data.get("interactive"),
+                off_target=off_target,
+            )
 
     def _record(self, kind: str, **fields: Any) -> dict[str, Any]:
         with self.lock:
@@ -322,9 +327,7 @@ class Recorder:
             "marks": sum(1 for e in self.events if e["type"] == "mark"),
             "clicks": sum(1 for e in self.events if e["type"] == "click"),
             "clicks_off_target": sum(
-                1
-                for e in self.events
-                if e["type"] == "click" and not e.get("interactive")
+                1 for e in self.events if e["type"] == "click" and e.get("off_target")
             ),
             "last_mark": last_mark.get("label") if last_mark else None,
             "page_url": self.meta.get("page_url"),
