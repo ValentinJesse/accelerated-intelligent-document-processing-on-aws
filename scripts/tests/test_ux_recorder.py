@@ -9,10 +9,10 @@ Chrome, frames are acknowledged without blocking the reader, paused time never
 reaches the video, each segment is paced for a person (pre-roll, action after the
 narrator has started, no fast-forward past the ceiling, a settle at the end),
 captions line up with the voice, the daemon's control protocol writes the files
-the skill tells the agent to fill in, and a click is logged by the element's label
-and never by what was typed into a field. Nothing here needs AWS, Chrome or a
-network; the ffmpeg tests skip when ffmpeg is absent, and the click-label tests,
-which run the cursor overlay's JavaScript under node, skip when node is.
+the skill tells the agent to fill in, and a click on a field is logged by the
+field's label and never by what was typed into it. Nothing here needs AWS, Chrome
+or a network; the ffmpeg tests skip when ffmpeg is absent, and the click-label
+tests, which run the cursor overlay's JavaScript under node, skip when node is.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import base64
 import importlib.util
 import io
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -406,13 +407,17 @@ const compound = (text) => {
     if (m) {
       const name = m[1];
       tests.push((el) => el.getAttribute(name) !== null);
-    } else if ((m = /^\[([a-z-]+)="([^"]*)"\]/.exec(rest))) {
+    } else if ((m = /^\[([a-z-]+)="([^"]*)"( i)?\]/.exec(rest))) {
       const name = m[1];
-      const value = m[2];
-      tests.push((el) => el.getAttribute(name) === value);
+      const fold = m[3] ? (s) => s.toLowerCase() : (s) => s;
+      const value = fold(m[2]);
+      tests.push((el) => el.getAttribute(name) !== null && fold(el.getAttribute(name)) === value);
     } else if ((m = /^:not\(([^()]*)\)/.exec(rest))) {
       const inner = compound(m[1]);
       tests.push((el) => !inner(el));
+    } else if ((m = /^\.([a-z][a-z0-9-]*)/.exec(rest))) {
+      const name = m[1];
+      tests.push((el) => (el.getAttribute('class') || '').split(/\s+/).includes(name));
     } else {
       fail('selector syntax this stub does not implement: ' + JSON.stringify(text));
     }
@@ -506,7 +511,7 @@ class Trap {
   get childNodes() { return this.visit(); }
 
   visit() {
-    if (armed) { failures.push('read a node after the label already had its text'); }
+    if (armed) { failures.push('read a node after the walk should have stopped'); }
     return 1;
   }
 }
@@ -515,6 +520,7 @@ class Document {
   constructor() {
     this.listeners = {};
     this.pointed = null;
+    this.designMode = 'off';
     this.documentElement = new Element(this, 'html');
     this.head = this.documentElement.appendChild(new Element(this, 'head'));
     this.body = this.documentElement.appendChild(new Element(this, 'body'));
@@ -573,6 +579,7 @@ const run = (scenario) => {
   failures.length = 0;
   armed = false;
   const doc = new Document();
+  doc.designMode = scenario.designMode || 'off';
   const refs = {};
   scenario.body.forEach((spec) => doc.body.appendChild(build(doc, spec, refs)));
   const payloads = [];
@@ -599,6 +606,7 @@ process.stdout.write(JSON.stringify(results));
 
 TYPED = "correct-horse-battery-staple"
 CHOSEN = "Second region"
+WALK_LIMIT = int(re.search(r"const WALK_LIMIT = (\d+);", cdp.CURSOR_OVERLAY_JS)[1])
 
 
 def element(tag, *children, ref=None, attrs=None, props=None):
@@ -623,6 +631,23 @@ def editable(spelling):
             )
         ]
     }
+
+
+def read_only(spelling):
+    return {
+        "body": [
+            element(
+                "div",
+                "Read-only summary",
+                ref="hit",
+                attrs={"contenteditable": spelling},
+            )
+        ]
+    }
+
+
+def button_input(attrs):
+    return {"body": [element("input", ref="hit", attrs=attrs)]}
 
 
 def item(role):
@@ -712,9 +737,33 @@ CLICK_SCENARIOS = {
             )
         ]
     },
+    "multi-select-option": {
+        "body": [
+            element(
+                "select",
+                element("option", "First region"),
+                element("option", CHOSEN, ref="hit", attrs={"selected": ""}),
+                attrs={"name": "regions", "multiple": ""},
+                props={"type": "select-multiple", "value": CHOSEN},
+            )
+        ]
+    },
     "contenteditable": editable("true"),
     "contenteditable-empty": editable(""),
     "contenteditable-plaintext": editable("plaintext-only"),
+    "editable-in-card": {
+        "body": [
+            element(
+                "div",
+                element(
+                    "div",
+                    element("p", TYPED, ref="hit"),
+                    attrs={"contenteditable": "", "aria-label": "Reply"},
+                ),
+                attrs={"role": "button", "aria-label": "Open card"},
+            )
+        ]
+    },
     "textbox": {
         "body": [
             element("span", "Search the queue", attrs={"id": "q-label"}),
@@ -735,6 +784,63 @@ CLICK_SCENARIOS = {
             )
         ]
     },
+    "mixed-case-textbox": {
+        "body": [
+            element(
+                "div",
+                element("span", TYPED, ref="hit"),
+                attrs={"role": "TextBox", "aria-label": "Notes"},
+            )
+        ]
+    },
+    "unlabelled-textbox": {
+        "body": [element("div", TYPED, ref="hit", attrs={"role": "textbox"})]
+    },
+    "spinbutton": {
+        "body": [
+            element("span", "Quantity", attrs={"id": "qty"}),
+            element(
+                "div",
+                TYPED,
+                ref="hit",
+                attrs={"role": "spinbutton", "aria-labelledby": "qty"},
+            ),
+        ]
+    },
+    "monaco": {
+        "body": [
+            element(
+                "div",
+                element(
+                    "div",
+                    element(
+                        "div",
+                        element(
+                            "div",
+                            element(
+                                "div",
+                                element("span", element("span", TYPED, ref="hit")),
+                                attrs={"class": "view-line"},
+                            ),
+                            attrs={"class": "view-lines", "role": "presentation"},
+                        ),
+                        attrs={"class": "lines-content"},
+                    ),
+                    element(
+                        "div",
+                        attrs={
+                            "class": "native-edit-context",
+                            "role": "textbox",
+                            "aria-label": "Editor content",
+                        },
+                    ),
+                    attrs={"class": "overflow-guard"},
+                ),
+                attrs={"class": "monaco-editor no-user-select vs", "role": "code"},
+            )
+        ]
+    },
+    "design-mode": {"designMode": "on", "body": [element("p", TYPED, ref="hit")]},
     "container": {
         "body": [
             element(
@@ -742,6 +848,9 @@ CLICK_SCENARIOS = {
                 element("h3", "Comment"),
                 element("textarea", TYPED, props={"type": "textarea", "value": TYPED}),
                 element("div", element("p", TYPED), attrs={"contenteditable": "true"}),
+                element(
+                    "div", element("span", TYPED), attrs={"class": "monaco-editor"}
+                ),
                 element(
                     "select",
                     element("option", CHOSEN, attrs={"selected": ""}),
@@ -764,17 +873,21 @@ CLICK_SCENARIOS = {
         "body": [element("idp-token-input", ref="hit", props={"value": TYPED})]
     },
     "button": {"body": [element("button", element("span", "Save changes", ref="hit"))]},
-    "link": {"body": [element("a", "Open the set", ref="hit", attrs={"href": "#/s"})]},
-    "read-only-region": {
+    "icon-button": {
         "body": [
             element(
-                "div",
-                "Read-only summary",
-                ref="hit",
-                attrs={"contenteditable": "false"},
+                "button",
+                element("svg", element("path", ref="hit")),
+                attrs={"aria-label": "Refresh"},
             )
         ]
     },
+    "submit-input": button_input({"type": "submit", "value": "Save changes"}),
+    "image-input": button_input({"type": "image", "alt": "Search"}),
+    "reset-input": button_input({"type": "RESET"}),
+    "link": {"body": [element("a", "Open the set", ref="hit", attrs={"href": "#/s"})]},
+    "read-only-region": read_only("false"),
+    "read-only-region-uppercase": read_only("FALSE"),
     "long-container": {
         "body": [
             element(
@@ -785,9 +898,19 @@ CLICK_SCENARIOS = {
             )
         ]
     },
+    "wide-container": {
+        "body": [
+            element(
+                "div",
+                *[element("span") for _ in range(WALK_LIMIT)],
+                {"trap": True},
+                ref="hit",
+            )
+        ]
+    },
     "menuitemcheckbox": item("menuitemcheckbox"),
     "menuitemradio": item("menuitemradio"),
-    "treeitem": item("treeitem"),
+    "tree-item": item("treeitem"),
 }
 
 FIELD_CLICKS = {
@@ -797,11 +920,18 @@ FIELD_CLICKS = {
     "bare-input": ('input "email"', 'input "email"'),
     "textarea": ('textarea "Notes"', 'textarea "Notes"'),
     "select": ('select "region"', 'select "region"'),
+    "multi-select-option": ('option "regions"', 'select "regions"'),
     "contenteditable": ('p "Reply"', 'div "Reply"'),
-    "contenteditable-empty": ('p "Reply"', None),
-    "contenteditable-plaintext": ('p "Reply"', None),
-    "textbox": ('div "Search the queue"', None),
-    "searchbox": ('span "Find"', None),
+    "contenteditable-empty": ('p "Reply"', 'div "Reply"'),
+    "contenteditable-plaintext": ('p "Reply"', 'div "Reply"'),
+    "editable-in-card": ('p "Reply"', 'div "Reply"'),
+    "textbox": ('div "Search the queue"', 'div "Search the queue"'),
+    "searchbox": ('span "Find"', 'div "Find"'),
+    "mixed-case-textbox": ('span "Notes"', 'div "Notes"'),
+    "unlabelled-textbox": ('div "textbox"', 'div "textbox"'),
+    "spinbutton": ('div "Quantity"', 'div "Quantity"'),
+    "monaco": ('span "code"', 'div "code"'),
+    "design-mode": ('p ""', 'html ""'),
     "container": ('div "Comment"', None),
     "labelled-from-inside": ('p#first ""', 'div ""'),
     "custom-element": ('idp-token-input ""', None),
@@ -809,8 +939,14 @@ FIELD_CLICKS = {
 
 PAGE_TEXT_CLICKS = {
     "button": ('span "Save changes"', 'button "Save changes"'),
+    "icon-button": ('path ""', 'button "Refresh"'),
+    "submit-input": ('input "Save changes"', 'input "Save changes"'),
+    "image-input": ('input "Search"', 'input "Search"'),
+    "reset-input": ('input "reset"', 'input "reset"'),
     "link": ('a "Open the set"', 'a "Open the set"'),
     "read-only-region": ('div "Read-only summary"', None),
+    "read-only-region-uppercase": ('div "Read-only summary"', None),
+    "tree-item": ('span "Show details"', None),
 }
 
 
@@ -866,7 +1002,7 @@ class TestClickLabels:
         assert payload["interactive"] == interactive
 
     @pytest.mark.parametrize("name", PAGE_TEXT_CLICKS)
-    def test_anything_else_is_still_labelled_by_its_text(self, clicks, name):
+    def test_anything_else_keeps_its_own_label(self, clicks, name):
         label, interactive = PAGE_TEXT_CLICKS[name]
         payload = click_payload(clicks, name)
         assert payload["target"] == label and payload["under"] == label
@@ -876,10 +1012,12 @@ class TestClickLabels:
         payload = click_payload(clicks, "long-container")
         assert payload["target"] == 'div "' + ("Statements " * 8)[:60].strip() + '"'
 
-    @pytest.mark.parametrize("role", ["menuitemcheckbox", "menuitemradio", "treeitem"])
-    def test_a_click_inside_a_checkable_menu_item_or_tree_item_is_interactive(
-        self, clicks, role
-    ):
+    def test_a_container_without_text_is_walked_only_so_far(self, clicks):
+        payload = click_payload(clicks, "wide-container")
+        assert payload["target"] == 'div ""'
+
+    @pytest.mark.parametrize("role", ["menuitemcheckbox", "menuitemradio"])
+    def test_a_click_inside_a_checkable_menu_item_is_interactive(self, clicks, role):
         payload = click_payload(clicks, role)
         assert payload["target"] == 'span "Show details"'
         assert payload["interactive"] == 'li "Show details"'

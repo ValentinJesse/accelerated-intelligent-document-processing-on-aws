@@ -61,8 +61,10 @@ Usage (from the repo root; the debug Chrome from the skill must be running):
 Everything lands under ``scratch/ux-recordings/<stack>-<timestamp>/`` (gitignored;
 demos under ``demo-<title>-<timestamp>/``).
 Recordings of a live stack show real data, and nothing in the frames is redacted.
-A click is logged by the element's label, never by what was typed in a field (see
-``ux_recorder_cdp.py``). Polly receives only the narration text.
+A click on a form field, an editable region or the Monaco editor is logged by the
+field's label rather than by what was typed in it. Any other click is logged by the
+page's own text, which can repeat what was typed (see ``ux_recorder_cdp.py``), so
+the click log is as sensitive as the frames. Polly receives only the narration text.
 """
 
 from __future__ import annotations
