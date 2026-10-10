@@ -90,8 +90,12 @@ Everything else — marks, pauses, click markers, pacing, captions — is shared
 
 Output lives under `scratch/ux-recordings/<stack>-<timestamp>/` (demos:
 `demo-<title>-<timestamp>/`; gitignored):
-recordings of a live stack show real documents and are never committed. Polly
-receives only the narration text. Stdlib plus boto3/Pillow at render time; the
+recordings of a live stack show real documents and are never committed. Nor is
+anything else in the session directory: it also holds the tab's address and title,
+and a click log (`events.jsonl`, `timeline.json`) that labels clicks with text from
+the page, as the Privacy section of
+[`ux-test.md`](../.claude/skills/ux-test.md#privacy) describes. Polly receives only
+the narration text. Stdlib plus boto3/Pillow at render time; the
 WebSocket client is vendored in `ux_recorder_cdp.py` rather than adding a
 dependency. Unit tests: `scripts/tests/test_ux_recorder.py`.
 

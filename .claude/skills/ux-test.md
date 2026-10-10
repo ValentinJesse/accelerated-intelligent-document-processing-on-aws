@@ -292,10 +292,11 @@ date, a token for a chosen option or filter, or an autosuggest option reading
 
 A click made while the recorder is paused is logged with no label and no position,
 and `render` leaves it out of the video and the click table, so a `pause` around a
-sign-in keeps what was clicked out of the click log as well as the video. Treat the
-session directory as at least as sensitive as the video, and read `render`'s click
-table and warnings before copying any of it into `review.md` or anything you
-share.
+sign-in keeps what was clicked out of the click log as well as the video. The
+session also records the tab's address, in `session.json`, `timeline.json` and
+`recorder.log`, and its title, in `session.json`. Treat the session directory as
+at least as sensitive as the video, and read `render`'s click table and warnings
+before copying any of it into `review.md` or anything you share.
 
 ## What to look for
 
