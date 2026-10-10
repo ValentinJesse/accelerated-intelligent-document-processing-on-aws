@@ -217,7 +217,11 @@ stack, a real test set — tell the user exactly what will be in frame and ask o
 If they confirm, record it and repeat the caveat when you hand over the path.
 Everything lands under `scratch/ux-recordings/` (gitignored); **never commit the
 session directory, the video included, or attach any of it to a PR**, and do not
-paste `render`'s click table or warnings into anything you share.
+paste `render`'s click table or warnings into anything you share. The one
+exception is the finished `demo.mp4` the user chooses to publish: the user, not
+you, drags it into a GitHub comment box to get its asset URL for
+`docs/demo-videos.md` (step 5 under After stop), and nothing else from the session
+goes with it.
 
 ---
 
@@ -333,6 +337,7 @@ Repeat the privacy caveat if the recording shows anything beyond shipped samples
 - **Don't narrate findings.** The video shows; the docs entry and `not_shown`
   qualify.
 - **Don't show what is not deployed.** Blocked is a valid result; invented is not.
-- **Don't commit anything under `scratch/`**, and don't paste the mp4 into a PR.
+- **Don't commit anything under `scratch/`**, and leave uploading the mp4 to the
+  user (step 5 under After stop).
 - **Don't hide, minimize or resize the recorded tab** while recording, and don't
   record with DevTools or a bearer token in frame.
