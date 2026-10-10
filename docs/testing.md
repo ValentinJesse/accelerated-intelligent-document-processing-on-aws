@@ -490,7 +490,9 @@ click drawn on the frame that was on screen when it happened. Output — `review
 and title and a click log (`events.jsonl`, `timeline.json`) that labels clicks with
 text from the page. **A recording of a live stack shows real documents and
 nothing is redacted: never commit the session directory or attach any of it to a
-pull request.** What a click label can hold is set out under Privacy in
+pull request.** The one exception is a finished product-demo video its author chooses
+to publish: the author uploads that `demo.mp4`, and nothing else from the session, to
+get its asset URL for the demo videos page. What a click label can hold is set out under Privacy in
 [`ux-test`](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/blob/develop/.claude/skills/ux-test.md#privacy).
 Details:
 [`scripts/README.md`](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/blob/develop/scripts/README.md#ux-review-and-demo-recorder-ux_recorderpy).

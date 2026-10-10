@@ -28,7 +28,8 @@ There is no exemption list, and that is a measured claim rather than an omission
 conftest in the tree reads ``CI``, and the one test that does,
 ``scripts/tests/test_ux_recorder.py``, reads it to fail rather than skip when
 ``node`` is missing. That decides nothing about what is collected and can only make
-CI run more than a developer does, never less. The other two places that read it
+CI stricter than a developer's run, never looser: where a local run skips those tests,
+CI fails them. The other two places that read it
 are ``scripts/srt/setup.py`` and ``scripts/srt/run.py``, which use it to choose
 non-interactive behaviour. If a genuinely CI-conditional case ever arrives — a test
 that cannot run in CI — it needs an entry in ``scripts/tests/gate_exemptions.json``,
