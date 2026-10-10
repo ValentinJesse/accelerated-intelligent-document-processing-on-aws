@@ -661,8 +661,10 @@ The search box above the table searches the **whole set**, not the page on scree
 so a document several pages along is found from page 1. Pagination then runs over
 the matches, and the count beside the heading reads "50 of 73 matching" so the page
 is not mistaken for the whole result. Matching is a case-insensitive substring of
-the document name, the same rule as elsewhere in the UI. Sorting is the one control
-that stays page-scoped — see
+the document name, the same rule as elsewhere in the UI. A search reads up to
+50,000 document names; past that the count is shown as a floor — `73+ matching` —
+and the table asks for a narrower search rather than overstating what it counted.
+Sorting is the one control that stays page-scoped — see
 [Confidence-guided review](#confidence-guided-review).
 
 This page is where a set is worked on end to end: **Publish version** at the top

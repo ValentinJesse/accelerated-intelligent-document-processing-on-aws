@@ -5,18 +5,20 @@
  * The search box issues one request per settled keystroke, and the replies do not
  * arrive in the order they were sent (GitHub #1323).
  *
- * The first fix for #1323 moved search to the server and rendered every reply as
- * it arrived, which is correct only if replies arrive in order. They do not, and
- * the ordering is actively adverse: the resolver builds each returned row by
- * reading that document's baseline sections, so a broad search is **slower** than
- * a narrow one. Typing `0063` sends `0`, `00`, `006`, `0063`; `0063` returned its
- * single match first and `0` then overwrote it with page 1 of all 500 documents.
- * The search worked and then appeared to reset itself.
+ * Rendering each reply as it arrives is correct only if replies arrive in order.
+ * They do not, and the ordering is actively adverse: the resolver builds each
+ * returned row by reading that document's baseline sections, so a broad search is
+ * **slower** than a narrow one. Typing `0063` sends `0`, `00`, `006`, `0063`;
+ * `0063` returns its single match first and `0` then overwrites it with page 1 of
+ * all 500 documents, so the search works and then appears to reset itself.
  *
- * ⚠️ These tests stage replies **out of order on purpose**. A test that resolves
- * them in order passes against the unguarded version too, which is exactly why the
- * defect shipped: the obvious test cannot see it. Every case below fails if the
- * guard is removed.
+ * ⚠️ These tests stage replies **out of order on purpose**, and that is the whole
+ * design: resolving them in order passes against an unguarded version too, so the
+ * obvious test cannot see this class of defect at all. The three ordering cases
+ * below fail if the guard is removed. The other two — the non-overlapping case and
+ * the two-guards case — pass against an always-current guard by design, because
+ * they exist to catch a guard that suppresses too much and would break ordinary
+ * sequential paging while fixing the search.
  */
 
 import { describe, expect, it } from 'vitest';

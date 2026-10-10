@@ -14,6 +14,14 @@
  * it; that ordering is what is reproduced here, with the filtering moved to the only
  * place that can see the whole set.
  *
+ * "Not affected" means their filter sees everything they have **fetched**, which is
+ * not the same as everything there is: `AddProcessedDocumentsModal` accumulates
+ * pages behind a Load more button, and `TestResultsList` fetches one bounded window
+ * capped at 100 rows. Both are milder than #1323 — the control that bounds them is
+ * on screen and client-side pagination does not pretend otherwise — and both are out
+ * of scope here. Do not read this paragraph as a claim that either searches a whole
+ * corpus.
+ *
  * ⚠️ The direction that matters is the *absence* of the client-side filter. Adding a
  * server `search` argument while leaving the local `.filter` in place passes every
  * positive assertion and still narrows the result to the page, because the page is
@@ -62,6 +70,19 @@ describe('searching a test set from its detail page', () => {
     expect(DETAIL).toMatch(/filteringPlaceholder="Find documents in this set"/);
     expect(DETAIL).not.toMatch(/Find documents on this page/);
     expect(DETAIL).toMatch(/No document in this test set matches/);
+  });
+
+  /**
+   * The empty state is keyed on the search the **server answered**, not on the box.
+   * `filterText` leads the rows by the debounce plus a round trip, so keying on it
+   * means that for that window a cleared box after a search that matched nothing
+   * reads "this test set has no documents" about a set that has them — the exact
+   * class of false statement this change exists to remove — and a half-typed box
+   * quotes a needle nothing has answered about.
+   */
+  it('keys the empty state on the answered search, not on the box', () => {
+    expect(DETAIL).toContain('{searchText\n                      ? `No document in this test set matches "${searchText}".`');
+    expect(DETAIL).not.toMatch(/No document in this test set matches "\$\{filterText\}"/);
   });
 
   /**
@@ -119,6 +140,16 @@ describe('searching a test set from its detail page', () => {
     const fetchStart = DETAIL.indexOf('const fetchPage = useCallback(');
     const fetchBody = DETAIL.slice(fetchStart, DETAIL.indexOf('const fetchPageRef', fetchStart));
     expect(fetchBody).toMatch(/query: getTestSetDocuments/); // the slice really is the fetch
+
+    // ⚠️ Presence first, and not as a formality. `indexOf` answers -1 for a needle
+    // that is absent, and -1 is below every real index, so each ordering assertion
+    // below PASSES if the thing it orders is deleted — deleting the claim satisfies
+    // the first, deleting the gate satisfies the second. The asymmetry is what hides
+    // it: the right-hand sides (`await client.graphql`, `setDocuments(`) would fail
+    // if removed, so the test looks like it is holding both ends. It is not.
+    expect(fetchBody).toContain('responseGuard.claim()');
+    expect(fetchBody).toContain('if (!isCurrentFetch()) return;');
+
     // Claim precedes the await: ordering has to be decided by when each request
     // started, not by when it finished.
     expect(fetchBody.indexOf('responseGuard.claim()')).toBeLessThan(fetchBody.indexOf('await client.graphql'));

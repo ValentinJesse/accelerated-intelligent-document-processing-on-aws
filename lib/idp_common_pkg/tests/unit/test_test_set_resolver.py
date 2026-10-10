@@ -9510,13 +9510,18 @@ class TestDocumentSearchCoversTheWholeSet:
         hydrated = hydrate.call_args[0][1]
         assert len(hydrated) == 10, "but only the page read"
 
-    def test_a_search_token_is_refused_on_a_listing_that_is_not_a_search(
+    def test_a_token_that_is_not_a_search_offset_is_refused_by_a_search(
         self, labeling_env
     ):
-        """The two token kinds are not interchangeable: one is an offset into a
-        match list, the other an S3 continuation token. Replaying a search token as
-        a continuation token would reach S3 and fail there as an opaque
-        InvalidArgument, so it is refused here instead."""
+        """A search will only page on a token a search minted.
+
+        The two kinds are not interchangeable: one is an offset into a match list,
+        the other an S3 continuation token. Anything that is not an offset is
+        refused rather than parsed hopefully, because `int()` on a continuation
+        token raises where the caller cannot see it. The reverse direction — a
+        search offset replayed with no search — is
+        `test_a_search_token_is_refused_when_the_search_is_gone`.
+        """
         table, s3 = labeling_env
         self._seed(table, s3, ["a.pdf"])
 
@@ -9548,8 +9553,12 @@ class TestDocumentSearchCoversTheWholeSet:
         assert page["searchTruncated"] is True
         assert page["matchCount"] < 20, "a floor, not the set's count"
         assert page["nextToken"] is None, (
-            "and no next page: offset paging re-scans and stops at the same "
-            "budget, so a token here would return the same rows forever"
+            "and no next page, because the 5 matches found do not exceed this "
+            "page's end (offset 0 + limit 50) — not because the scan was cut "
+            "short. A truncated search WITH more matches than `limit` does hand "
+            "out a token, and paging it is correct: `match_count > end` is "
+            "evaluated against the matches the scan actually reached, so every "
+            "page it offers is one it can serve"
         )
 
     def test_reaching_the_budget_on_the_last_page_is_not_truncation(

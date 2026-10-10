@@ -1337,9 +1337,19 @@ const TestSetDetail = (): React.JSX.Element => {
                   <b>No documents</b>
                   <Box variant="p" color="inherit">
                     {/* "in this test set", not "on this page": the search ran over the
-                        whole set, so this is now a statement about the set. */}
-                    {filterText
-                      ? `No document in this test set matches "${filterText}".`
+                        whole set, so this is now a statement about the set.
+
+                        Keyed on `searchText`, NOT on `filterText`. `filterText` is
+                        what is in the box, which runs ahead of the rows by the
+                        debounce plus a round trip — so clearing the box after a
+                        search that matched nothing would, for that window, tell the
+                        user "this test set has no documents" about a set full of
+                        them, and while typing it would quote a needle the server has
+                        not answered about yet. `searchText` is '' exactly when the
+                        server was last asked without a search, which is the
+                        condition this sentence is about. */}
+                    {searchText
+                      ? `No document in this test set matches "${searchText}".`
                       : 'This test set has no documents. Use Add documents to bring some in: processed documents, files in a bucket, a zip upload, or generated documents.'}
                   </Box>
                 </Box>
