@@ -107,6 +107,42 @@ describe('searching a test set from its detail page', () => {
     expect(DETAIL).toMatch(/Sorting orders this page/);
   });
 
+  /**
+   * The guard's own behaviour is tested in `latestResponseOnly.test.ts`, with
+   * replies staged out of order. What that cannot check is whether this page
+   * consults it — a control that exists and is never called is indistinguishable
+   * from no control, and reads as protection in review. So: claimed before the
+   * await, and checked before anything is rendered.
+   */
+  it('renders only the newest reply, and consults the guard to decide', () => {
+    expect(DETAIL).toMatch(/createLatestResponseGuard\(\)/);
+    const fetchStart = DETAIL.indexOf('const fetchPage = useCallback(');
+    const fetchBody = DETAIL.slice(fetchStart, DETAIL.indexOf('const fetchPageRef', fetchStart));
+    expect(fetchBody).toMatch(/query: getTestSetDocuments/); // the slice really is the fetch
+    // Claim precedes the await: ordering has to be decided by when each request
+    // started, not by when it finished.
+    expect(fetchBody.indexOf('responseGuard.claim()')).toBeLessThan(fetchBody.indexOf('await client.graphql'));
+    // And the reply is gated before any of it reaches state.
+    expect(fetchBody.indexOf('if (!isCurrentFetch()) return;')).toBeLessThan(fetchBody.indexOf('setDocuments('));
+  });
+
+  /**
+   * The same defect by a second route. The arrival and generation polls build a
+   * `setInterval` once, so a captured `fetchPage` would keep using the search in
+   * force when the interval started — a search typed during an add was discarded
+   * by the poll that followed it.
+   */
+  it('refetches through the current fetchPage from the polls, not a captured one', () => {
+    expect(DETAIL).toMatch(/fetchPageRef\.current\(1, \[null\]\)/);
+    // Inside the two setInterval bodies there must be no direct call.
+    const intervals = DETAIL.split('setInterval(').slice(1);
+    expect(intervals.length).toBeGreaterThan(0);
+    for (const body of intervals) {
+      const upToEnd = body.slice(0, body.indexOf('}, '));
+      expect(upToEnd).not.toMatch(/[^.]\bfetchPage\(1, \[null\]\)/);
+    }
+  });
+
   it('declares the argument and the two fields on the schema', () => {
     expect(SCHEMA).toMatch(/getTestSetDocuments\(testSetId: String!.*search: String\)/);
     expect(SCHEMA).toMatch(/^\s*matchCount: Int$/m);

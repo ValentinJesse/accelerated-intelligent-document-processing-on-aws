@@ -64,6 +64,7 @@ import AddDocumentsModals, { type AddDocumentsMode } from './AddDocumentsModals'
 import PublishVersionModal, { type PublishVersionInput } from './PublishVersionModal';
 import RemoveDocumentsModal from './RemoveDocumentsModal';
 import type { TestSetDocumentSectionRef } from './GroundTruthVisualEditor';
+import { createLatestResponseGuard } from './latestResponseOnly';
 
 const client = generateClient();
 const logger = new ConsoleLogger('TestSetDetail');
@@ -497,11 +498,23 @@ const TestSetDetail = (): React.JSX.Element => {
   /** Progress of an add in flight, from any of the three sources. */
   const [arrivalNotice, setArrivalNotice] = useState<{ type: 'info' | 'success' | 'error'; text: string } | null>(null);
   const arrivalTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /**
+   * Lets only the newest document fetch render its reply. The search box issues a
+   * request per settled keystroke and the replies do not arrive in order; the
+   * reasoning and the measurements are in `latestResponseOnly.ts`.
+   *
+   * A ref rather than state: it is read inside an async closure that must see the
+   * latest value, and claiming a ticket must not re-render.
+   */
+  const responseGuard = useRef(createLatestResponseGuard()).current;
   const { available: generatorAvailable, getJobStatus } = useSyntheticDataGenerator();
 
   const fetchPage = useCallback(
     async (pageIndex: number, tokens: (string | null)[]) => {
       if (!testSetId) return;
+      // Claim this fetch as the current one. Anything that comes back after a
+      // later fetch has started is discarded below rather than rendered.
+      const isCurrentFetch = responseGuard.claim();
       setIsLoading(true);
       setError(null);
       // Rows may be gone or renumbered after any refetch, so a selection made
@@ -520,6 +533,15 @@ const TestSetDetail = (): React.JSX.Element => {
             search: searchText || undefined,
           },
         });
+        // A superseded reply is thrown away. Without this the rows are whichever
+        // reply lands last, and the ordering is actively against us: the search
+        // box issues one request per settled keystroke, and a broad search is
+        // SLOWER than a narrow one, because every document it returns is hydrated
+        // with a read per section. So "0" (500 matches, 50 rows to hydrate)
+        // routinely lands after "0063" (1 match) and replaces the one match with
+        // page 1 of almost the whole set — the search looking like it reset
+        // itself a moment after working.
+        if (!isCurrentFetch()) return;
         const page = response.data?.getTestSetDocuments;
         setDocuments((page?.documents ?? []) as TestSetDocumentItem[]);
         setHasMore(Boolean(page?.nextToken));
@@ -543,13 +565,35 @@ const TestSetDetail = (): React.JSX.Element => {
         }
       } catch (err) {
         logger.error('Error loading test set documents:', err);
-        setError('Failed to load test set documents. Please try again.');
+        // Same reasoning as the success path: a superseded request's failure must
+        // not put an error banner over a later request that worked.
+        if (isCurrentFetch()) {
+          setError('Failed to load test set documents. Please try again.');
+        }
       } finally {
-        setIsLoading(false);
+        // Only the current request owns the spinner. An earlier one clearing it
+        // would report "loaded" while the request whose rows will actually be
+        // shown is still in flight.
+        if (isCurrentFetch()) setIsLoading(false);
       }
     },
     [testSetId, searchText],
   );
+
+  /**
+   * The latest `fetchPage`, for the two arrival/generation polls below.
+   *
+   * Those create a `setInterval` once and their callback would otherwise keep
+   * calling the `fetchPage` that existed when the interval started — which closes
+   * over the search in force at *that* moment. A search typed while an add or a
+   * generation is in flight was therefore thrown away by the next poll, which
+   * refetched unfiltered: the same symptom as a lost search, reached by a
+   * different route. Click handlers are rebuilt every render and so are fine.
+   */
+  const fetchPageRef = useRef(fetchPage);
+  useEffect(() => {
+    fetchPageRef.current = fetchPage;
+  }, [fetchPage]);
 
   /**
    * Let the search box settle before asking the server, so a typed word is one
@@ -608,7 +652,7 @@ const TestSetDetail = (): React.JSX.Element => {
           stopArrivalWatch();
           setArrivalNotice({ type: 'success', text: `Documents are arriving — this set now has ${size} document(s).` });
           setCurrentPageIndex(1);
-          fetchPage(1, [null]);
+          fetchPageRef.current(1, [null]);
         }
       } catch (err) {
         logger.debug('Arrival poll failed; will retry:', err);
@@ -628,7 +672,7 @@ const TestSetDetail = (): React.JSX.Element => {
         stopArrivalWatch();
         setArrivalNotice({ type: 'success', text: 'Generation complete — the new documents are in this set.' });
         setCurrentPageIndex(1);
-        fetchPage(1, [null]);
+        fetchPageRef.current(1, [null]);
       } else if (job.status === 'FAILED') {
         stopArrivalWatch();
         setArrivalNotice({ type: 'error', text: `Generation failed: ${job.errorMessage || 'unknown error'}` });
