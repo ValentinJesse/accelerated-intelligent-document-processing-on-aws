@@ -72,7 +72,8 @@ read of the whole subtree.
 
 Page text is logged as it appears, and it can repeat what was typed or chosen word
 for word: a dropdown trigger that is a plain button, as Cloudscape's ``Select``
-trigger is, shows the current choice, and an autosuggest offers
+trigger is, shows the current choice, a date picker's calendar button names the
+selected date in its ``aria-label``, and an autosuggest offers
 ``Use: "<the typed value>"`` as an option. Two kinds of editor are not recognised:
 an element made editable by the ``-webkit-user-modify`` style, which accepts typing
 in Chrome while its ``isContentEditable`` stays false, and a code editor other than

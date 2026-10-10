@@ -286,8 +286,9 @@ gives the editor, for as long as nothing labels the editor element itself; Monac
 puts its own `ariaLabel` option on its hidden input instead. Any other click is
 labelled by the page's own text, which can repeat what was typed or chosen: the
 current choice on a dropdown's trigger button (Cloudscape's Select trigger is a
-plain button), a filter token, or an autosuggest option reading `Use: "…"` with
-the typed value in it.
+plain button), a date picker's calendar button, whose label names the selected
+date, a token for a chosen option or filter, or an autosuggest option reading
+`Use: "…"` with the typed value in it.
 
 A click made while the recorder is paused is logged with no label and no position,
 and `render` leaves it out of the video and the click table, so a `pause` around a
