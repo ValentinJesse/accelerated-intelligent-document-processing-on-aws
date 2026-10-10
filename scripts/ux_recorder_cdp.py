@@ -65,10 +65,11 @@ caption, the ``value`` attribute the page set (``alt`` for an image).
 
 Any other element keeps its ``aria-label`` or its text, leaving out the text of
 every field inside it, so a click on a panel that holds a filled textarea does not
-read the textarea. That text is gathered node by node, and the walk stops once it
-has the label's 60 characters or has visited 2,000 nodes, so a click on a large
-chart or table costs a bounded amount inside the mousedown listener rather than a
-read of the whole subtree.
+read the textarea. That text is gathered node by node. The walk stops once it has
+the label's 60 characters or has visited 2,000 nodes, and it queues no more of an
+element's children than it has visits left, because a child past that point could
+never be reached. So a click on a large chart or table reads a bounded part of it
+inside the mousedown listener rather than the whole subtree.
 
 Page text is logged as it appears, and it can repeat what was typed or chosen word
 for word: a dropdown trigger that is a plain button, as Cloudscape's ``Select``
@@ -593,7 +594,7 @@ CURSOR_OVERLAY_JS = r"""
       if (node.nodeType === 3) {
         text = (text + node.nodeValue).replace(/\s+/g, ' ');
       } else if (node.nodeType === 1 && !node.matches(FIELD)) {
-        for (let i = node.childNodes.length - 1; i >= 0; i -= 1) { pending.push(node.childNodes[i]); }
+        for (let i = Math.min(node.childNodes.length, budget) - 1; i >= 0; i -= 1) { pending.push(node.childNodes[i]); }
       }
     }
     return text.trimStart().slice(0, LABEL_LENGTH);

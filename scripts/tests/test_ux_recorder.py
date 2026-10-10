@@ -576,11 +576,21 @@ class Document {
   }
 }
 
+const beyondReach = (node) => {
+  if (armed) { failures.push('took a child the walk had no visits left to reach'); }
+  return node;
+};
+
 const build = (doc, spec, refs) => {
   if (typeof spec === 'string') { return new TextNode(spec); }
   if (spec.trap) { return new Trap(); }
   const el = new Element(doc, spec.tag, spec.attrs, spec.props);
-  spec.children.forEach((child) => el.appendChild(build(doc, child, refs)));
+  spec.children.forEach((child, index) => {
+    const node = el.appendChild(build(doc, child, refs));
+    if (child.unreachable) {
+      Object.defineProperty(el.childNodes, index, { enumerable: true, get: () => beyondReach(node) });
+    }
+  });
   if (spec.ref) { refs[spec.ref] = el; }
   return el;
 };
@@ -967,6 +977,17 @@ CLICK_SCENARIOS = {
             )
         ]
     },
+    "wider-than-the-walk": {
+        "body": [
+            element(
+                "div",
+                *[element("span") for _ in range(WALK_LIMIT - 2)],
+                "Last reachable",
+                {"trap": True, "unreachable": True},
+                ref="hit",
+            )
+        ]
+    },
     "menuitemcheckbox": item("menuitemcheckbox"),
     "menuitemradio": item("menuitemradio"),
     "tree-item": item("treeitem"),
@@ -1084,6 +1105,10 @@ class TestClickLabels:
     def test_a_container_without_text_is_walked_only_so_far(self, clicks):
         payload = click_payload(clicks, "wide-container")
         assert payload["target"] == 'div ""'
+
+    def test_a_wide_container_is_read_only_as_far_as_the_walk_can_reach(self, clicks):
+        payload = click_payload(clicks, "wider-than-the-walk")
+        assert payload["target"] == 'div "Last reachable"'
 
     @pytest.mark.parametrize("role", ["menuitemcheckbox", "menuitemradio"])
     def test_a_click_inside_a_checkable_menu_item_is_interactive(self, clicks, role):
