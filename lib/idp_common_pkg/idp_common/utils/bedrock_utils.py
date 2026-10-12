@@ -421,6 +421,44 @@ def is_input_token_overflow(error: BaseException) -> bool:
     return False
 
 
+#: ``stopReason`` values that mean the model stopped because it ran out of OUTPUT
+#: budget rather than because it finished answering.
+#:
+#: ``max_tokens`` is Bedrock Converse. ``incomplete`` and ``max_output_tokens`` are
+#: what ``bedrock.openai_responses`` maps the OpenAI Responses ``status`` onto, so
+#: the matcher holds across model families rather than only for Anthropic models.
+OUTPUT_TRUNCATION_STOP_REASONS = ("max_tokens", "max_output_tokens", "incomplete")
+
+
+def is_output_token_truncation(response: object) -> bool:
+    """True if ``response`` says the model hit its OUTPUT token ceiling.
+
+    The opposite direction from :func:`is_input_token_overflow`, which reads an
+    *exception*: this reads a **successful** response that is nonetheless short.
+    That is the dangerous shape, because nothing raises — the call returns 200, the
+    text is well formed as far as it goes, and a list that stopped in the middle is
+    indistinguishable from a list that was always that long.
+
+    Accepts either the metering-wrapped envelope ``idp_common.bedrock.invoke_model``
+    returns (``{"response": ..., "metering": ...}``) or the bare Converse response,
+    because callers hold one or the other and a matcher that silently answers
+    ``False`` for the wrong shape is worse than no matcher.
+
+    ⚠️ A ``False`` here is **not** evidence that the output is complete. A model
+    that abbreviates a long list on its own stops with ``end_turn`` and a
+    syntactically complete answer; measured on a 17-page, 800-row statement, the
+    short runs used ~2.3k output tokens where the complete runs on the same model
+    used ~38.5k, so no ceiling was involved (#1361). Row-level completeness is
+    judged separately — see ``ExtractionService._build_extraction_issues``.
+    """
+    if not isinstance(response, dict):
+        return False
+    raw = response.get("response", response)
+    if not isinstance(raw, dict):
+        raw = response
+    return raw.get("stopReason") in OUTPUT_TRUNCATION_STOP_REASONS
+
+
 # Default retryable error codes (matched against ClientError codes and exception
 # messages).
 #

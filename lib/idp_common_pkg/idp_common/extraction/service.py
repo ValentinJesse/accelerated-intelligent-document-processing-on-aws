@@ -70,6 +70,7 @@ from idp_common.extraction.validation import (
     validate_extraction,
 )
 from idp_common.models import Document, Section
+from idp_common.utils.bedrock_utils import is_output_token_truncation
 from idp_common.utils.few_shot_example_builder import (
     build_few_shot_extraction_examples_content,
 )
@@ -2317,6 +2318,14 @@ class ExtractionService:
     #: builder and the ``_save_results`` tail cannot drift apart.
     ROW_SHORTFALL_CODE = "extraction_rows_below_ocr_estimate"
 
+    #: The ``ProcessingIssue.code`` for a response the model did not finish —
+    #: certain evidence, as opposed to ``ROW_SHORTFALL_CODE``'s OCR estimate.
+    #: ``warning`` severity, always: the row-shortfall code is the one
+    #: ``extraction.row_shortfall_action`` governs, and widening that knob to cover
+    #: this code too would fail runs that complete today on a deployment that has
+    #: already opted into ``fail``.
+    OUTPUT_TRUNCATED_CODE = "extraction_output_truncated"
+
     def _row_shortfall_action(self) -> str:
         """``extraction.row_shortfall_action`` — ``"fail"`` or ``"warn"``.
 
@@ -3674,6 +3683,10 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
           deterministic table parser is built for exactly this.
         - **Below-threshold population** (``extraction_sparse``, info): reuses the
           existing ``population_check`` heuristic when present.
+        - **A response the model did not finish** (``extraction_output_truncated``,
+          warning): ``metadata["output_truncated"]``, set from the response's own
+          ``stopReason`` or from the JSON repair reader. The only certain signal
+          here; the others are estimates.
 
         Best-effort and advisory: a genuinely empty section (no such data in the
         document) will also flag, so these are warning/info, never hard errors.
@@ -3756,6 +3769,74 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
                     ),
                     section_id=section_id,
                     details={"empty_list_fields": empty_lists, "agentic": is_agentic},
+                )
+            )
+
+        # 1b) The model's output was cut off mid-answer.
+        #
+        # This is the one signal here that is not a heuristic: either the response
+        # carried a ``stopReason`` saying the output ceiling was reached, or the
+        # text did not parse and the repair reader found an unterminated structure.
+        # Both mean the answer stops in the middle, so every list in it is a prefix
+        # of what the model was producing.
+        #
+        # It was ALREADY detected and then went nowhere: ``output_truncated`` was
+        # recorded in the section's metadata and read by no report, no status path
+        # and no UI, so a run whose output was demonstrably cut off completed with
+        # zero processing issues (#1361). Reporting it here is what makes the loss
+        # visible.
+        #
+        # Deliberately independent of ``extraction_rows_below_ocr_estimate``, and
+        # both can fire on one section. That check needs OCR that emits Markdown
+        # tables (Textract ``TABLES`` or BDA) and a table whose width matches the
+        # list item, and it is silent above its half ratio; this one needs neither
+        # OCR nor a list. Where they overlap they say different things — this names
+        # the cause, that one counts the rows — and suppressing either would remove
+        # evidence from a report that has room for both.
+        if metadata.get("output_truncated"):
+            affected = [name for name in array_fields if extracted_fields.get(name)]
+            rec = (
+                " Simple extraction returns one response per section, so a section "
+                "whose answer does not fit in one response loses the tail; use "
+                "Advanced (agentic) extraction, which shards the section across "
+                "requests, or split the document."
+                if not is_agentic
+                else " Reduce the rows a single shard is asked for "
+                "(extraction.agentic max_pages_per_shard) or split the document."
+            )
+            lists_clause = (
+                f" Affected list field(s): {', '.join(affected)}." if affected else ""
+            )
+            issues.append(
+                ProcessingIssue(
+                    stage="extraction",
+                    severity="warning",
+                    code=self.OUTPUT_TRUNCATED_CODE,
+                    message=(
+                        "The model's extraction response was cut off before it "
+                        "finished, so the result holds only the part that was "
+                        f"emitted.{lists_clause} Scalar fields and the rows that "
+                        "did arrive can still be perfectly correct, so no accuracy "
+                        f"or confidence signal flags this.{rec}"
+                    ),
+                    root_cause=(
+                        f"{'agentic' if is_agentic else 'traditional'} extraction "
+                        f"with model "
+                        f"{self._pending_extraction_model or self.config.extraction.model}; "
+                        f"response truncated before completion"
+                        + (
+                            f"; repaired by {metadata.get('repair_method')}"
+                            if metadata.get("output_repaired")
+                            else ""
+                        )
+                    ),
+                    section_id=section_id,
+                    details={
+                        "truncated_list_fields": affected,
+                        "output_repaired": bool(metadata.get("output_repaired")),
+                        "repair_method": metadata.get("repair_method"),
+                        "agentic": is_agentic,
+                    },
                 )
             )
 
@@ -6194,7 +6275,23 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             # Parse response into JSON
             extracted_fields = {}
             parsing_succeeded = True
-            output_truncated = False
+            # Did the model stop because it ran out of OUTPUT budget? Read from the
+            # response's own ``stopReason`` BEFORE parsing, because a ceiling can be
+            # hit at a point where the text still parses — a complete JSON object
+            # followed by commentary that was cut off, or a repair that succeeds —
+            # and the parse-failure branch below is then never reached. The two
+            # sources are ORed rather than assigned: whichever notices first wins.
+            output_truncated = is_output_token_truncation(response_with_metering)
+            if output_truncated:
+                logger.warning(
+                    "Section %s: extraction response stopped at the model's output "
+                    "token ceiling (stopReason=%s) — the result is truncated and "
+                    "any list in it is incomplete.",
+                    getattr(section_info, "section_id", None),
+                    (response_with_metering.get("response") or {}).get("stopReason")
+                    if isinstance(response_with_metering.get("response"), dict)
+                    else None,
+                )
             output_repaired = False
             repair_method = None
             instance_count = 0
@@ -6252,7 +6349,12 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
 
                     # Attempt to repair truncated JSON
                     repaired_data, repair_info = repair_truncated_json(extracted_text)
-                    output_truncated = repair_info.get("was_truncated", False)
+                    # OR, never assign: the stopReason read above is the stronger
+                    # evidence of the two (the model said so), and the repair
+                    # heuristic answering False must not erase it.
+                    output_truncated = output_truncated or repair_info.get(
+                        "was_truncated", False
+                    )
 
                     if repaired_data:
                         # Repair succeeded
