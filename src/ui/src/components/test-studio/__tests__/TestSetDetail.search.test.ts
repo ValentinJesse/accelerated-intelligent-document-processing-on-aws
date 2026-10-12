@@ -81,7 +81,10 @@ describe('searching a test set from its detail page', () => {
    * quotes a needle nothing has answered about.
    */
   it('keys the empty state on the answered search, not on the box', () => {
-    expect(DETAIL).toContain('{searchText\n                      ? `No document in this test set matches "${searchText}".`');
+    // Two distinctive substrings rather than one span of source: embedding the
+    // exact JSX indentation would make any prettier reflow of this block a test
+    // failure with no behaviour change.
+    expect(DETAIL).toMatch(/No document in this test set matches "\$\{searchText\}"/);
     expect(DETAIL).not.toMatch(/No document in this test set matches "\$\{filterText\}"/);
   });
 

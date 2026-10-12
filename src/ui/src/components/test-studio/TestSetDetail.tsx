@@ -10,7 +10,7 @@
  * corresponding view on that page.
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -503,10 +503,12 @@ const TestSetDetail = (): React.JSX.Element => {
    * request per settled keystroke and the replies do not arrive in order; the
    * reasoning and the measurements are in `latestResponseOnly.ts`.
    *
-   * A ref rather than state: it is read inside an async closure that must see the
-   * latest value, and claiming a ticket must not re-render.
+   * `useMemo` rather than `useRef(createLatestResponseGuard())`: the latter calls
+   * the factory on every render and throws away every result but the first, which
+   * reads as if a fresh guard were wanted each time. One guard per mounted table is
+   * what is meant — two tables must not cancel each other's requests.
    */
-  const responseGuard = useRef(createLatestResponseGuard()).current;
+  const responseGuard = useMemo(createLatestResponseGuard, []);
   const { available: generatorAvailable, getJobStatus } = useSyntheticDataGenerator();
 
   const fetchPage = useCallback(
@@ -609,10 +611,19 @@ const TestSetDetail = (): React.JSX.Element => {
    * over `searchText`, so a new search gives this effect a new identity. Page 1 is
    * the only page a new search can land on: the tokens held are offsets into the
    * previous search's matches, which say nothing about this one's.
+   *
+   * The match count and the truncation flag are dropped here rather than left to
+   * be replaced when the reply lands. They describe the *previous* needle, and the
+   * reply is a debounce plus a round trip away — so leaving them would caption the
+   * table "(50 of 73 matching)" while the search that produced 73 is no longer the
+   * one in the box. That is the same statement-about-stale-data this page is being
+   * fixed for, one layer up.
    */
   useEffect(() => {
     setPageTokens([null]);
     setCurrentPageIndex(1);
+    setMatchCount(null);
+    setSearchTruncated(false);
     fetchPage(1, [null]);
   }, [testSetId, fetchPage]);
 
@@ -1020,6 +1031,10 @@ const TestSetDetail = (): React.JSX.Element => {
   const tableCounter = (() => {
     if (isLoading && filteredDocs.length === 0) return undefined;
     if (searchText) {
+      // No count while this search's own count is still in flight. The counts are
+      // cleared when the needle changes, so `null` here means "not answered yet",
+      // and counting the rows instead would caption the previous search's page.
+      if (matchCount === null && isLoading) return undefined;
       // A search whose count the server did not return — only possible against an
       // older resolver — falls back to counting the page rather than claiming a total.
       if (matchCount === null) return `(${filteredDocs.length})`;

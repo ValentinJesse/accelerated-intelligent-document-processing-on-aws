@@ -9566,11 +9566,11 @@ class TestDocumentSearchCoversTheWholeSet:
     ):
         """Spending the whole budget is not the same as leaving keys unread.
 
-        The budget is spent per LIST page, so a set that ends exactly as the budget
-        runs out has been scanned in full. Reporting that as truncated captions an
-        exact count as "20+" and tells the user to narrow a search that already saw
-        everything — a false warning, and the one the first draft of this gave on
-        every set small enough to list in one call.
+        A scan that exhausts the prefix on the same page it reaches the budget is
+        complete: S3 reports `IsTruncated` false, so the count is exact rather than
+        a floor. Captioning it "20+" would state a lower bound where an exact count
+        is known, and would tell the user to narrow a search that already saw the
+        whole set. Every set small enough to list in one call takes this path.
         """
         table, s3 = labeling_env
         self._seed(table, s3, [f"statement-{i:02d}.pdf" for i in range(20)])

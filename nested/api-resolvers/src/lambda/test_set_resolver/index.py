@@ -4800,10 +4800,16 @@ def _document_row(obj, relative_name):
 
 
 # How many S3 keys one search will read before it stops and says so. At the page
-# size below this is 50 LIST calls — well under a second of listing, and larger
-# than any test set this has been built for. Past it the returned page is still
-# correct; `matchCount` becomes a lower bound and `searchTruncated` says that it
-# is.
+# size below that is 50 **sequential** LIST calls at the worst case — not free, and
+# the reason there is a budget at all rather than an unbounded walk; the bound is
+# well above any test set this has been built for, so the worst case is not the
+# ordinary one. Past it the returned page is still correct; `matchCount` becomes a
+# lower bound and `searchTruncated` says that it is.
+#
+# Note which direction the cost runs: a broad needle is *slower* to answer than a
+# narrow one, because every row the page returns costs one S3 GET per baseline
+# section in ``_attach_label_metadata`` while matching itself only reads key names.
+# If that is ever reported as a bug, this is why.
 _SEARCH_SCAN_KEY_BUDGET = 50_000
 
 # Keys per LIST call: S3's maximum, and the paginator's default. Named because the

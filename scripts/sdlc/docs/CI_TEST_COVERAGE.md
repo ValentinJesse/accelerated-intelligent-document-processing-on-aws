@@ -293,6 +293,9 @@ catches it.
   - **Slack** — the `integration_tests` job posts the result and the deploy
     summary to the team channel, but only on the **scheduled** run. Needs the
     masked `SLACK_WEBHOOK_URL` CI variable; absent, it logs one line and skips.
+    Three verdicts, not two: ✅ PASSED, ❌ FAILED, and **⚠️ UNVERIFIED** when the
+    monitor handed off before the pipeline reached a terminal state — the job
+    exits 0 in that case as well, so a green job is two different claims.
   - **Email** — the *Pipeline status emails* integration sends pipeline failures
     on the default branch to the team distribution list. ⚠️ It fires for **any**
     failed `develop` pipeline, not just the nightly: GitLab cannot filter
@@ -321,21 +324,44 @@ runs Claude Code (via Bedrock) over the MR diff with
 `allow_failure: true`, has `needs: []` so it does not wait for `static_checks`, and
 it is deliberately absent from `test_ci_gate_parity.py`'s `SHARED_GATES` — a
 model's opinion must not decide whether code merges, and a Bedrock throttle must
-not red-line an MR. It is **GitLab-only** because the AWS credentials are here; a
-GitHub equivalent would need its own OIDC role.
+not red-line an MR.
+
+**The same reviewer also runs on GitHub**, as `ai_pr_review` in
+`.github/workflows/ai-pr-review.yml` (`scripts/sdlc/ai_mr_review.py --forge
+github`). It is advisory there too, by a different mechanism: GitHub has no
+`allow_failure`, so what keeps it advisory is that its status-check context is
+pinned in `MUST_STAY_ADVISORY` in
+`scripts/tests/test_check_branch_protection.py` and absent from `SHARED_GATES`.
+Three differences are worth reading before relying on either side:
+
+| | GitLab | GitHub |
+|---|---|---|
+| AWS credential | the integration-test role `idp-sdlc-GitLab`, assumed by the runner fleet's `gitlab-runners-prod` role and gated on `GitLab:Group`/`GitLab:Project` session tags (`scripts/sdlc/cfn/credential-vendor.yml`) | a **Bedrock-only** role assumed via GitHub OIDC (`scripts/sdlc/cfn/github-oidc-review-role.yml`); ARN in the `AI_REVIEW_ROLE_ARN` repository variable |
+| Posting token | `GITLAB_REVIEW_TOKEN`, a project access token that has to be provisioned — `CI_JOB_TOKEN` cannot create notes | the built-in `GITHUB_TOKEN` with `pull-requests: write`; nothing to provision |
+| Fork contributions | not reviewed — masked variables are absent from a fork pipeline | reviewed by the **hourly `schedule`**, which is triggered by the repository rather than by the contribution and so holds the credentials regardless of origin |
+
+⚠️ **GitHub reads `on: schedule` from the workflow file on the *default* branch,
+which is `main`.** Until `ai-pr-review.yml` reaches `main` the cron never fires
+and says nothing, so fork coverage is silently absent. The `pull_request`
+trigger is unaffected and works from `develop`.
 
 ⚠️ **It runs automatically, and it costs real money per run.** A 5,400-line MR
 measured **$3.42** in CI ($6.12 locally), and reviews are idempotent per head SHA,
 so a new push means a new paid review. Three things bound that and all three must
-stay: `interruptible: true` (a push mid-review cancels it, so a burst costs about
-one review rather than one per push — this is the main protection and it is one
-line), Draft MRs excluded (the WIP phase, where pushes are frequent, is free), and
-exactly one triggering rule with **no scheduled sweep** — the script supports one
-(`--all-open`) but enabling it applies the per-push multiplier to the whole open
-queue. The unbounded residual is pushes spaced further apart than a review takes
-(~9 min in CI); if that dominates, add a cooldown in `ai_mr_review.py` rather than
-reverting to a manual button. Pinned by
-`test_the_automatic_trigger_keeps_its_cost_bounds`.
+stay. The first is the per-push multiplier and is spelled differently on each
+platform: `interruptible: true` on GitLab, `concurrency: cancel-in-progress` on
+GitHub — a push mid-review cancels it, so a burst costs about one review rather
+than one per push. This is the main protection and it is one line on either side.
+The second is that drafts are excluded, so the WIP phase, where pushes are
+frequent, is free. The third differs in substance: GitLab has exactly one
+triggering rule and **no scheduled sweep**, because a sweep there would apply the
+per-push multiplier to the whole open queue; GitHub does run one, bounded to
+`--max-mrs 3` per tick, and it is affordable only because the per-head-SHA marker
+makes a tick with no new head cost nothing. The unbounded residual on both is
+pushes spaced further apart than a review takes (~9 min in CI); if that dominates,
+add a cooldown in `ai_mr_review.py` rather than reverting to a manual button.
+Pinned by `test_the_automatic_trigger_keeps_its_cost_bounds` and
+`test_the_github_trigger_keeps_its_cost_bounds`.
 
 Automatic also means no human is in the loop before a model reads
 author-controlled text, which is why the sandbox note below matters.
@@ -1070,7 +1096,34 @@ time-capped. The GitLab monitor that watches it has credentials capped at 1 hour
 keep watching to ~110 min. If a run outlives that, the monitor hands off
 gracefully — the pipeline finishes on its own and the authoritative result still
 arrives via the S3 summary + SNS email. A failure detected at handoff fails the
-GitLab job (it isn't masked by a green handoff).
+GitLab job (it isn't masked by a green handoff), and a handoff with no verdict
+yet posts to Slack as **⚠️ UNVERIFIED** rather than ✅ PASSED, because the job
+exits 0 either way and "12/12 green" and "nobody watched the end" must not read
+the same.
+
+⚠️ **The 1h cap governs `after_script` too, and it cannot refresh.** The
+runner's credential vendor mints the job's credentials *before* the job starts,
+and `after_script` — which fetches the CodeBuild logs, pulls the S3 summary and
+copies out the ZAP report — runs on those, not on the monitor's refreshed
+session: that refresh rebinds this process's boto3 clients only. `after_script`
+cannot re-assume the role itself either, since `sts:AssumeRole` needs live
+credentials to call and by then it has none. So the **monitor** writes each
+session it mints to `aws_after_script_creds.env` (at startup and on every
+50-minute refresh, so the file always has ≥10 min of life left) and
+`after_script` sources it before its first `aws` call. The file is `0600`, is
+excluded from the deployment zip, is not an artifact, is gitignored, and is
+removed as the job's last step.
+
+Without that handover, whether the logs were captured at all was decided by how
+long the deploy took, and the failure was mislabelled. The 2026-10-11 nightly
+(job 30872567) went terminal `Succeeded` at 59 min with 12/12 tests passing, ran
+62.6 min wall clock, and spent all 12 `list-action-executions` attempts
+re-sending an expired token; the three nights before it ran 58.4–58.5 min and
+resolved on the first attempt. Because the loop sent stderr to `/dev/null`, both
+the artifact and the Slack post said "after 12 attempts (~60s)", which reads as
+the eventual-consistency race the retry loop exists for. The loop now keeps its
+stderr, stops immediately on a credential error instead of retrying one, and
+names which of the two failures occurred.
 
 ---
 
@@ -1528,6 +1581,14 @@ but revisit:
 - [x] **Mid-run monitor credential refresh** — the monitor refreshes its
       1h-capped credentials to watch long runs to ~110 min. *(Needs a live >1h
       run to fully validate.)*
+- [x] **`after_script` credential handover** — the monitor persists each session
+      it mints so the log/summary capture no longer depends on the job
+      finishing inside its own 1h credential window. Pinned by
+      `scripts/sdlc/tests/test_after_script_log_capture.py` and
+      `test_credential_refresh.py`. *(Needs a live >1h run to fully validate.)*
+- [x] **Credential failures are not reported as eventual consistency** — the
+      CodeBuild-id resolve loop keeps its stderr, stops rather than retrying an
+      expired token, and the artifact names which failure it was.
 
 ---
 
