@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import React, { useState, useEffect, useRef, memo, useCallback, useImperativeHandle } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, memo, useCallback, useImperativeHandle } from 'react';
 import { Box, Spinner, Button } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
 import generateS3PresignedUrl from './generate-s3-presigned-url';
@@ -28,9 +28,53 @@ interface BoundingBoxProps {
   containerRef?: React.RefObject<HTMLDivElement | null>;
   zoomLevel?: number;
   panOffset?: { x: number; y: number };
+  /** Clockwise page rotation in degrees; see {@link rotateBoundingBox}. */
+  rotation?: number;
   color?: string;
   label?: string | null;
 }
+
+/** A bounding box in normalised (0–1) page coordinates. */
+export interface NormalisedBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Map a bounding box from page space onto the rotated page.
+ *
+ * Overlays are absolutely positioned, axis-aligned divs measured against the
+ * image's on-screen rect, and that rect already reports the *transposed*
+ * extent of a quarter-turned image. A quarter turn also keeps an axis-aligned
+ * box axis-aligned, so the whole correction is a corner remap plus a
+ * width/height swap at 90° and 270° — without it a highlighted field lands on
+ * an unrelated part of a rotated page.
+ *
+ * Coordinates are normalised (0–1) with `left`/`top` measured from the top-left
+ * and `rotation` positive clockwise, matching CSS `rotate()`.
+ */
+export const rotateBoundingBox = (bbox: NormalisedBox, rotation: number): NormalisedBox => {
+  // Fold any angle onto one of the four quarter turns: negatives, multiples of
+  // 360 and the 270-vs--90 spelling of a left turn all have to agree.
+  const turns = ((Math.round(rotation / 90) % 4) + 4) % 4;
+  switch (turns) {
+    case 1: // 90° clockwise: the page's left edge becomes the top edge.
+      return { left: 1 - (bbox.top + bbox.height), top: bbox.left, width: bbox.height, height: bbox.width };
+    case 2:
+      return {
+        left: 1 - (bbox.left + bbox.width),
+        top: 1 - (bbox.top + bbox.height),
+        width: bbox.width,
+        height: bbox.height,
+      };
+    case 3: // 270° clockwise: the page's top edge becomes the left edge.
+      return { left: bbox.top, top: 1 - (bbox.left + bbox.width), width: bbox.height, height: bbox.width };
+    default:
+      return bbox;
+  }
+};
 
 export const BoundingBox = memo(
   ({
@@ -41,6 +85,7 @@ export const BoundingBox = memo(
     containerRef,
     zoomLevel = 1,
     panOffset = { x: 0, y: 0 },
+    rotation = 0,
     color = 'red',
     label = null,
   }: BoundingBoxProps): React.JSX.Element | null => {
@@ -131,7 +176,9 @@ export const BoundingBox = memo(
         };
       }
       return undefined;
-    }, [zoomLevel, panOffset, imageRef, containerRef, page, currentPage]);
+      // `rotation` belongs here for the same reason zoom and pan do: it changes
+      // the rect this reads, including swapping its width and height.
+    }, [zoomLevel, panOffset, rotation, imageRef, containerRef, page, currentPage]);
 
     if (page !== currentPage || !box || !dimensions.transformedWidth) {
       return null;
@@ -142,7 +189,7 @@ export const BoundingBox = memo(
     }
 
     const padding = 5;
-    const bbox = box.boundingBox;
+    const bbox = rotateBoundingBox(box.boundingBox, rotation);
 
     // Calculate position and size directly on the transformed image
     const finalLeft = bbox.left * dimensions.transformedWidth + dimensions.transformedOffsetX - padding;
@@ -247,6 +294,8 @@ const PageImageViewer = ({
   const [loadingImages, setLoadingImages] = useState(true);
   const [currentPage, setCurrentPage] = useState<string | null>(initialPage || (pageIds.length > 0 ? pageIds[0] : null));
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [rotation, setRotation] = useState(0);
+  const [rotationFitScale, setRotationFitScale] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
@@ -336,6 +385,70 @@ const PageImageViewer = ({
     setZoomLevel((prev) => Math.max(prev / 1.25, 0.25));
   }, []);
 
+  // Rotation controls. Kept in 0–359 rather than going negative so the readout
+  // never reads "-90°", and sticky across page navigation like zoom and pan —
+  // a scanned document is usually misoriented the same way on every page.
+  const handleRotateLeft = useCallback(() => setRotation((prev) => (prev + 270) % 360), []);
+  const handleRotateRight = useCallback(() => setRotation((prev) => (prev + 90) % 360), []);
+
+  /**
+   * A quarter-turned page no longer fits the box the browser laid it out in:
+   * the image is fitted to the container by `maxWidth`/`maxHeight`, and at
+   * 90°/270° its on-screen footprint is that layout box transposed, which
+   * overflows a container that is not square — the Test Studio editor is a
+   * half-width column, so a portrait page rotated there would lose a third of
+   * its width to `overflow: hidden`. Measuring the shortfall and folding it
+   * into the transform is what makes "rotate" mean "rotate and still fit", the
+   * way a document reader does it, instead of "rotate and crop".
+   */
+  const measureRotationFit = useCallback(() => {
+    const img = imageRef.current;
+    const container = imageContainerRef.current;
+    // At 0°/180° the footprint is the layout box, which already fits.
+    if (rotation % 180 === 0) {
+      setRotationFitScale(1);
+      return;
+    }
+    if (!img || !container) return;
+    // Layout box, not getBoundingClientRect(): the rect is already transformed,
+    // so feeding it back in would compound the scale on every measurement.
+    const w = img.offsetWidth;
+    const h = img.offsetHeight;
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+    // Keep the last good value rather than deriving one from a container that
+    // has no layout yet (or is hidden): a zero here would scale the page to
+    // nothing and divide the pan offset by it, blanking the viewer.
+    if (!w || !h || !containerWidth || !containerHeight) return;
+    // Clamped at 1 — the browser's own fit does not upscale an image smaller
+    // than its container, and neither should rotating it.
+    const fit = Math.min(containerWidth / h, containerHeight / w, 1);
+    if (Number.isFinite(fit) && fit > 0) setRotationFitScale(fit);
+  }, [rotation]);
+
+  // Re-fit on rotation and on page change (pages need not share a shape).
+  // Before paint, not after: the measurement reads the *layout* box, which the
+  // transform does not affect, so it is already correct here — and taking it
+  // after paint would show one frame of the rotated page at its unfitted size,
+  // clipped by the container, before it settled.
+  useLayoutEffect(() => {
+    measureRotationFit();
+  }, [measureRotationFit, currentPage, pageImages]);
+
+  // Container resizes are a separate, post-layout concern (the editor's columns
+  // are fluid).
+
+  useEffect(() => {
+    const container = imageContainerRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => measureRotationFit());
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [measureRotationFit]);
+
+  // The scale actually applied: the user's zoom times the rotation re-fit.
+  const effectiveScale = zoomLevel * rotationFitScale;
+
   // Pan controls
   const panStep = 50;
   const handlePanLeft = useCallback(() => setPanOffset((prev) => ({ ...prev, x: prev.x + panStep })), []);
@@ -345,6 +458,7 @@ const PageImageViewer = ({
   const handleResetView = useCallback(() => {
     setZoomLevel(1);
     setPanOffset({ x: 0, y: 0 });
+    setRotation(0);
   }, []);
 
   // Handle mouse wheel for zoom (matches the section Visual Editor: plain wheel zooms)
@@ -411,39 +525,56 @@ const PageImageViewer = ({
    * and the image walks off toward a corner on each call.
    *
    * The image is scaled about its centre, so a point sitting `d` px from that
-   * centre unzoomed sits `d * zoom` px from it once scaled — hence the single
-   * multiplication by targetZoom below. `panOffset` is in screen px (the render
-   * divides it back out by the zoom inside translate()).
+   * centre unzoomed sits `d * scale` px from it once scaled — hence the single
+   * multiplication by the target scale below. `panOffset` is in screen px (the
+   * render divides it back out by the scale inside translate()).
+   *
+   * Rotation is applied to `d` before scaling, mirroring the transform's own
+   * order: the field's offset from the page centre turns with the page, so
+   * without this the view centres on wherever that offset happens to point on
+   * an unrotated page.
    */
-  const zoomToField = useCallback((geometry: BoundingBoxGeometry) => {
-    const bbox = geometry?.boundingBox;
-    if (!bbox || !imageRef.current || !imageContainerRef.current) return;
+  const zoomToField = useCallback(
+    (geometry: BoundingBoxGeometry) => {
+      const bbox = geometry?.boundingBox;
+      if (!bbox || !imageRef.current || !imageContainerRef.current) return;
 
-    const targetZoom = 2.0;
-    setZoomLevel(targetZoom);
+      const targetZoom = 2.0;
+      setZoomLevel(targetZoom);
 
-    // Deferred one frame: the layout box is stable, but the browser has not yet
-    // applied the new zoom, and reading mid-transition yields a torn value.
-    requestAnimationFrame(() => {
-      const img = imageRef.current;
-      const container = imageContainerRef.current;
-      if (!img || !container) return;
+      // Deferred one frame: the layout box is stable, but the browser has not yet
+      // applied the new zoom, and reading mid-transition yields a torn value.
+      requestAnimationFrame(() => {
+        const img = imageRef.current;
+        const container = imageContainerRef.current;
+        if (!img || !container) return;
 
-      const w = img.offsetWidth;
-      const h = img.offsetHeight;
-      if (!w || !h) return;
+        const w = img.offsetWidth;
+        const h = img.offsetHeight;
+        if (!w || !h) return;
 
-      const centreX = img.offsetLeft + w / 2;
-      const centreY = img.offsetTop + h / 2;
-      const fieldU = bbox.left + bbox.width / 2;
-      const fieldV = bbox.top + bbox.height / 2;
+        const centreX = img.offsetLeft + w / 2;
+        const centreY = img.offsetTop + h / 2;
+        const fieldU = bbox.left + bbox.width / 2;
+        const fieldV = bbox.top + bbox.height / 2;
 
-      setPanOffset({
-        x: container.clientWidth / 2 - centreX - (fieldU - 0.5) * w * targetZoom,
-        y: container.clientHeight / 2 - centreY - (fieldV - 0.5) * h * targetZoom,
+        // Offset of the field from the page centre, in unscaled layout px,
+        // turned clockwise by the current rotation.
+        const radians = (rotation * Math.PI) / 180;
+        const cos = Math.cos(radians);
+        const sin = Math.sin(radians);
+        const offsetX = (fieldU - 0.5) * w;
+        const offsetY = (fieldV - 0.5) * h;
+        const targetScale = targetZoom * rotationFitScale;
+
+        setPanOffset({
+          x: container.clientWidth / 2 - centreX - (offsetX * cos - offsetY * sin) * targetScale,
+          y: container.clientHeight / 2 - centreY - (offsetX * sin + offsetY * cos) * targetScale,
+        });
       });
-    });
-  }, []);
+    },
+    [rotation, rotationFitScale],
+  );
 
   // Exposed imperatively rather than fired from an effect on activeFieldGeometry:
   // highlighting a field and zooming to it are separate gestures (single- vs
@@ -514,10 +645,20 @@ const PageImageViewer = ({
                 width: 'auto',
                 height: 'auto',
                 objectFit: 'contain',
-                transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+                // Read right to left: rotate about the centre, then translate,
+                // then scale. Rotating last (i.e. innermost) is what keeps pan
+                // aligned to the screen rather than to the page — otherwise
+                // "pan left" moves a 90°-rotated page upwards. Dividing the
+                // offset by the scale leaves pan in screen pixels, since the
+                // outer scale multiplies it straight back.
+                transform:
+                  `scale(${effectiveScale}) ` +
+                  `translate(${panOffset.x / effectiveScale}px, ${panOffset.y / effectiveScale}px) ` +
+                  `rotate(${rotation}deg)`,
                 transformOrigin: 'center center',
                 transition: 'transform 0.1s ease-out',
               }}
+              onLoad={measureRotationFit}
               onError={(e) => {
                 logger.error(`Error loading image for page ${currentPage}:`, e);
                 (e.target as HTMLImageElement).src = fallbackImage;
@@ -534,6 +675,7 @@ const PageImageViewer = ({
                 containerRef={imageContainerRef}
                 zoomLevel={zoomLevel}
                 panOffset={panOffset}
+                rotation={rotation}
               />
             )}
             {/* Additional bounding boxes */}
@@ -547,6 +689,7 @@ const PageImageViewer = ({
                 containerRef={imageContainerRef}
                 zoomLevel={zoomLevel}
                 panOffset={panOffset}
+                rotation={rotation}
                 color={bbox.color || 'blue'}
                 label={bbox.label}
               />
@@ -615,6 +758,11 @@ const PageImageViewer = ({
               boxShadow: '0 1px 4px rgba(0, 0, 0, 0.1)',
               display: 'flex',
               alignItems: 'center',
+              // Wraps rather than overflowing: the row is centred and absolutely
+              // positioned, so overflow would clip both ends and take the reset
+              // control with it.
+              flexWrap: 'wrap',
+              justifyContent: 'center',
               gap: '6px',
               fontSize: '12px',
             }}
@@ -719,6 +867,38 @@ const PageImageViewer = ({
               title="Pan Down"
             >
               ↓
+            </span>
+            <span style={{ fontWeight: 'bold', marginLeft: '4px' }}>Rotate:</span>
+            <span
+              onClick={handleRotateLeft}
+              onKeyDown={(e) => e.key === 'Enter' && handleRotateLeft()}
+              role="button"
+              tabIndex={0}
+              style={{
+                cursor: 'pointer',
+                fontSize: '14px',
+                userSelect: 'none',
+                padding: '2px 3px',
+              }}
+              title="Rotate Left 90°"
+            >
+              ↺
+            </span>
+            <span style={{ fontSize: '12px', minWidth: '30px', textAlign: 'center' }}>{rotation}°</span>
+            <span
+              onClick={handleRotateRight}
+              onKeyDown={(e) => e.key === 'Enter' && handleRotateRight()}
+              role="button"
+              tabIndex={0}
+              style={{
+                cursor: 'pointer',
+                fontSize: '14px',
+                userSelect: 'none',
+                padding: '2px 3px',
+              }}
+              title="Rotate Right 90°"
+            >
+              ↻
             </span>
             <span
               onClick={handleResetView}
