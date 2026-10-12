@@ -167,6 +167,40 @@ MODEL_MAPPINGS = {
     # direction-aware mapping, not another row here.
 }
 
+# Canada (ca-*) swaps for the shipped defaults that are not callable from
+# ca-central-1. A SEPARATE table on purpose: get_model_mapping(..., "us") walks
+# MODEL_MAPPINGS backwards over its twin rows, so a Canada row placed there would
+# rewrite a US deployment's stored id as well. This table is a one-way lookup and
+# is never reversed.
+CA_MODEL_MAPPINGS = {
+    # Twin: the Canada geo profile of the same model, processed in Canada.
+    "us.amazon.nova-lite-v1:0": "ca.amazon.nova-lite-v1:0",
+    # Rescue: Nova Pro has no inference profile in ca-central-1. Nova 2 Lite is the
+    # catalog's current Nova default for OCR, classification and evaluation, and
+    # is multimodal and cheaper.
+    "us.amazon.nova-pro-v1:0": "us.amazon.nova-2-lite-v1:0",
+    # Cohere Embed v4 is reachable from Canada only through its global. profile.
+    "us.cohere.embed-v4:0": "global.cohere.embed-v4:0",
+}
+
+# Shipped ids with no inference profile and no in-region hosting in ca-central-1
+# (verified 2026-10-11 with `aws bedrock list-inference-profiles --region
+# ca-central-1 --type-equals SYSTEM_DEFINED` and `list-foundation-models`). The
+# CA_MODEL_MAPPINGS sources are swapped away from; the rest are simply not
+# offered. us.xai.grok-4.6 has a profile in ca-central-1, so it is not listed.
+# The GPT-5.x bedrock-mantle ids are handled by _is_us_only below.
+CA_UNAVAILABLE_MODELS = {
+    "us.amazon.nova-lite-v1:0",
+    "us.amazon.nova-pro-v1:0",
+    "us.cohere.embed-v4:0",
+    "global.amazon.nova-pro-v1:0",
+    "us.meta.llama4-maverick-17b-instruct-v1:0",
+    "us.meta.llama4-scout-17b-instruct-v1:0",
+    "qwen.qwen3-vl-235b-a22b",
+    "google.gemma-3-27b-it",
+    "nvidia.nemotron-nano-12b-v2",
+}
+
 # Geo inference-profile prefixes offered only in their own region type; ids with
 # a `global.` prefix or none at all are offered everywhere.
 REGION_SCOPED_PREFIXES = ("us.", "eu.", "ca.")
@@ -191,12 +225,18 @@ def is_us_region(region: str) -> bool:
     return region.startswith("us-")
 
 
+def is_ca_region(region: str) -> bool:
+    """Check if the region is a Canada region"""
+    return region.startswith("ca-")
+
+
 def get_model_mapping(model_id: str, target_region_type: str) -> str:
     """Get the equivalent model for the target region type.
 
     The EU direction is a plain lookup. The US direction walks the table
     backwards, and must consider only the rows that name the SAME foundation
-    model on both sides.
+    model on both sides. The Canada direction is a plain lookup in the separate
+    ``CA_MODEL_MAPPINGS``, which is never walked backwards.
 
     ``MODEL_MAPPINGS`` holds two kinds of row. A *twin* row maps a model onto its
     own profile in the other region, and reversing it is correct. A *rescue* row
@@ -222,6 +262,8 @@ def get_model_mapping(model_id: str, target_region_type: str) -> str:
             ):
                 return us_model
         return model_id
+    elif target_region_type == "ca":
+        return CA_MODEL_MAPPINGS.get(model_id, model_id)
     return model_id
 
 
@@ -285,6 +327,13 @@ def filter_models_by_region(data: Any, region_type: str) -> Any:
                                 REGION_SCOPED_PREFIXES
                             ):
                                 filtered_list.append(item)
+                        elif region_type == "ca":
+                            # Exclude US-only models and ids with no profile in ca-central-1
+                            if _is_us_only(item) or item in CA_UNAVAILABLE_MODELS:
+                                continue
+                            # Include US, Canada and non-region-specific models, exclude EU models
+                            if not item.startswith("eu."):
+                                filtered_list.append(item)
                         else:
                             # For other regions, include all models
                             filtered_list.append(item)
@@ -321,6 +370,11 @@ def swap_model_ids(data: Any, region_type: str) -> Any:
                     new_model = get_model_mapping(value, "eu")
                     if new_model != value:
                         logger.info(f"Swapped US model {value} to EU model {new_model}")
+                    swapped_data[key] = new_model
+                elif region_type == "ca" and value.startswith("us."):
+                    new_model = get_model_mapping(value, "ca")
+                    if new_model != value:
+                        logger.info(f"Swapped US model {value} to CA model {new_model}")
                     swapped_data[key] = new_model
                 else:
                     swapped_data[key] = value
@@ -690,6 +744,8 @@ def handler(event: Dict[str, Any], context: Any) -> None:
             if is_eu_region(current_region)
             else "us"
             if is_us_region(current_region)
+            else "ca"
+            if is_ca_region(current_region)
             else "other"
         )
         logger.info(f"Detected region: {current_region}, region type: {region_type}")
@@ -714,7 +770,7 @@ def handler(event: Dict[str, Any], context: Any) -> None:
             if "Schema" in properties:
                 resolved_schema = resolve_content(properties["Schema"])
                 # Filter models based on region
-                if region_type in ["us", "eu"]:
+                if region_type in ["us", "eu", "ca"]:
                     resolved_schema = filter_models_by_region(
                         resolved_schema, region_type
                     )
@@ -860,7 +916,7 @@ def handler(event: Dict[str, Any], context: Any) -> None:
                         continue
 
             # Apply region-specific model swapping to all configurations at once
-            if region_type in ["us", "eu"] and configurations:
+            if region_type in ["us", "eu", "ca"] and configurations:
                 configurations = swap_model_ids(configurations, region_type)
                 logger.info(
                     f"Applied model swapping for {region_type} region to all configurations"
