@@ -145,3 +145,33 @@ def test_an_unmapped_model_is_returned_unchanged():
     assert index.get_model_mapping(unknown, "eu") == unknown
     assert index.get_model_mapping(unknown, "us") == unknown
     assert index.get_model_mapping(unknown, "something-else") == unknown
+
+
+@pytest.mark.unit
+def test_a_canada_profile_is_offered_in_neither_us_nor_eu_picklists():
+    """A region-scoped id belongs to its own region type only.
+
+    The US and EU filters kept any id that started with neither ``us.`` nor
+    ``eu.`` — the right rule for ``global.`` and unprefixed ids, but it also let
+    the Canada geo profile ``ca.amazon.nova-lite-v1:0`` through, which neither
+    region can call.
+    """
+    enum = [
+        "us.amazon.nova-2-lite-v1:0",
+        "eu.amazon.nova-2-lite-v1:0",
+        "ca.amazon.nova-lite-v1:0",
+        "global.anthropic.claude-sonnet-4-6",
+        "qwen.qwen3-vl-235b-a22b",
+        "LambdaHook",
+    ]
+    schema = {"properties": {"model": {"type": "string", "enum": list(enum)}}}
+
+    for region_type, other in (("us", "eu"), ("eu", "us")):
+        offered = index.filter_models_by_region(schema, region_type)
+        offered = offered["properties"]["model"]["enum"]
+        assert "ca.amazon.nova-lite-v1:0" not in offered, region_type
+        assert f"{other}.amazon.nova-2-lite-v1:0" not in offered, region_type
+        assert f"{region_type}.amazon.nova-2-lite-v1:0" in offered, region_type
+        assert "global.anthropic.claude-sonnet-4-6" in offered, region_type
+        assert "qwen.qwen3-vl-235b-a22b" in offered, region_type
+        assert "LambdaHook" in offered, region_type

@@ -645,6 +645,9 @@ CACHEPOINT_SUPPORTED_MODELS = [
     "eu.amazon.nova-2-lite-v1:0",
     "eu.amazon.nova-2-lite-v1:0:priority",
     "eu.amazon.nova-2-lite-v1:0:flex",
+    # Canada geo profile of Nova Lite: the same model as the us./eu. rows above,
+    # so it takes the same cachePoint blocks.
+    "ca.amazon.nova-lite-v1:0",
     "global.amazon.nova-2-lite-v1:0",
     "global.amazon.nova-2-lite-v1:0:priority",
     "global.amazon.nova-2-lite-v1:0:flex",

@@ -167,6 +167,10 @@ MODEL_MAPPINGS = {
     # direction-aware mapping, not another row here.
 }
 
+# Geo inference-profile prefixes offered only in their own region type; ids with
+# a `global.` prefix or none at all are offered everywhere.
+REGION_SCOPED_PREFIXES = ("us.", "eu.", "ca.")
+
 
 def get_current_region() -> str:
     """Get the current AWS region"""
@@ -267,20 +271,18 @@ def filter_models_by_region(data: Any, region_type: str) -> Any:
                             filtered_list.append(item)
                         # Include models that match the region type or are region-agnostic
                         elif region_type == "us":
-                            # Include US models and non-region-specific models, exclude EU models
-                            if item.startswith("us.") or (
-                                not item.startswith("eu.")
-                                and not item.startswith("us.")
+                            # Include US models and non-region-specific models, exclude other geo prefixes
+                            if item.startswith("us.") or not item.startswith(
+                                REGION_SCOPED_PREFIXES
                             ):
                                 filtered_list.append(item)
                         elif region_type == "eu":
                             # Exclude US-only models (e.g., openai.gpt-5.*) that have no EU availability
                             if _is_us_only(item):
                                 continue
-                            # Include EU models and non-region-specific models, exclude US models
-                            if item.startswith("eu.") or (
-                                not item.startswith("eu.")
-                                and not item.startswith("us.")
+                            # Include EU models and non-region-specific models, exclude other geo prefixes
+                            if item.startswith("eu.") or not item.startswith(
+                                REGION_SCOPED_PREFIXES
                             ):
                                 filtered_list.append(item)
                         else:

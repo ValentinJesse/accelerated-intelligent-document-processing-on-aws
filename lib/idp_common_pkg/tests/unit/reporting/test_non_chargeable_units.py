@@ -169,9 +169,14 @@ DECLARED_ENTRY_COUNT = 6
 #: The ``cacheReadInputTokens`` / ``cacheWriteInputTokens`` counts deliberately stay
 #: at 11 for the same reason: the three entries carry both rates, so they are not
 #: shielded by those declarations.
+#:
+#: 97 -> 98 when the Canada geo profile ``ca.amazon.nova-lite-v1:0`` gained its
+#: Bedrock entry, audited the same way: it prices input, output and both cache
+#: dimensions and neither ``totalTokens`` nor ``requests``, so the cache counts
+#: again stay at 11.
 EXPECTED_SHIELDED_SITES = {
-    ("bedrock", "totalTokens"): 97,
-    ("bedrock", "requests"): 97,
+    ("bedrock", "totalTokens"): 98,
+    ("bedrock", "requests"): 98,
     ("bedrock", "cacheReadInputTokens"): 11,
     ("bedrock", "cacheWriteInputTokens"): 11,
     ("lambda_hook", "totalTokens"): 2,
