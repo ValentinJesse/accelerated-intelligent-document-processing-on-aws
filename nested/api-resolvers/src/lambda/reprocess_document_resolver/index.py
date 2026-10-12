@@ -752,6 +752,96 @@ def handler(event, context):
         raise e
 
 
+#: Statuses whose documents must never be re-admitted to the pipeline.
+#:
+#: The malware-scanning ingest gate (see ``src/lambda/queue_sender``) refuses a
+#: document *before* any workflow starts, so the file is still sitting in the
+#: input bucket. Reprocess does not go through that gate — it builds a fresh
+#: QUEUED document and puts it straight on the queue — so without this check an
+#: Admin clicking Reprocess on a quarantined document would push known malware
+#: into OCR, page rendering and Bedrock, which is the one thing the gate exists to
+#: prevent.
+#:
+#: ⚠️ ``MALWARE_SCANNING`` belongs in this set even though it is not a refusal.
+#: A document held at the gate has no verdict yet, and reprocess does not wait
+#: for one: it starts the workflow immediately, so the file would reach OCR and
+#: Bedrock *unscanned* — during exactly the window the gate exists for. The
+#: verdict would then arrive to find the row no longer ``MALWARE_SCANNING``, fail
+#: its compare-and-set, and be classified as an at-least-once duplicate, so a
+#: ``THREATS_FOUND`` would be discarded at INFO under a metric whose name says
+#: the opposite. ``queue_sender._handle_verdict_condition_failure`` guards that
+#: second half independently, because this refusal must not be the only thing
+#: standing between a detection and a silent drop.
+#:
+#: Its refusal is worded as transient, because it is: the verdict is
+#: seconds-to-minutes away and reprocess works normally once it lands.
+#:
+#: Stated as the statuses that are REFUSED rather than the ones that are allowed,
+#: unlike ``process_changes_resolver._EDITABLE_STATUSES``, and the difference is
+#: deliberate: reprocess is legitimate from *most* statuses (that is what makes it
+#: useful on a FAILED or half-processed document), so an allow-list here would
+#: have to enumerate nearly the whole enum and would refuse every pipeline stage
+#: added later. The hazard being closed is a small, named set. A newly added
+#: refusal-worthy status is covered by
+#: ``test_every_malware_status_is_refused``, which derives the set from
+#: ``Status`` rather than restating it.
+_REPROCESS_REFUSED_STATUSES = frozenset(
+    {
+        Status.MALWARE_SCANNING.value,
+        Status.QUARANTINED.value,
+        Status.MALWARE_SCAN_FAILED.value,
+    }
+)
+
+
+def _refuse_if_refused_by_the_malware_gate(object_key):
+    """Raise if this document was refused at the malware-scanning ingest gate.
+
+    Fails **closed** on a read error, matching the "both directions fail closed"
+    posture this file's own header states for its scope checks. The reasoning is
+    narrower than for the other best-effort reads here: those protect against
+    stale state after the pipeline has already seen a document, whereas this one
+    is the ONLY backstop for a known-infected or unscannable file. Reprocess does
+    not go back through the ingest gate — it builds a fresh QUEUED document and
+    hands it to SQS, so a DynamoDB blip that admits a possibly-quarantined file
+    cannot be recovered by "the gate will see it again". A retry is cheap; a
+    reprocessed infected document is not.
+    """
+    try:
+        document = document_service.get_document(object_key)
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            f"Could not read {object_key}'s status before reprocessing ({e}); "
+            f"refusing until the status can be read"
+        )
+        raise ValueError(
+            f"Could not verify {object_key}'s status before reprocessing. "
+            f"This is temporary — retry the request. ({e})"
+        ) from e
+    if document is None:
+        return
+    status = getattr(document.status, "value", document.status)
+    if status == Status.MALWARE_SCANNING.value:
+        # Worded as a wait rather than a refusal, because that is what it is: no
+        # verdict has arrived yet, and reprocess works normally once one does.
+        # Reprocessing now would start the workflow immediately and push the file
+        # into OCR and Bedrock with nothing having decided it is safe.
+        raise ValueError(
+            f"Document {object_key} is still being scanned for malware. "
+            f"Reprocess is available once the scan verdict arrives — usually "
+            f"within a few minutes. Reprocessing now would process the file "
+            f"before anything has decided whether it is safe."
+        )
+    if status in _REPROCESS_REFUSED_STATUSES:
+        raise ValueError(
+            f"Document {object_key} was refused at the malware-scanning gate "
+            f"(status {status}) and cannot be reprocessed. Delete it, or — if it "
+            f"is a legitimate document GuardDuty could not read, such as a "
+            f"password-protected PDF — re-upload an unprotected copy so it is "
+            f"scanned again."
+        )
+
+
 def reprocess_document(
     object_key,
     version=None,
@@ -780,6 +870,8 @@ def reprocess_document(
         + (f" with version: {version}" if version else "")
         + (f" r{revision}" if revision is not None else "")
     )
+
+    _refuse_if_refused_by_the_malware_gate(object_key)
 
     # Verify file exists in S3
     try:
