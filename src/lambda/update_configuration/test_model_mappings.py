@@ -60,7 +60,7 @@ index = _load_handler()
 #: handler's own helper. Reusing the implementation's definition of "same model"
 #: would make these assertions circular, and it would make them ERROR rather than
 #: FAIL against a revision that has no such helper — which is how the bug shipped.
-_REGION_PREFIX = re.compile(r"^(?:us|eu|apac|au|jp|global|us-gov)\.")
+_REGION_PREFIX = re.compile(r"^(?:us|eu|apac|au|jp|ca|global|us-gov)\.")
 
 MAPPINGS: dict[str, str] = index.MODEL_MAPPINGS
 TWINS = {

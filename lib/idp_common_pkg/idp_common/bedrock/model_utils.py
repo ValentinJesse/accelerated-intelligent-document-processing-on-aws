@@ -112,10 +112,12 @@ LONG_CONTEXT_SUFFIX = ":1m"
 #: which offer ``us.``/``eu.``/``global.`` only, but reachable through a custom
 #: configuration or the CLI, where a user copies the id off the model card.
 #:
-#: ``config.retired_models._REGION_PREFIX`` holds the same seven as a regex and
+#: ``ca`` is the Canada geo profile, introduced with ``ca.amazon.nova-lite-v1:0``.
+#:
+#: ``config.retired_models._REGION_PREFIX`` holds the same eight as a regex and
 #: cannot import this module (``config`` is imported BY ``bedrock``), so the two are
 #: asserted equal by ``tests/unit/bedrock/test_region_prefix_parity.py``.
-REGION_PREFIXES = ("us", "eu", "apac", "au", "jp", "global", "us-gov")
+REGION_PREFIXES = ("us", "eu", "apac", "au", "jp", "ca", "global", "us-gov")
 
 
 def metering_model_id(model_id: str) -> str:

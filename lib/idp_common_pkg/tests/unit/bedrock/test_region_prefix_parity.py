@@ -3,8 +3,8 @@
 
 """One region-prefix rule, shared, and it must stay shared.
 
-Bedrock cross-region inference profiles carry one of seven geo prefixes — ``us.``,
-``eu.``, ``apac.``, ``au.``, ``jp.``, ``global.`` and ``us-gov.`` — and every capability gate in
+Bedrock cross-region inference profiles carry one of eight geo prefixes — ``us.``,
+``eu.``, ``apac.``, ``au.``, ``jp.``, ``ca.``, ``global.`` and ``us-gov.`` — and every capability gate in
 ``idp_common.bedrock.client`` answers by stripping that prefix and matching the base
 name against a set. Four sites used to hand-roll the strip, and three of the four
 listed only ``us``/``eu``/``global``.
@@ -33,7 +33,7 @@ exposed them: it is the first model offered here whose card advertises those two
 ``top_k`` and ``top_p`` went to a model that rejects both and every request 400'd.
 Every 4.7-or-later Claude was affected the same way, not just that one.
 
-There are two definitions of the seven prefixes and there cannot be one: ``config``
+There are two definitions of the eight prefixes and there cannot be one: ``config``
 imports ``bedrock``, so ``bedrock.model_utils`` cannot import
 ``config.retired_models``. This file is the substitute for that import.
 """
@@ -62,6 +62,7 @@ def test_the_two_definitions_name_the_same_prefixes():
         "apac",
         "au",
         "jp",
+        "ca",
         "global",
         "us-gov",
     }

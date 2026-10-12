@@ -116,7 +116,7 @@ KB_EMBED_TEMPLATE = "nested/bedrockkb/template.yaml"
 # `top_p` default) was picked up as a model id the moment the region prefix became
 # optional, and `v1.0`-style version strings would be too.
 MODEL_ID = re.compile(
-    r"^(?:(?:us|eu|apac|global|us-gov)\.)?"  # optional region / geo prefix
+    r"^(?:(?:us|eu|apac|ca|global|us-gov)\.)?"  # optional region / geo prefix
     r"[a-z][a-z0-9-]+\."  # provider, e.g. amazon / openai
     r"(?=[a-z0-9.:_-]*[a-z])[a-z0-9][a-z0-9.:_-]*$"  # model, must contain a letter
 )
