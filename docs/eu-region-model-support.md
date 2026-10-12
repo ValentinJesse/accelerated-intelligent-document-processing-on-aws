@@ -225,6 +225,7 @@ The following US models do not have direct EU equivalents:
 This feature supports all AWS regions but is specifically designed for:
 - **EU Regions**: `eu-west-1`, `eu-central-1`, `eu-north-1`, etc.
 - **US Regions**: `us-east-1`, `us-west-2`, etc.
+- **Canada (Central)**: `ca-*` regions have their own picklist filter and default swaps, described in [Canada (Central) Region Model Support](canada-region-model-support.md)
 
 Other regions (Asia-Pacific, etc.) will use the original model IDs without mapping.
 

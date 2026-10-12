@@ -1,0 +1,178 @@
+---
+title: "Canada (Central) Region Model Support"
+---
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+
+# Canada (Central) Region Model Support
+
+## Overview
+
+The accelerator's region-aware model handling covers Canada. When the stack is
+deployed in a `ca-*` region, the `UpdateConfiguration` custom resource
+(`src/lambda/update_configuration/index.py`) resolves the stack region to its
+own region type, `ca`, and applies the two deploy-time steps it already applies
+for US and EU stacks: it limits the model picklists to models that can be called
+from ca-central-1, and it swaps the shipped defaults that cannot. `us-gov-*`
+regions keep resolving to the US type.
+
+The handling has been validated in `ca-central-1` (live checks, 2026-10).
+`ca-west-1` receives the same handling but has not been validated. The EU
+counterpart, with its full US-to-EU mapping table, is
+[EU Region Model Support and Mapping](./eu-region-model-support.md).
+
+## What a Canada stack offers
+
+Every `model` / `model_id` picklist in the configuration schema is filtered by
+id prefix when the stack is created or updated:
+
+| Ids | In a Canada stack | Why |
+|-----|-------------------|-----|
+| `ca.*` | kept | Canada geo inference profile |
+| `us.*`, `global.*`, unprefixed ids, `LambdaHook` | kept, except the deny list below | callable from ca-central-1 |
+| `eu.*` | dropped | not callable from ca-central-1 |
+| `openai.gpt-5.4`, `openai.gpt-5.5`, `openai.gpt-5.6-sol` / `-terra` / `-luna` | dropped | bedrock-mantle ids with no Canada availability; the client would route them to `us-east-1` |
+
+The deny list (`CA_UNAVAILABLE_MODELS`) holds the shipped ids that have no
+inference profile and no in-region hosting in ca-central-1 (verified 2026-10-11):
+
+- `us.amazon.nova-lite-v1:0` — swapped to `ca.amazon.nova-lite-v1:0`, see below
+- `us.amazon.nova-pro-v1:0` and `global.amazon.nova-pro-v1:0`
+- `us.cohere.embed-v4:0` — swapped to `global.cohere.embed-v4:0`, see below
+- `us.meta.llama4-maverick-17b-instruct-v1:0`, `us.meta.llama4-scout-17b-instruct-v1:0`
+- `qwen.qwen3-vl-235b-a22b`, `google.gemma-3-27b-it`, `nvidia.nemotron-nano-12b-v2`
+
+`us.xai.grok-4.6` and `us.openai.gpt-6-astra` have profiles in ca-central-1 and
+stay in the picklists, as do the `:priority` and `:flex` service-tier variants of
+`us.amazon.nova-2-lite-v1:0` and `global.amazon.nova-2-lite-v1:0`, which Bedrock
+accepts from ca-central-1 (verified 2026-10-12).
+
+## Default model changes
+
+Three shipped defaults name models that cannot be called from ca-central-1. On
+stack create and update, the custom resource rewrites them in the ConfigSchema,
+the shipped default configuration and the managed configurations through a
+one-way Canada table (`CA_MODEL_MAPPINGS`). Configuration versions you saved
+yourself are not rewritten, the same as in EU regions.
+
+| Setting | Shipped default | In a Canada stack | Why |
+|---------|-----------------|-------------------|-----|
+| Confidence assessment (`extraction.confidence.model`) | `us.amazon.nova-lite-v1:0` | `ca.amazon.nova-lite-v1:0` | Same model through its Canada geo profile; processes in Canada |
+| Discovery, with and without ground truth (`model_id`) | `us.amazon.nova-pro-v1:0` | `us.amazon.nova-2-lite-v1:0` | No Nova Pro profile in ca-central-1. Nova 2 Lite is the catalog's Nova default for OCR, classification and evaluation, and is multimodal and cheaper |
+| Multi-document discovery embedding (`multi_document.embedding_model_id`) | `us.cohere.embed-v4:0` | `global.cohere.embed-v4:0` | Only the global profile exists in Canada |
+
+Every swapped-in id is in the Canada picklists.
+
+`ca.amazon.nova-lite-v1:0` is new to the catalog with this support, and it is
+the only `ca.` profile AWS offers. It is in every model dropdown where its EU
+twin is, in the `KnowledgeBaseModelId` AllowedValues, priced with Canada
+(Central) rates ($0.064 input, $0.256 output and $0.016 cache read per 1M
+tokens; cache writes are billed at the input rate, like the other Nova rows),
+and prompt caching is enabled for it (`CACHEPOINT_SUPPORTED_MODELS`). The `ca.`
+prefix is recognised by the shared region-prefix list, so the client resolves
+it to the same base model as the `us.` and `eu.` Nova Lite rows.
+
+## Where requests are processed
+
+The stack calls the ca-central-1 Bedrock endpoint for everything, and all data
+at rest stays in ca-central-1. Cross-Region inference, however, may process a
+request outside Canada; which Regions depends on the profile prefix:
+
+| Profile | Requests processed in |
+|---------|-----------------------|
+| `ca.*` | `ca-central-1`, `ca-west-1` |
+| `us.*` | US Regions |
+| `global.*` | any commercial AWS Region |
+| BDA `na.data-automation-v1` | `ca-central-1`, `ca-west-1`, `us-east-1`, `us-east-2`, `us-west-2` |
+
+`ca.amazon.nova-lite-v1:0` is therefore the only model in the catalog whose
+requests stay in Canada. See
+[Cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html)
+and
+[Cross Region support required for Bedrock Data Automation](https://docs.aws.amazon.com/bedrock/latest/userguide/bda-cris.html)
+in the Amazon Bedrock User Guide.
+
+## Bedrock Data Automation
+
+Canada stacks use the `na.data-automation-v1` cross-Region profile — AWS names
+the Canada (Central) profile `na.`, and `ca.data-automation-v1` is not a valid
+profile — so BDA mode (`use_bda`, which calls the asynchronous API) works.
+
+The BDA **OCR backend** (`ocr.backend: bda`) does not. It needs a stack-scoped
+SYNC document project, and BDA's synchronous API rejects that project in
+ca-central-1 with a `ValidationException`. The `BDAOCRProjectFunction` custom
+resource treats the refusal as "unsupported here": it returns success with an
+empty project ARN and logs **one ERROR line** (`Bedrock Data Automation
+rejected the stack-scoped OCR project as unsupported in this region ...;
+returning empty ProjectArn`). That line is expected, and the stack deploys. The
+OCR service raises a clear error only if `ocr.backend: bda` is selected; use
+the Textract (default) or Bedrock OCR backend instead (see
+[When to choose BDA vs Textract for OCR](./configuration.md#when-to-choose-bda-vs-textract-for-ocr)).
+An asynchronous OCR path is a possible follow-up.
+
+## Knowledge Base model
+
+`KnowledgeBaseModelId` is a stack parameter, and the configuration step does
+not touch stack parameters. Its default, `us.amazon.nova-pro-v1:0`, is not
+callable in ca-central-1, so a Canada deployment must set it to a callable
+AllowedValue: `ca.amazon.nova-lite-v1:0` keeps Knowledge Base answers in
+Canada; `us.amazon.nova-2-lite-v1:0`,
+`us.anthropic.claude-sonnet-4-5-20250929-v1:0` and
+`global.anthropic.claude-sonnet-4-5-20250929-v1:0` are also callable. The
+Knowledge Base embedding model, `amazon.titan-embed-text-v2:0`, is supported
+in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configuration).
+
+## Known limitations
+
+- **Capacity planner.** `calculate_capacity` has no Service Quotas keys for
+  `ca.` (or `eu.`) profiles, so capacity estimates do not cover
+  `ca.amazon.nova-lite-v1:0`. This is a pre-existing gap shared with EU; see
+  [Capacity Planning](./capacity-planning.md).
+- **GPT-5.x ids typed into a custom configuration.** The picklists hide them,
+  but an `openai.gpt-5.*` id written into a configuration by hand still routes
+  to `us-east-1` through bedrock-mantle, with only a warning logged (same as
+  EU). Avoid them in Canada.
+- **ca-west-1** receives the same handling as ca-central-1 but has not been
+  validated.
+
+## Deploying to ca-central-1
+
+There is no Quick Launch template URL for ca-central-1 yet; the maintainers
+publish one at release time, and a follow-up adds it. Until then,
+`idp-cli deploy --region ca-central-1` is refused unless you supply the
+template yourself, in one of two forms:
+
+```bash
+# Build, publish to a bucket in your account and deploy in one step
+idp-cli deploy --stack-name my-idp --region ca-central-1 --from-code . \
+    --admin-email your.email@example.com \
+    --parameters "KnowledgeBaseModelId=ca.amazon.nova-lite-v1:0" --wait
+
+# Or publish first, then deploy the published template
+idp-cli publish --source-dir . --region ca-central-1
+idp-cli deploy --stack-name my-idp --region ca-central-1 \
+    --template-url <template URL printed by publish> \
+    --admin-email your.email@example.com \
+    --parameters "KnowledgeBaseModelId=ca.amazon.nova-lite-v1:0" --wait
+```
+
+The general build-from-source procedure, including the prerequisites, is in the
+[Deployment Guide](./deployment.md#option-3-build-and-deploy-from-source-code).
+
+## Verifying model availability
+
+The authoritative list of what ca-central-1 can call is the set of active
+system-defined inference profiles:
+
+```bash
+aws bedrock list-inference-profiles --region ca-central-1 --type-equals SYSTEM_DEFINED \
+  --query "inferenceProfileSummaries[?status=='ACTIVE'].inferenceProfileId" --output text \
+  | tr '\t' '\n' | sort
+```
+
+A prefixed id that is not in this list cannot be called from a Canada stack.
+The deny list above was built from this command (plus
+`aws bedrock list-foundation-models --region ca-central-1` for the unprefixed
+ids) on 2026-10-11; run them again before relying on a model this page does not
+mention.

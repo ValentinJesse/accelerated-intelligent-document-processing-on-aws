@@ -125,8 +125,8 @@ Cross-check against the file map below.
 - [ ] `docs/*.md` — every feature doc that lists models: `openai-models.md` (or
       a new dedicated guide if materially different), `configuration.md`,
       `discovery.md`, `extraction-and-confidence.md`, `service-tiers.md`,
-      `web-ui.md`, `eu-region-model-support.md`, `policy-discovery.md`,
-      `idp-cli.md`, `cross-account-bedrock.md`.
+      `web-ui.md`, `eu-region-model-support.md`, `canada-region-model-support.md`,
+      `policy-discovery.md`, `idp-cli.md`, `cross-account-bedrock.md`.
 - [ ] `docs/README.md` — index link if a new doc was added.
 - [ ] `CHANGELOG.md` — `[Unreleased]` entry stating what IS and IS NOT supported
       (regions, caching, GovCloud, agentic/discovery).
