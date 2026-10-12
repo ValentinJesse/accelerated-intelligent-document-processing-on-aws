@@ -5,18 +5,15 @@ import React, { useState, useEffect, useLayoutEffect, useRef, memo, useCallback,
 import { Box, Spinner, Button } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
 import generateS3PresignedUrl from './generate-s3-presigned-url';
+import { rotateBoundingBox, rotateOffset, rotationFitScale } from './page-rotation-utils';
+import type { NormalisedBox } from './page-rotation-utils';
 import useAppContext from '../../contexts/app';
 import { useDocumentVersion } from '../../contexts/document-version';
 
 const logger = new ConsoleLogger('PageImageViewer');
 
 interface BoundingBoxGeometry {
-  boundingBox?: {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  };
+  boundingBox?: NormalisedBox;
   page?: number;
 }
 
@@ -33,48 +30,6 @@ interface BoundingBoxProps {
   color?: string;
   label?: string | null;
 }
-
-/** A bounding box in normalised (0–1) page coordinates. */
-export interface NormalisedBox {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-/**
- * Map a bounding box from page space onto the rotated page.
- *
- * Overlays are absolutely positioned, axis-aligned divs measured against the
- * image's on-screen rect, and that rect already reports the *transposed*
- * extent of a quarter-turned image. A quarter turn also keeps an axis-aligned
- * box axis-aligned, so the whole correction is a corner remap plus a
- * width/height swap at 90° and 270° — without it a highlighted field lands on
- * an unrelated part of a rotated page.
- *
- * Coordinates are normalised (0–1) with `left`/`top` measured from the top-left
- * and `rotation` positive clockwise, matching CSS `rotate()`.
- */
-export const rotateBoundingBox = (bbox: NormalisedBox, rotation: number): NormalisedBox => {
-  // Fold any angle onto one of the four quarter turns: negatives, multiples of
-  // 360 and the 270-vs--90 spelling of a left turn all have to agree.
-  const turns = ((Math.round(rotation / 90) % 4) + 4) % 4;
-  switch (turns) {
-    case 1: // 90° clockwise: the page's left edge becomes the top edge.
-      return { left: 1 - (bbox.top + bbox.height), top: bbox.left, width: bbox.height, height: bbox.width };
-    case 2:
-      return {
-        left: 1 - (bbox.left + bbox.width),
-        top: 1 - (bbox.top + bbox.height),
-        width: bbox.width,
-        height: bbox.height,
-      };
-    case 3: // 270° clockwise: the page's top edge becomes the left edge.
-      return { left: bbox.top, top: 1 - (bbox.left + bbox.width), width: bbox.height, height: bbox.width };
-    default:
-      return bbox;
-  }
-};
 
 export const BoundingBox = memo(
   ({
@@ -295,7 +250,7 @@ const PageImageViewer = ({
   const [currentPage, setCurrentPage] = useState<string | null>(initialPage || (pageIds.length > 0 ? pageIds[0] : null));
   const [zoomLevel, setZoomLevel] = useState(1);
   const [rotation, setRotation] = useState(0);
-  const [rotationFitScale, setRotationFitScale] = useState(1);
+  const [rotationFit, setRotationFit] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
@@ -392,38 +347,25 @@ const PageImageViewer = ({
   const handleRotateRight = useCallback(() => setRotation((prev) => (prev + 90) % 360), []);
 
   /**
-   * A quarter-turned page no longer fits the box the browser laid it out in:
-   * the image is fitted to the container by `maxWidth`/`maxHeight`, and at
-   * 90°/270° its on-screen footprint is that layout box transposed, which
-   * overflows a container that is not square — the Test Studio editor is a
-   * half-width column, so a portrait page rotated there would lose a third of
-   * its width to `overflow: hidden`. Measuring the shortfall and folding it
-   * into the transform is what makes "rotate" mean "rotate and still fit", the
-   * way a document reader does it, instead of "rotate and crop".
+   * Re-fit the page after a quarter turn — see `rotationFitScale`, which holds
+   * the reasoning and the arithmetic.
+   *
+   * Reads the image's *layout* box, not getBoundingClientRect(): the rect is
+   * already transformed, so feeding it back in would compound the scale on
+   * every measurement.
    */
   const measureRotationFit = useCallback(() => {
     const img = imageRef.current;
     const container = imageContainerRef.current;
-    // At 0°/180° the footprint is the layout box, which already fits.
-    if (rotation % 180 === 0) {
-      setRotationFitScale(1);
-      return;
-    }
-    if (!img || !container) return;
-    // Layout box, not getBoundingClientRect(): the rect is already transformed,
-    // so feeding it back in would compound the scale on every measurement.
-    const w = img.offsetWidth;
-    const h = img.offsetHeight;
-    const containerWidth = container.clientWidth;
-    const containerHeight = container.clientHeight;
-    // Keep the last good value rather than deriving one from a container that
-    // has no layout yet (or is hidden): a zero here would scale the page to
-    // nothing and divide the pan offset by it, blanking the viewer.
-    if (!w || !h || !containerWidth || !containerHeight) return;
-    // Clamped at 1 — the browser's own fit does not upscale an image smaller
-    // than its container, and neither should rotating it.
-    const fit = Math.min(containerWidth / h, containerHeight / w, 1);
-    if (Number.isFinite(fit) && fit > 0) setRotationFitScale(fit);
+    const fit = rotationFitScale({
+      imageWidth: img?.offsetWidth ?? 0,
+      imageHeight: img?.offsetHeight ?? 0,
+      containerWidth: container?.clientWidth ?? 0,
+      containerHeight: container?.clientHeight ?? 0,
+      rotation,
+    });
+    // null means nothing was measurable yet; keep the last good value.
+    if (fit !== null) setRotationFit(fit);
   }, [rotation]);
 
   // Re-fit on rotation and on page change (pages need not share a shape).
@@ -434,7 +376,6 @@ const PageImageViewer = ({
   useLayoutEffect(() => {
     measureRotationFit();
   }, [measureRotationFit, currentPage, pageImages]);
-
   // Container resizes are a separate, post-layout concern (the editor's columns
   // are fluid).
 
@@ -447,7 +388,7 @@ const PageImageViewer = ({
   }, [measureRotationFit]);
 
   // The scale actually applied: the user's zoom times the rotation re-fit.
-  const effectiveScale = zoomLevel * rotationFitScale;
+  const effectiveScale = zoomLevel * rotationFit;
 
   // Pan controls
   const panStep = 50;
@@ -560,20 +501,16 @@ const PageImageViewer = ({
 
         // Offset of the field from the page centre, in unscaled layout px,
         // turned clockwise by the current rotation.
-        const radians = (rotation * Math.PI) / 180;
-        const cos = Math.cos(radians);
-        const sin = Math.sin(radians);
-        const offsetX = (fieldU - 0.5) * w;
-        const offsetY = (fieldV - 0.5) * h;
-        const targetScale = targetZoom * rotationFitScale;
+        const offset = rotateOffset((fieldU - 0.5) * w, (fieldV - 0.5) * h, rotation);
+        const targetScale = targetZoom * rotationFit;
 
         setPanOffset({
-          x: container.clientWidth / 2 - centreX - (offsetX * cos - offsetY * sin) * targetScale,
-          y: container.clientHeight / 2 - centreY - (offsetX * sin + offsetY * cos) * targetScale,
+          x: container.clientWidth / 2 - centreX - offset.x * targetScale,
+          y: container.clientHeight / 2 - centreY - offset.y * targetScale,
         });
       });
     },
-    [rotation, rotationFitScale],
+    [rotation, rotationFit],
   );
 
   // Exposed imperatively rather than fired from an effect on activeFieldGeometry:
@@ -718,10 +655,22 @@ const PageImageViewer = ({
         }}
       >
         <div style={{ pointerEvents: 'auto' }}>
-          <Button iconName="angle-left" variant="icon" onClick={goToPreviousPage} disabled={currentPageIndex === 0} />
+          <Button
+            iconName="angle-left"
+            variant="icon"
+            ariaLabel="Previous page"
+            onClick={goToPreviousPage}
+            disabled={currentPageIndex === 0}
+          />
         </div>
         <div style={{ pointerEvents: 'auto' }}>
-          <Button iconName="angle-right" variant="icon" onClick={goToNextPage} disabled={currentPageIndex === pageIds.length - 1} />
+          <Button
+            iconName="angle-right"
+            variant="icon"
+            ariaLabel="Next page"
+            onClick={goToNextPage}
+            disabled={currentPageIndex === pageIds.length - 1}
+          />
         </div>
       </div>
 

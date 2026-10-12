@@ -30,8 +30,9 @@ const VERSION_CONTEXT = { isHistorical: false, runId: null, versionIdForUri: () 
 vi.mock('../../../contexts/app', () => ({ default: () => APP_CONTEXT }));
 vi.mock('../../../contexts/document-version', () => ({ useDocumentVersion: () => VERSION_CONTEXT }));
 
-import PageImageViewer, { rotateBoundingBox } from '../PageImageViewer';
-import type { NormalisedBox } from '../PageImageViewer';
+import PageImageViewer from '../PageImageViewer';
+import { rotateBoundingBox, rotateOffset, rotationFitScale } from '../page-rotation-utils';
+import type { NormalisedBox } from '../page-rotation-utils';
 
 /** A box in the page's upper-left quadrant, deliberately not square. */
 const BOX = { left: 0.1, top: 0.2, width: 0.3, height: 0.4 };
@@ -155,6 +156,114 @@ const TWO_PAGES = [
   { Id: '2', ImageUri: 'blob:page-2' },
 ];
 
+describe('rotationFitScale', () => {
+  // A portrait page fitted into the Test Studio editor's half-width column:
+  // the shape that motivated re-fitting at all.
+  const PORTRAIT = { imageWidth: 400, imageHeight: 517, containerWidth: 400, containerHeight: 700 };
+
+  it('leaves an unrotated page alone, measurable or not', () => {
+    expect(rotationFitScale({ ...PORTRAIT, rotation: 0 })).toBe(1);
+    expect(rotationFitScale({ ...PORTRAIT, rotation: 180 })).toBe(1);
+    expect(rotationFitScale({ ...PORTRAIT, rotation: 360 })).toBe(1);
+    // No layout yet is still an answer at 0°, because nothing needs measuring.
+    expect(rotationFitScale({ imageWidth: 0, imageHeight: 0, containerWidth: 0, containerHeight: 0, rotation: 0 })).toBe(1);
+  });
+
+  it('shrinks a quarter-turned portrait page enough to clear the container', () => {
+    const fit = rotationFitScale({ ...PORTRAIT, rotation: 90 });
+    expect(fit).not.toBeNull();
+    // The footprint is the layout box transposed: 517 wide in a 400 container.
+    expect(fit).toBeCloseTo(400 / 517, 10);
+    // The property that matters, stated independently of the number above:
+    // after scaling, the rotated footprint fits in both axes.
+    const scaled = fit as number;
+    expect(PORTRAIT.imageHeight * scaled).toBeLessThanOrEqual(PORTRAIT.containerWidth + 1e-9);
+    expect(PORTRAIT.imageWidth * scaled).toBeLessThanOrEqual(PORTRAIT.containerHeight + 1e-9);
+  });
+
+  it('treats 270° the same as 90°, and negative and wrapped angles too', () => {
+    const at90 = rotationFitScale({ ...PORTRAIT, rotation: 90 });
+    expect(rotationFitScale({ ...PORTRAIT, rotation: 270 })).toBe(at90);
+    expect(rotationFitScale({ ...PORTRAIT, rotation: -90 })).toBe(at90);
+    expect(rotationFitScale({ ...PORTRAIT, rotation: 450 })).toBe(at90);
+  });
+
+  it('never magnifies a page that already fits after turning', () => {
+    // Landscape page in a tall container: the rotated footprint has room to
+    // grow, and must not take it — rotating is not a zoom gesture.
+    const landscape = { imageWidth: 400, imageHeight: 200, containerWidth: 400, containerHeight: 700 };
+    expect(rotationFitScale({ ...landscape, rotation: 90 })).toBe(1);
+    // A square page in a square container is the exactly-fits boundary.
+    expect(rotationFitScale({ imageWidth: 300, imageHeight: 300, containerWidth: 300, containerHeight: 300, rotation: 90 })).toBe(1);
+  });
+
+  it('refuses to answer rather than returning a zero scale', () => {
+    // The caller keeps its last good value on null. A 0 would scale the page
+    // out of existence and, since pan is divided by the scale, blank the view.
+    const unmeasurable = [
+      { imageWidth: 0, imageHeight: 517, containerWidth: 400, containerHeight: 700 },
+      { imageWidth: 400, imageHeight: 0, containerWidth: 400, containerHeight: 700 },
+      // A hidden or not-yet-laid-out container, which is the live case.
+      { imageWidth: 400, imageHeight: 517, containerWidth: 0, containerHeight: 700 },
+      { imageWidth: 400, imageHeight: 517, containerWidth: 400, containerHeight: 0 },
+      { imageWidth: Number.NaN, imageHeight: 517, containerWidth: 400, containerHeight: 700 },
+      { imageWidth: 400, imageHeight: Number.POSITIVE_INFINITY, containerWidth: 400, containerHeight: 700 },
+    ];
+    unmeasurable.forEach((dims) => expect(rotationFitScale({ ...dims, rotation: 90 })).toBeNull());
+  });
+});
+
+describe('rotateOffset', () => {
+  it('turns an offset clockwise, exactly', () => {
+    // Pointing right becomes pointing down: y grows downward on screen, which
+    // is what makes a positive CSS angle read as clockwise.
+    expect(rotateOffset(1, 0, 90)).toEqual({ x: -0, y: 1 });
+    expect(rotateOffset(1, 0, 180)).toEqual({ x: -1, y: -0 });
+    expect(rotateOffset(1, 0, 270)).toEqual({ x: 0, y: -1 });
+    expect(rotateOffset(1, 0, 0)).toEqual({ x: 1, y: 0 });
+  });
+
+  it('agrees with the trigonometric form it replaced', () => {
+    // Why it is not written with cos/sin: that gives 6.1e-17 for a right
+    // angle. This pins the two against each other so the exact form cannot
+    // drift from the rotation everything else assumes.
+    const byTrig = (dx: number, dy: number, deg: number) => {
+      const r = (deg * Math.PI) / 180;
+      return { x: dx * Math.cos(r) - dy * Math.sin(r), y: dx * Math.sin(r) + dy * Math.cos(r) };
+    };
+    [
+      [3, 7],
+      [-120, 45],
+      [0, -18],
+    ].forEach(([dx, dy]) => {
+      [0, 90, 180, 270].forEach((deg) => {
+        const exact = rotateOffset(dx, dy, deg);
+        const trig = byTrig(dx, dy, deg);
+        expect(exact.x).toBeCloseTo(trig.x, 9);
+        expect(exact.y).toBeCloseTo(trig.y, 9);
+      });
+    });
+  });
+
+  it('turns in the same direction as the bounding-box remap', () => {
+    // The two must agree or a zoom-to-field would centre somewhere the
+    // highlight is not. The page's top-left corner sits up and to the left of
+    // the centre; a right turn must bring it up and to the right.
+    const corner = rotateOffset(-1, -1, 90);
+    expect(corner.x).toBeGreaterThan(0);
+    expect(corner.y).toBeLessThan(0);
+    const box = rotateBoundingBox({ left: 0, top: 0, width: 0.1, height: 0.1 }, 90);
+    expect(box.left).toBeGreaterThan(0.5); // moved to the right half
+    expect(box.top).toBeLessThan(0.5); // stayed in the top half
+  });
+
+  it('returns to the original offset after four right turns', () => {
+    let v = { x: 13, y: -29 };
+    for (let i = 0; i < 4; i += 1) v = rotateOffset(v.x, v.y, 90);
+    expect(v).toEqual({ x: 13, y: -29 });
+  });
+});
+
 /** Render the viewer over one client-side page image (no presigning needed). */
 const renderViewer = () => render(<PageImageViewer pageIds={ONE_PAGE_IDS} documentPages={ONE_PAGE} />);
 
@@ -205,6 +314,11 @@ describe('PageImageViewer rotation controls', () => {
   it('keeps the rotation applied while navigating pages', async () => {
     // A misoriented scan is usually misoriented on every page, so rotation is
     // sticky across page navigation the way zoom and pan already are.
+    //
+    // Sticky *within one mounted viewer*, which is as far as this can go: a
+    // parent that re-keys the viewer per page resets it along with zoom and
+    // pan, and PageTextEditorModal does exactly that to re-seed `initialPage`.
+    // So do not read this as a promise about every screen.
     render(<PageImageViewer pageIds={TWO_PAGE_IDS} documentPages={TWO_PAGES} />);
     await waitFor(() => expect(pageImage()).toBeInTheDocument());
 
@@ -213,11 +327,7 @@ describe('PageImageViewer rotation controls', () => {
 
     expect(screen.getByText('Page 1 of 2')).toBeInTheDocument();
 
-    // The only real <button>s here are the two page chevrons; every zoom, pan
-    // and rotate control is a span carrying role="button".
-    const chevrons = document.querySelectorAll('button');
-    expect(chevrons).toHaveLength(2);
-    (chevrons[1] as HTMLButtonElement).click();
+    screen.getByRole('button', { name: 'Next page' }).click();
 
     await waitFor(() => expect(screen.getByText('Page 2 of 2')).toBeInTheDocument());
     expect(screen.getByText('90°')).toBeInTheDocument();
