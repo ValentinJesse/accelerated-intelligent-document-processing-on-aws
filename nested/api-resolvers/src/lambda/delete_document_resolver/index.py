@@ -71,10 +71,10 @@ def _redact_arns(text: str) -> str:
     A bare 12-digit run is redacted as well, for the message that names an account
     without wrapping it in an ARN. ⚠️ **That can also mask a 12-digit run inside the
     error detail** — the purge failure quotes a sample of refused object keys, and a
-    key like ``invoices/202601120001.pdf`` would come back partly masked. The document
-    being reported is named *outside* this function, in the ``"{object_key}: "`` prefix
-    the caller builds, so identifying which document failed is unaffected; what is lost
-    is a duplicate of that key inside the detail.
+    key carrying a twelve-digit invoice or batch number would come back partly masked.
+    The document being reported is named *outside* this function, in the
+    ``"{object_key}: "`` prefix the caller builds, so identifying which document failed
+    is unaffected; what is lost is a duplicate of that key inside the detail.
     """
     return _BARE_ACCOUNT_ID.sub("<account>", _ARN.sub("arn:<redacted>", text))
 

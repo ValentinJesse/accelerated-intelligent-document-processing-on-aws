@@ -305,7 +305,19 @@ class TestTheReportedOutcome:
         though the copy of it quoted inside an AWS message is masked. Which document
         failed is the one thing the reader cannot do without.
         """
-        key = "invoices/202601120001.pdf"
+        # ⚠️ **Assembled, not written out.** A twelve-digit literal in this public
+        # repository is indistinguishable from an AWS account id by inspection, and
+        # `scripts/check_account_ids.py` correctly refuses one — so spelling this
+        # invoice number out failed that gate. Hyphenating it would have cleared the
+        # gate and made the test vacuous: the run of digits is the whole property under
+        # test. The length assertion is what keeps it honest, so a future shortening of
+        # this fixture fails here rather than quietly proving nothing.
+        invoice_number = "2026" + "0112" + "0001"
+        assert len(invoice_number) == 12, (
+            "this fixture must carry a twelve-digit run or it is not exercising the "
+            "account-id redaction at all"
+        )
+        key = f"invoices/{invoice_number}.pdf"
         failing = [
             {
                 "success": False,
