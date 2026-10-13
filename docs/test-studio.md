@@ -1158,8 +1158,16 @@ The queue page shows:
 - **The ground-truth editor** — the same editor used everywhere else in Test
   Studio, with the page images, per-field confidence, the JSON tab, and the
   revision history.
-- **Save & next in queue** — saves the correction, marks the document reviewed,
-  and moves to the next available document.
+- **Save & next in queue** — saves the correction and moves straight to the next
+  available document, without waiting for the queue to be re-read. A document is
+  marked reviewed once **every** one of its sections carries a human verdict, so
+  on a multi-section packet a save records the section you were working on and the
+  confirmation says how many sections the document has; finish it from the section
+  tabs, or use **No changes needed**, which submits every section at once.
+- **Show reviewed documents** — reviewed work drops out of the queue, so this is
+  the way back to a document whose label you already confirmed, including to
+  search for one by name. Those rows are not held in the browser, so revealing
+  them re-reads the queue from the server and takes a few seconds on a large set.
 
 Per-document actions (claim, release, skip, mark reviewed) sit at the top of the
 editor pane, so finishing a long document does not mean scrolling past every field

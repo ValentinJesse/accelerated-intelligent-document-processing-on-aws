@@ -107,7 +107,7 @@ export interface QueueItem {
   available: boolean;
 }
 
-interface QueueState {
+export interface QueueState {
   totalDocs: number;
   inspectedDocs?: number | null;
   reviewedDocs: number;
@@ -121,6 +121,53 @@ interface QueueState {
   baseVersion?: number | null;
   documents: QueueItem[];
 }
+
+/**
+ * The document to open next, from the queue already in hand.
+ *
+ * `current` is excluded by key rather than by position: the queue is ordered
+ * worst-first, so after a save the document just finished may still be the first
+ * entry, and taking the head would reopen it.
+ *
+ * Deliberately not read from the server's `nextObjectKey`. That field is correct
+ * but it arrives with a reply that costs ~9s on a large set — `getAnnotationQueue`
+ * reads every section of every ranked document from S3 — and nothing in it is
+ * needed to know which document comes next. Waiting for it is what made "Save &
+ * next in queue" sit on the document it had just saved ([#1321]).
+ */
+export const nextAvailableAfter = (documents: QueueItem[], current: string | null): string | null =>
+  documents.find((d) => d.available && d.objectKey !== current)?.objectKey ?? null;
+
+/**
+ * The queue as it stands once a review of `objectKey` has landed, applied locally
+ * so the rail moves with the save instead of a refresh later.
+ *
+ * `keepReviewed` mirrors the server's own filter — it drops reviewed documents
+ * from the queue unless `includeCompleted` was asked for — so the rail behaves the
+ * same whether this update or the reply from the server produced it.
+ *
+ * ⚠️ Only call this for a document **every** section of which is now reviewed.
+ * The server marks a document reviewed on exactly that condition, and one save
+ * writes one section — so on a packet this would tick a row the next refresh
+ * demotes. Whether that holds is known at the call site and nowhere else: the
+ * confirm-correct path submits every section, while a save knows only the one it
+ * wrote. Already-reviewed documents are ignored so the counters cannot be moved
+ * twice by a re-save.
+ */
+export const applyReviewedToQueue = (queue: QueueState, objectKey: string, keepReviewed: boolean): QueueState => {
+  const reviewed = queue.documents.find((d) => d.objectKey === objectKey);
+  if (!reviewed || reviewed.reviewed) return queue;
+  return {
+    ...queue,
+    documents: keepReviewed
+      ? queue.documents.map((d) =>
+          d.objectKey === objectKey ? { ...d, labelSource: 'reviewed-human', reviewed: true, available: false } : d,
+        )
+      : queue.documents.filter((d) => d.objectKey !== objectKey),
+    reviewedDocs: queue.reviewedDocs + 1,
+    remainingDocs: Math.max(0, queue.remainingDocs - 1),
+  };
+};
 
 type DocView = 'ground-truth' | 'source';
 
@@ -306,10 +353,16 @@ const AnnotationWorkspace = (): React.JSX.Element => {
     }
   }, [testSetId]);
 
+  /**
+   * `background` reconciles without blocking: the spinner and every control
+   * gated on `isLoading` are left alone, so a refresh that takes ~9s on a large
+   * set runs behind whatever the reviewer is already doing. Used by the
+   * post-save advance, which has no reason to wait for it.
+   */
   const loadQueue = useCallback(
-    async (preserveSelection = true) => {
+    async (preserveSelection = true, background = false) => {
       if (!testSetId) return;
-      setIsLoading(true);
+      if (!background) setIsLoading(true);
       setError(null);
       try {
         const response = await client.graphql({
@@ -344,7 +397,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
             : 'Failed to load the annotation queue. Please try again.',
         );
       } finally {
-        setIsLoading(false);
+        if (!background) setIsLoading(false);
       }
     },
     [testSetId, requestedDoc, showReviewed],
@@ -451,18 +504,30 @@ const AnnotationWorkspace = (): React.JSX.Element => {
     [selected],
   );
 
-  const advanceToNext = useCallback(async () => {
-    const current = selectedKey;
-    await loadQueue(false);
-    loadImpact();
-    setQueue((data) => {
-      if (data) {
-        const next = data.documents.find((d) => d.available && d.objectKey !== current);
-        setSelectedKey(next?.objectKey ?? null);
-      }
-      return data;
-    });
-  }, [loadQueue, loadImpact, selectedKey]);
+  /**
+   * Open the next document, immediately.
+   *
+   * The queue in hand already names it, so this does not wait for a reload —
+   * `reviewedKey`, when given, is the document whose review just landed and is
+   * retired from the rail locally. The refresh still runs, behind the advance,
+   * because three things only the server knows have to land: claims other
+   * annotators have taken, its verdict on a document whose sections are not all
+   * reviewed, and the counters past the inspected page.
+   */
+  const advanceToNext = useCallback(
+    (reviewedKey?: string) => {
+      const current = selectedKey;
+      setQueue((data) => {
+        if (!data) return data;
+        const next = reviewedKey ? applyReviewedToQueue(data, reviewedKey, showReviewed) : data;
+        setSelectedKey(nextAvailableAfter(next.documents, current));
+        return next;
+      });
+      loadQueue(true, true);
+      loadImpact();
+    },
+    [loadQueue, loadImpact, selectedKey, showReviewed],
+  );
 
   /**
    * Confirm the draft labels are already correct, with no edits. "No changes
@@ -496,7 +561,9 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         },
       ]);
       setCelebration((n) => n + 1);
-      await advanceToNext();
+      // Every section was submitted just above, so this document really is
+      // reviewed and can be retired from the rail without waiting to be told.
+      advanceToNext(selected.objectKey);
     } catch (err) {
       logger.error('Error confirming labels:', err);
       const message = (err as { errors?: { message?: string }[] })?.errors?.[0]?.message;
@@ -509,19 +576,29 @@ const AnnotationWorkspace = (): React.JSX.Element => {
   const handleSaved = useCallback(
     (baselineKey: string) => {
       const documentName = documentNameFromBaselineKey(baselineKey);
+      // A save writes the section being viewed, and the server marks a document
+      // reviewed only once every section carries reviewed-human. So on a packet
+      // the document is NOT reviewed yet, and saying it is was a claim the test
+      // set's own Review state column contradicted ([#1321]). Read from the queue
+      // by name rather than from `selected`, for the reason given on
+      // documentNameFromBaselineKey.
+      const saved = queue?.documents.find((d) => d.objectKey === documentName);
+      const sectionsRemaining = (saved?.sectionCount ?? 1) > 1;
       setFlashItems([
         {
           type: 'success',
-          content: `Saved. ${documentName} is now marked reviewed.`,
+          content: sectionsRemaining
+            ? `Saved. ${documentName} has ${saved?.sectionCount} sections — it is marked reviewed once every one of them is.`
+            : `Saved. ${documentName} is now marked reviewed.`,
           dismissible: true,
           onDismiss: () => setFlashItems([]),
           id: 'annotation-saved',
         },
       ]);
       setCelebration((n) => n + 1);
-      advanceToNext();
+      advanceToNext(sectionsRemaining ? undefined : documentName);
     },
-    [advanceToNext],
+    [advanceToNext, queue],
   );
 
   const filteredQueue = useMemo(() => {
@@ -611,7 +688,10 @@ const AnnotationWorkspace = (): React.JSX.Element => {
    */
   const documentActions = selected && (
     <SpaceBetween direction="horizontal" size="xs">
-      <Button onClick={advanceToNext} disabled={isLoading}>
+      {/* Wrapped, not passed directly: Cloudscape hands onClick a CustomEvent,
+          which would arrive as `reviewedKey` and retire the document being
+          skipped as though it had been reviewed. */}
+      <Button onClick={() => advanceToNext()} disabled={isLoading}>
         Skip to next document
       </Button>
       {/* Exactly one primary at a time, and it is whichever action comes next:
@@ -881,10 +961,23 @@ const AnnotationWorkspace = (): React.JSX.Element => {
                       Searching a reviewed document by name until then returned "0 matches"
                       with no hint it was being filtered out, which is exactly the state an
                       annotator who has just mis-saved is in. */}
-                  {!showReviewed && (
-                    <Button variant="inline-link" onClick={() => setShowReviewed(true)}>
+                  {/* A button rather than an inline link: this is the only route back
+                      to a reviewed document, and as a link under the filter box it read
+                      as part of the filter's caption rather than as a control.
+                      Reviewed documents are not held client-side — the server omits them
+                      unless asked — so the toggle costs a queue reload, which is slow
+                      enough on a large set to look like a dead click. Hence the progress
+                      line while it runs, in place of the button. */}
+                  {!showReviewed ? (
+                    <Button iconName="status-positive" onClick={() => setShowReviewed(true)}>
                       Show reviewed documents
                     </Button>
+                  ) : (
+                    isLoading && (
+                      <Box fontSize="body-s" color="text-body-secondary">
+                        <Spinner /> Loading reviewed documents…
+                      </Box>
+                    )
                   )}
                   <Cards
                     items={pagedQueue}

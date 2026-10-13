@@ -40,7 +40,17 @@ describe('reaching a document that has already been reviewed', () => {
     // the "Queue complete" alert. Rendering it in the rail is what makes it reachable
     // at the moment it is needed.
     const rail = SOURCE.slice(SOURCE.indexOf('filteringPlaceholder="Find a document"'));
-    expect(rail).toMatch(/\{!showReviewed && \(\s*<Button variant="inline-link" onClick=\{\(\) => setShowReviewed\(true\)\}/);
+    expect(rail).toMatch(/\{!showReviewed \? \(\s*<Button iconName="status-positive" onClick=\{\(\) => setShowReviewed\(true\)\}/);
+  });
+
+  it('renders the reveal as a control rather than as the filter box’s caption', () => {
+    // Reported on [#1321]: being in the rail is necessary and was not sufficient. As
+    // `variant="inline-link"` directly under the filter box it read as part of that
+    // box's caption — the place Cloudscape puts match counts — so an annotator
+    // looking for their reviewed documents did not find it.
+    const rail = SOURCE.slice(SOURCE.indexOf('filteringPlaceholder="Find a document"'));
+    const reveal = rail.slice(rail.indexOf('{!showReviewed'), rail.indexOf('setShowReviewed(true)}'));
+    expect(reveal).not.toContain('variant="inline-link"');
   });
 
   it('does not claim there is nothing to review when a filter is what emptied the list', () => {
