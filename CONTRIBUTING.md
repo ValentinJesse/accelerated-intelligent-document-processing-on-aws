@@ -137,8 +137,8 @@ npm install -g basedpyright    # the type-check gate; neither target above insta
 
 `make setup` and `make setup-venv` install `idp_common`, `idp_cli`, `idp_sdk`,
 `idp_mcp_connector`, `idp_feature_sdk`, the capacity-planning test dependencies,
-and the pinned `cfn-lint`, then verify that every first-party package resolved
-from the checkout. Use them in preference to hand-rolling `pip install` lines.
+and the pinned `cfn-lint` and `ruff`, then verify that every first-party package
+resolved from the checkout. Use them in preference to hand-rolling `pip install` lines.
 
 **Activate the virtual environment if you used `make setup-venv`.** The
 `Makefile` resolves `$(PYTHON)` and `$(PIP)` to `.venv/bin/` when `.venv`

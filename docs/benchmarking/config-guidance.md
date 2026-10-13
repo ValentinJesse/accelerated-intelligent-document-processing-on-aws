@@ -38,7 +38,7 @@ this table before citing a figure.
 | Section | On v0.6.9? | Data |
 |---|---|---|
 | §2 configuration matrix (19 cells × 7 synthetic docs) | ✅ re-measured | `coresynth__extraction-model-sonnet5` (133 runs) |
-| §2c real-corpus accuracy | ⚠️ **control model only** | `core` reference corpora, 760 documents, at Sonnet 4.6. The Sonnet 5 corpus tables are carried over from v0.6.8 |
+| §2c real-corpus accuracy | ⚠️ **carried over, both arms** | The two-model comparison is the v0.6.8 pair (`core` and `core__extraction-model-sonnet5`, 760 documents each). This release ran the corpora at the **control** only, so refreshing one arm would turn the model comparison into a cross-release one — the current-release control figures are quoted in §2c instead |
 | §2.1 integrated + simple hazard | ✅ re-measured | `intconf` (8 runs) |
 | §3 scaling | ✅ re-measured | `scaling__extraction-model-sonnet5`, `scalingsimple__extraction-model-sonnet5`, `scaling` (control) |
 | §4 cost level and variance | ✅ re-measured | `cost__extraction-model-sonnet5`, `cost` (control), n=5 each |
@@ -285,15 +285,34 @@ is the total across the 7 documents, where the ground truth is **7** (one per do
 
 ### 2c. Real-corpus accuracy (RealKIE-FCC-Verified, OmniAI-OCR-Benchmark)
 
-Both reference corpora ran as Test Studio test sets on the same stack — 20 documents each,
-every one of the 19 cells, at the shipped default model **and** at the control — and were
-scored by the product's own evaluation against their labels (`weighted_accuracy`; the
-harness's exact-key metrics do not apply to real documents). **1,520 documents, 1,520
-completed, 0 parse failures.** This is the first real-corpus measurement since v0.6.0, which
-reported RealKIE-FCC ≈0.80 and OCR-Benchmark ≈0.87.
+Both reference corpora run as Test Studio test sets — 20 documents each, every one of the 19
+cells — and are scored by the product's own evaluation against their labels
+(`weighted_accuracy` for extracted fields, `class_accuracy` for classification; the
+harness's exact-key metrics do not apply to a document whose truth lives on the stack
+rather than in `corpus/docs/`, so `cells_compared`, `cell_accuracy`, `scalar_accuracy` and
+`completeness_recall` are absent on these rows — absent, not zero. Each row says which
+scorer produced it in `scored_against`).
+
+**The four tables below are the v0.6.8 pair** — one grid at the shipped default and one at
+the control, on one stack, which is what makes the model comparison in finding 2 a
+comparison of models rather than of releases. **1,520 documents, 1,520 completed, 0 parse
+failures.** v0.6.0, the previous real-corpus measurement, reported RealKIE-FCC ≈0.80 and
+OCR-Benchmark ≈0.87.
+
+v0.6.11 ran both corpora again at the **control only** — 2,280 scored runs over the same
+760 (cell, corpus, document) triples at 3 repeats, 2,280 completed, 0 parse failures — and
+it reproduces the v0.6.8 control picture: RealKIE **0.777–0.811** weighted accuracy across
+the 19 cells (corpus mean 0.796, $0.1932/document), OCR-Benchmark **0.971–0.998** (corpus
+mean 0.996, $0.0395/document), class accuracy 1.000 everywhere. Render the per-cell tables
+from the committed artifact with
+
+```bash
+python3 benchmarks/harness/aggregate.py \
+    --reference-tables benchmarks/results/v0.6.11/core/summary.json
+```
 
 
-### RealKIE-FCC-Verified (20 docs, 1 class) — extraction Sonnet 5 (shipped default)
+### RealKIE-FCC-Verified (20 docs, 1 class) — extraction Sonnet 5 (shipped default), v0.6.8
 | cell | docs | completed | weighted accuracy | class accuracy | parse failures | cost/doc | wall |
 |---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.777 | 1.000 | 0 | $0.1934 | 43 s |
@@ -316,7 +335,7 @@ reported RealKIE-FCC ≈0.80 and OCR-Benchmark ≈0.87.
 | `split-llm` | 20 | 20 | 0.764 | 1.000 | 0 | $0.1943 | 39 s |
 | `split-disabled` | 20 | 20 | 0.771 | 1.000 | 0 | $0.1737 | 43 s |
 
-### OmniAI-OCR-Benchmark (20 docs, 9 classes) — extraction Sonnet 5 (shipped default)
+### OmniAI-OCR-Benchmark (20 docs, 9 classes) — extraction Sonnet 5 (shipped default), v0.6.8
 | cell | docs | completed | weighted accuracy | class accuracy | parse failures | cost/doc | wall |
 |---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.997 | 1.000 | 0 | $0.0411 | 26 s |
@@ -339,7 +358,7 @@ reported RealKIE-FCC ≈0.80 and OCR-Benchmark ≈0.87.
 | `split-llm` | 20 | 20 | 0.988 | 1.000 | 0 | $0.0410 | 25 s |
 | `split-disabled` | 20 | 20 | 0.996 | 1.000 | 0 | $0.0410 | 25 s |
 
-### RealKIE-FCC-Verified (20 docs, 1 class) — extraction Sonnet 4.6 (control)
+### RealKIE-FCC-Verified (20 docs, 1 class) — extraction Sonnet 4.6 (control), v0.6.8
 | cell | docs | completed | weighted accuracy | class accuracy | parse failures | mean conf | cost/doc | wall |
 |---|---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.805 | 1.000 | 0 | 0.908 | $0.1434 | 42 s |
@@ -362,7 +381,7 @@ reported RealKIE-FCC ≈0.80 and OCR-Benchmark ≈0.87.
 | `split-llm` | 20 | 20 | 0.805 | 1.000 | 0 | 0.903 | $0.1433 | 40 s |
 | `split-disabled` | 20 | 20 | 0.842 | 1.000 | 0 | 0.929 | $0.1260 | 44 s |
 
-### OmniAI-OCR-Benchmark (20 docs, 9 classes) — extraction Sonnet 4.6 (control)
+### OmniAI-OCR-Benchmark (20 docs, 9 classes) — extraction Sonnet 4.6 (control), v0.6.8
 | cell | docs | completed | weighted accuracy | class accuracy | parse failures | mean conf | cost/doc | wall |
 |---|---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.997 | 1.000 | 0 | 0.960 | $0.0334 | 24 s |
@@ -393,7 +412,7 @@ reported RealKIE-FCC ≈0.80 and OCR-Benchmark ≈0.87.
    grid. Mode, assessment, forcing, restatement and splitting make no measurable difference
    on these documents, and the whole corpus costs $0.02–0.05 per document in simple mode.
 2. **RealKIE is a harder corpus, and the control model is slightly better on it than the
-   default.** Sonnet 4.6 scores 0.78–0.84 across the cells; Sonnet 5 0.73–0.80 — a
+   default.** Sonnet 4.6 scores 0.77–0.84 across the cells; Sonnet 5 0.73–0.80 — a
    consistent 2–5 points lower on 18 of 19 cells, at 30–40% higher cost. This is the one
    place in the study where the shipped default is measurably worse than the cheaper model,
    and the reason the model-selection table in §5.5 recommends Sonnet 4.6 for single-class

@@ -744,13 +744,26 @@ that pointer for everyone. One of this repo's own gates is such a writer
 resulting run is **green and about another tree**, which is why it cost several
 sessions a day each ([#1094](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1094)).
 
-`PYTEST_HERMETIC` in `make/hermetic_aws.mk` — the wrapper every pytest invocation in
-both Makefiles goes through — now exports an absolute `PYTHONPATH` naming every
-`lib/*` package root of the checkout that makefile belongs to, and
+`FIRST_PARTY_PIN` in `make/hermetic_aws.mk` exports an absolute `PYTHONPATH` naming
+every `lib/*` package root of the checkout that makefile belongs to, and
 `scripts/run_all_tests.py` passes the same value to every subprocess `make test`
 starts. The set is derived from `lib/*/pyproject.toml`, so a new package under `lib/`
 is covered without being listed; `FIRST_PARTY_PYTHONPATH=` suppresses the pin for the
 deliberate case of testing an installed copy.
+
+⚠️ **Two wrappers carry that pin, because one target cannot take the other half.**
+`PYTEST_HERMETIC` is the pin plus `HERMETIC_AWS`, and every offline pytest invocation
+in both Makefiles goes through it. `make test-integration` calls real AWS, so it
+cannot: `HERMETIC_AWS` strips the credentials those tests exist to use. It was a bare
+`$(PYTHON) -m pytest`, which dropped the **pin** along with the stripping — so the one
+suite that talks to real infrastructure was the one free to measure whichever checkout
+`site-packages` pointed at, which is #1094 on the target least likely to be noticed.
+It now uses `PYTEST_FIRST_PARTY`, the pin without the stripping
+([#1365](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1365)).
+Both directions are measured rather than read: `test_first_party_pythonpath.py` reads
+the command back from `make --dry-run` and asserts every first-party package imports
+from this checkout under it, and `test_offline_suites_are_hermetic.py` asserts a boto3
+client under that same command still resolves the region the environment supplies.
 
 ⚠️ **Running `pytest` directly, pin it yourself: every root, and absolute.** The
 packages import each other, so `PYTHONPATH=lib/idp_common_pkg` alone is refused by the

@@ -91,6 +91,12 @@ stages:
   - pip install uv
   - uv venv .venv
   - source .venv/bin/activate
+  # Pinned: ruff gates every Python file via `make lint-cicd`, and an unpinned
+  # linter can red-line develop with no code change when a release promotes a
+  # check to ERROR class or changes `ruff format` output. Keep in step with
+  # RUFF_VERSION in the Makefile, which is the single source of truth — the
+  # Makefile installs this version, the GitHub composite action installs it, and
+  # scripts/tests/test_ci_gate_parity.py fails if any of the three drift.
   - uv pip install 'ruff==0.15.13'
   # Needed by publish.py for test imports
   - uv pip install typer rich boto3

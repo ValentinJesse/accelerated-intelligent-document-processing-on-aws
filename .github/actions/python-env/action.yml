@@ -71,6 +71,11 @@ runs:
       env:
         WANT_CFN_LINT: ${{ inputs.cfn-lint }}
       run: |
+        # Pinned for the same reason as cfn-lint below: an unpinned linter on a
+        # blocking gate can red-line develop with no code change. Keep in step
+        # with RUFF_VERSION in the Makefile, which is the single source of truth
+        # — scripts/tests/test_ci_gate_parity.py fails if this, .gitlab-ci.yml
+        # and the Makefile disagree.
         uv pip install 'ruff==0.15.13'
         if [ "$WANT_CFN_LINT" = "true" ]; then
           # Pinned: cfn-lint gates templates via `make lint-cicd`, and an unpinned
