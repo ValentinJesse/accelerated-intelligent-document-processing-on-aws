@@ -270,11 +270,25 @@ const renderViewer = () => render(<PageImageViewer pageIds={ONE_PAGE_IDS} docume
 const pageImage = () => screen.getByAltText('Page 1');
 
 describe('PageImageViewer rotation controls', () => {
+  it('names the rotate controls for a screen reader rather than leaving a glyph', async () => {
+    // Their content is "↺"/"↻", which a screen reader reads as "anticlockwise
+    // open circle arrow" or skips. `title` alone is a fallback and is not
+    // announced dependably, so the name is asserted here — the queries in the
+    // tests below would pass on `title` alone and would not catch its loss.
+    renderViewer();
+    await waitFor(() => expect(pageImage()).toBeInTheDocument());
+
+    ['Rotate left 90 degrees', 'Rotate right 90 degrees'].forEach((name) => {
+      const control = screen.getByRole('button', { name });
+      expect(control).toHaveAttribute('aria-label', name);
+    });
+  });
+
   it('turns the page right, wrapping back to 0° on the fourth click', async () => {
     renderViewer();
     await waitFor(() => expect(pageImage()).toBeInTheDocument());
 
-    const right = screen.getByTitle('Rotate Right 90°');
+    const right = screen.getByRole('button', { name: 'Rotate right 90 degrees' });
     expect(screen.getByText('0°')).toBeInTheDocument();
 
     right.click();
@@ -293,7 +307,7 @@ describe('PageImageViewer rotation controls', () => {
     renderViewer();
     await waitFor(() => expect(pageImage()).toBeInTheDocument());
 
-    screen.getByTitle('Rotate Left 90°').click();
+    screen.getByRole('button', { name: 'Rotate left 90 degrees' }).click();
     await waitFor(() => expect(screen.getByText('270°')).toBeInTheDocument());
     expect(screen.queryByText('-90°')).not.toBeInTheDocument();
   });
@@ -302,7 +316,7 @@ describe('PageImageViewer rotation controls', () => {
     renderViewer();
     await waitFor(() => expect(pageImage()).toBeInTheDocument());
 
-    screen.getByTitle('Rotate Right 90°').click();
+    screen.getByRole('button', { name: 'Rotate right 90 degrees' }).click();
     screen.getByTitle('Zoom In').click();
     await waitFor(() => expect(screen.getByText('90°')).toBeInTheDocument());
 
@@ -322,7 +336,7 @@ describe('PageImageViewer rotation controls', () => {
     render(<PageImageViewer pageIds={TWO_PAGE_IDS} documentPages={TWO_PAGES} />);
     await waitFor(() => expect(pageImage()).toBeInTheDocument());
 
-    screen.getByTitle('Rotate Right 90°').click();
+    screen.getByRole('button', { name: 'Rotate right 90 degrees' }).click();
     await waitFor(() => expect(screen.getByText('90°')).toBeInTheDocument());
 
     expect(screen.getByText('Page 1 of 2')).toBeInTheDocument();

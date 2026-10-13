@@ -830,6 +830,10 @@ const PageImageViewer = ({
                 padding: '2px 3px',
               }}
               title="Rotate Left 90°"
+              // The content is a glyph, so without this the accessible name is
+              // "anticlockwise open circle arrow". `title` is only a fallback
+              // and is not announced dependably.
+              aria-label="Rotate left 90 degrees"
             >
               ↺
             </span>
@@ -846,6 +850,7 @@ const PageImageViewer = ({
                 padding: '2px 3px',
               }}
               title="Rotate Right 90°"
+              aria-label="Rotate right 90 degrees"
             >
               ↻
             </span>
