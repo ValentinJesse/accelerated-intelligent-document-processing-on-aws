@@ -16,7 +16,7 @@
  * estimator reads.
  */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -154,6 +154,12 @@ export const nextAvailableAfter = (documents: QueueItem[], current: string | nul
  * confirm-correct path submits every section, while a save knows only the one it
  * wrote. Already-reviewed documents are ignored so the counters cannot be moved
  * twice by a re-save.
+ *
+ * `remainingDocs` is maintained although this screen never renders it (the
+ * landing page reads it from its own query). The local queue is a stand-in for
+ * what the server would next return, so a field left stale here is a trap for
+ * whoever first displays it; two of the tests below pin behaviour nothing
+ * currently shows, deliberately.
  */
 export const applyReviewedToQueue = (queue: QueueState, objectKey: string, keepReviewed: boolean): QueueState => {
   const reviewed = queue.documents.find((d) => d.objectKey === objectKey);
@@ -284,15 +290,37 @@ const AnnotationWorkspace = (): React.JSX.Element => {
     totalObservations: number;
   } | null>(null);
 
+  /**
+   * One guard per mounted workspace, for the same reason TestSetDetail holds
+   * one: `useRef(createLatestResponseGuard())` would build a fresh guard on
+   * every render and discard all but the first.
+   *
+   * The estimate gets its own rather than sharing the queue's, which would make
+   * two independent requests cancel each other. It needs one for the same
+   * reason the queue does, now that a reload is issued per click rather than
+   * once per blocking advance: two overlapping estimateReviewEffort replies can
+   * land out of order and leave the Estimated label accuracy panel showing the
+   * older number, i.e. appearing to go backwards after a review.
+   */
+  const responseGuard = useMemo(createLatestResponseGuard, []);
+  const impactGuard = useMemo(createLatestResponseGuard, []);
+
+  /**
+   * How many foreground loads are in flight. A count rather than a flag because
+   * the spinner belongs to all of them collectively; see `loadQueue`'s `finally`.
+   */
+  const foregroundLoads = useRef(0);
+
   const loadImpact = useCallback(async () => {
     if (!testSetId) return;
+    const isCurrentEstimate = impactGuard.claim();
     try {
       const response = await client.graphql({
         query: estimateReviewEffort,
         variables: { testSetId },
       });
       const est = response.data?.estimateReviewEffort;
-      if (!est) return;
+      if (!est || !isCurrentEstimate()) return;
       setImpact({
         baselineError: est.baselineError ?? 0,
         residualError: est.residualError ?? 0,
@@ -305,7 +333,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       // Best-effort: the queue is fully usable without this panel.
       logger.debug('Could not load review impact:', err);
     }
-  }, [testSetId]);
+  }, [testSetId, impactGuard]);
 
   /**
    * Open the version transition this session will work in.
@@ -355,13 +383,6 @@ const AnnotationWorkspace = (): React.JSX.Element => {
   }, [testSetId]);
 
   /**
-   * One guard per mounted workspace, for the same reason TestSetDetail holds
-   * one: `useRef(createLatestResponseGuard())` would build a fresh guard on
-   * every render and discard all but the first.
-   */
-  const responseGuard = useMemo(createLatestResponseGuard, []);
-
-  /**
    * `background` reconciles without blocking: the spinner and every control
    * gated on `isLoading` are left alone, so a refresh that takes ~9s on a large
    * set runs behind whatever the reviewer is already doing. Used by the
@@ -390,8 +411,11 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       // Claimed before the await, so precedence is decided by which request
       // started last rather than by which happened to finish last.
       const isCurrentLoad = responseGuard.claim();
-      if (!background) setIsLoading(true);
-      if (!background) setError(null);
+      if (!background) {
+        foregroundLoads.current += 1;
+        setIsLoading(true);
+        setError(null);
+      }
       try {
         const response = await client.graphql({
           query: getAnnotationQueue,
@@ -431,7 +455,21 @@ const AnnotationWorkspace = (): React.JSX.Element => {
           );
         }
       } finally {
-        if (!background) setIsLoading(false);
+        // Cleared when the LAST foreground load finishes, not when this one does.
+        //
+        // ⚠️ Not `isCurrentLoad()`, which is the obvious reading of "only the
+        // current request owns the spinner" and deadlocks here: a background
+        // load claims the same guard, so it can supersede a foreground one that
+        // then declines to clear the spinner no background load will ever clear
+        // either — leaving isLoading true for good, with Claim, Release,
+        // Confirm and Skip all disabled. Counting in-flight foreground loads
+        // keeps the protective half (a superseded reply cannot report "loaded"
+        // while the reply that will be shown is still coming) without
+        // introducing a state nothing can leave.
+        if (!background) {
+          foregroundLoads.current = Math.max(0, foregroundLoads.current - 1);
+          if (foregroundLoads.current === 0) setIsLoading(false);
+        }
       }
     },
     [testSetId, requestedDoc, showReviewed, responseGuard],
@@ -541,15 +579,23 @@ const AnnotationWorkspace = (): React.JSX.Element => {
   /**
    * Open the next document, immediately.
    *
-   * The queue in hand already names it, so this does not wait for a reload —
+   * The queue in hand already names it, so this does not wait for a reload.
    * `reviewedKey`, when given, is the document whose review just landed and is
-   * retired from the rail locally. The refresh still runs, behind the advance,
-   * because three things only the server knows have to land: claims other
-   * annotators have taken, its verdict on a document whose sections are not all
-   * reviewed, and the counters past the inspected page.
+   * retired from the rail locally.
+   *
+   * `refresh` is what pays for the reconcile, and a **skip must not**. A reload
+   * is a full LIST of the set's `baseline/` prefix plus a read of every section
+   * of the 200 ranked documents — ~9s on a one-section set and ~24s on a packet
+   * set — and the await used to serialise those. Without it, N rapid clicks
+   * start N of them server-side; the response guard decides only which reply is
+   * allowed to render, not which requests run. A save or a confirmation changes
+   * server state and has something to collect: the server's verdict on a
+   * document whose sections may now all be reviewed, and the counters past the
+   * inspected page. A skip changes nothing, so its reload could only ever
+   * report another annotator's claim, which the next save picks up anyway.
    */
   const advanceToNext = useCallback(
-    (reviewedKey?: string) => {
+    ({ reviewedKey, refresh = true }: { reviewedKey?: string; refresh?: boolean } = {}) => {
       const current = selectedKey;
       setQueue((data) => {
         if (!data) return data;
@@ -557,8 +603,10 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         setSelectedKey(nextAvailableAfter(next.documents, current));
         return next;
       });
-      loadQueue(true, true);
-      loadImpact();
+      if (refresh) {
+        loadQueue(true, true);
+        loadImpact();
+      }
     },
     [loadQueue, loadImpact, selectedKey, showReviewed],
   );
@@ -597,7 +645,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       setCelebration((n) => n + 1);
       // Every section was submitted just above, so this document really is
       // reviewed and can be retired from the rail without waiting to be told.
-      advanceToNext(selected.objectKey);
+      advanceToNext({ reviewedKey: selected.objectKey });
     } catch (err) {
       logger.error('Error confirming labels:', err);
       const message = (err as { errors?: { message?: string }[] })?.errors?.[0]?.message;
@@ -617,12 +665,20 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       // by name rather than from `selected`, for the reason given on
       // documentNameFromBaselineKey.
       const saved = queue?.documents.find((d) => d.objectKey === documentName);
-      const sectionsRemaining = (saved?.sectionCount ?? 1) > 1;
+      // "Has more than one section", which is all that is knowable here — NOT
+      // "sections are still outstanding". Per-section review state is not on the
+      // queue (TestSetDocumentSectionRef carries none) and `reviewStatus` only
+      // separates InProgress from not-started, so saving the LAST section of a
+      // packet is indistinguishable here from saving its first. The message
+      // therefore states the rule and gives no instruction that would be wrong
+      // in that case: an earlier draft told the reviewer to go back for the rest,
+      // which on a final save is work already done.
+      const isMultiSection = (saved?.sectionCount ?? 1) > 1;
       setFlashItems([
         {
           type: 'success',
-          content: sectionsRemaining
-            ? `Saved. ${documentName} has ${saved?.sectionCount} sections and is marked reviewed once every one of them is — reopen it from the queue to work the rest.`
+          content: isMultiSection
+            ? `Saved. ${documentName} is marked reviewed once all ${saved?.sectionCount} of its sections carry a human verdict.`
             : `Saved. ${documentName} is now marked reviewed.`,
           dismissible: true,
           onDismiss: () => setFlashItems([]),
@@ -630,7 +686,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         },
       ]);
       setCelebration((n) => n + 1);
-      advanceToNext(sectionsRemaining ? undefined : documentName);
+      advanceToNext({ reviewedKey: isMultiSection ? undefined : documentName });
     },
     [advanceToNext, queue],
   );
@@ -722,10 +778,9 @@ const AnnotationWorkspace = (): React.JSX.Element => {
    */
   const documentActions = selected && (
     <SpaceBetween direction="horizontal" size="xs">
-      {/* Wrapped, not passed directly: Cloudscape hands onClick a CustomEvent,
-          which would arrive as `reviewedKey` and retire the document being
-          skipped as though it had been reviewed. */}
-      <Button onClick={() => advanceToNext()} disabled={isLoading}>
+      {/* No `reviewedKey` — a skip is not a verdict — and no refresh, since a
+          skip changes nothing server-side for one to collect. See advanceToNext. */}
+      <Button onClick={() => advanceToNext({ refresh: false })} disabled={isLoading}>
         Skip to next document
       </Button>
       {/* Exactly one primary at a time, and it is whichever action comes next:

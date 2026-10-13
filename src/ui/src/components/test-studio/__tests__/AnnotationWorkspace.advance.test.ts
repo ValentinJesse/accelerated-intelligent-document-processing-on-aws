@@ -19,10 +19,10 @@
  * The queue in hand already names the next document, so the advance no longer
  * waits for anything. The two functions below are what it advances with, and the
  * source-level checks pin the ways the fix can be undone: re-awaiting the reload,
- * retiring a document the reviewer only skipped or only part-reviewed, and —
- * found in review of this change — letting an overlapping background reload
- * replace the queue with rows that predate the save that triggered it, which
- * would make the save undo itself on screen a few seconds later.
+ * retiring a document the reviewer only skipped or only part-reviewed, and
+ * letting an overlapping background reload replace the queue with rows that
+ * predate the save that triggered it, which would make the save undo itself on
+ * screen a few seconds later.
  *
  * Asserted at source level rather than by rendering, for the reason given in
  * AnnotationWorkspace.editGating.test.ts: the component needs the GraphQL
@@ -148,26 +148,32 @@ describe('the advance does not wait for the queue reload', () => {
     expect(body).not.toContain('await loadQueue');
   });
 
-  it('skips a document without retiring it as reviewed', () => {
-    // The argument is what distinguishes skipping from finishing, and passing one
-    // here is the mistake that type checking cannot see: `advanceToNext(
-    // selected.objectKey)` is well-typed and would mark a document the reviewer
-    // deliberately skipped as reviewed, hiding it from the queue.
-    //
-    // Handing the handler over unwrapped is the other way to pass an argument by
-    // accident — Cloudscape calls it with a CustomEvent — but that one `tsc`
-    // rejects outright (TS2322: CustomEvent is not assignable to `string |
-    // undefined`), so it needs no assertion here.
-    expect(SOURCE).toContain('onClick={() => advanceToNext()}');
+  it('skips a document without retiring it as reviewed, and without a reload', () => {
+    // Two mistakes type checking cannot see, both well-typed. `reviewedKey` would
+    // mark a document the reviewer deliberately skipped as reviewed and hide it
+    // from the queue. And a skip changes nothing server-side, so a reload could
+    // only report another annotator's claim while costing a full LIST of the
+    // baseline prefix plus a read of every section of 200 documents — paid once
+    // per click, since nothing serialises them any more.
+    expect(SOURCE).toContain('onClick={() => advanceToNext({ refresh: false })}');
   });
 
   it('claims a document as reviewed only where every section of it is', () => {
     // applyReviewedToQueue's contract is a precondition on its caller, and this
-    // is the caller: `sectionsRemaining` is what decides whether the document is
+    // is the caller: `isMultiSection` is what decides whether the document is
     // retired from the rail. Passing `documentName` unconditionally would tick a
     // packet after one of its sections was saved — the state the save
     // confirmation used to claim and the test set's Review state column denied.
-    expect(SOURCE).toContain('advanceToNext(sectionsRemaining ? undefined : documentName)');
+    expect(SOURCE).toContain('advanceToNext({ reviewedKey: isMultiSection ? undefined : documentName })');
+  });
+
+  it('refreshes after a save and a confirmation, which do change server state', () => {
+    // The counterpart to the skip: these two have something to collect — the
+    // server's verdict on a document whose sections may now all be reviewed, and
+    // the counters past the inspected page — so they must not be given the
+    // skip's treatment.
+    expect(SOURCE).toContain('advanceToNext({ reviewedKey: selected.objectKey })');
+    expect(SOURCE).not.toMatch(/advanceToNext\(\{[^}]*refresh: false[^}]*reviewedKey/);
   });
 });
 
@@ -203,11 +209,32 @@ describe('an overlapping reload cannot undo a save', () => {
     // on there being no error, so a background failure would sit over the
     // document being worked on, offering no action, and hide the completion
     // message. Every setError on this path is therefore conditional.
-    expect(body).toContain('if (!background) setError(null)');
+    expect(body).toMatch(/if \(!background\) \{\s*foregroundLoads\.current \+= 1;\s*setIsLoading\(true\);\s*setError\(null\);\s*\}/);
     expect(body).toContain("if (!background) setError('The annotation queue could not be loaded.')");
     expect(body).toContain('if (!background && isCurrentLoad()) {');
     // Counted, so a fourth call added later has to be guarded too rather than
     // slipping past three assertions that each still pass.
     expect(body.match(/setError\(/g) ?? []).toHaveLength(3);
+  });
+
+  it('lets the last foreground load clear the spinner, and no other', () => {
+    // The spinner needs the same protection as the rows: a superseded reply
+    // clearing it reports "loaded" while the reply that will actually be shown
+    // is still in flight — and on this screen that also empties the reveal
+    // control, which renders the progress line only while isLoading, so it
+    // vanishes mid-load leaving nothing in its place.
+    //
+    // ⚠️ But NOT via isCurrentLoad(). A background load claims the same guard,
+    // so it can supersede a foreground one; the foreground then declines to
+    // clear a spinner no background load clears either, and isLoading sticks
+    // true with Claim, Release, Confirm and Skip disabled for good. Hence the
+    // in-flight count. This asserts the shape that cannot deadlock, and the
+    // count of setIsLoading calls, so a fourth is not added unguarded — the
+    // ratchet the setError assertion above has and this state did not.
+    expect(body).toContain('foregroundLoads.current += 1');
+    expect(body).toContain('foregroundLoads.current = Math.max(0, foregroundLoads.current - 1)');
+    expect(body).toContain('if (foregroundLoads.current === 0) setIsLoading(false)');
+    expect(body).not.toMatch(/isCurrentLoad\(\)\)\s*setIsLoading\(false\)/);
+    expect(body.match(/setIsLoading\(/g) ?? []).toHaveLength(2);
   });
 });
