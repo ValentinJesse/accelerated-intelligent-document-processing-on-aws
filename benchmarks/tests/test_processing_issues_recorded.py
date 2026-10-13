@@ -432,6 +432,16 @@ def test_severity_does_not_collapse_into_one_field(tmp_path):
     assert csv_rows[0]["processing_issue_severities"] == "error=1 warning=2"
     # And the stage axis survives too, so "which service warned" is readable.
     assert out["processing_issues_by_stage"] == {"extraction": 2, "assessment": 1}
+    # EVERY issue, not the first. A detail list truncated to its head keeps every
+    # tally above correct and loses the other two messages, and the message is the
+    # reason the list exists. Measured: `issues[:1]` survived a suite that asserted
+    # only the tallies.
+    assert len(out["processing_issue_detail"]) == 3
+    assert [d["code"] for d in out["processing_issue_detail"]] == [
+        "extraction_rows_below_ocr_estimate",
+        "extraction_incomplete",
+        "assessment_truncated",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +540,23 @@ def test_an_issue_type_nobody_has_written_yet_is_recorded_unchanged(
 # ---------------------------------------------------------------------------
 # Absence versus failure, and the model as the authority.
 # ---------------------------------------------------------------------------
+
+
+def test_every_section_of_a_long_packet_is_read():
+    """A real packet has more sections than any fixture above, and a reader that
+    stopped after the first few would keep every test green while losing the
+    warnings on the tail. Measured: ``sections[:5]`` survived a suite whose largest
+    document had five sections. 40 is well past any plausible head slice and past
+    the section count of the largest document in this corpus.
+    """
+    n = 40
+    sections = [
+        _section(_issue("extraction_incomplete"), section_id=str(i)) for i in range(n)
+    ]
+    out = analyze.score_processing_issues(sections)
+    assert out["processing_issues"] == n
+    assert out["processing_issues_by_code"] == {"extraction_incomplete": n}
+    assert len(out["processing_issue_detail"]) == n
 
 
 def test_a_clean_document_records_zero_and_never_null():
@@ -637,14 +664,79 @@ def test_each_issue_is_normalised_through_the_shipped_model_not_a_lookalike():
         "severity": "error",
         "code": "extraction_rows_below_ocr_estimate",
         "message": "lost rows",
+        # Every OPTIONAL field populated, deliberately. `to_dict` omits an empty
+        # one, so a fixture leaving `section_id` out compares equal on both sides
+        # whether the recorder keeps the field or drops it — measured: popping
+        # `section_id` before recording survived the suite, and it is the field
+        # that says WHICH section warned.
+        "section_id": "3",
         "root_cause": "x" * (ProcessingIssue.MAX_ROOT_CAUSE_BYTES * 4),
         "details": {"blob": "y" * (ProcessingIssue.MAX_DETAIL_STRING_BYTES * 4)},
     }
     out = analyze.score_processing_issues([{"metadata": {"processing_issues": [raw]}}])
     (recorded,) = out["processing_issue_detail"]
     assert recorded == ProcessingIssue.from_dict(raw).to_dict()
+    # Named explicitly as well as compared, so the comparison cannot pass by both
+    # sides omitting the same field.
+    assert set(recorded) == {
+        "stage",
+        "severity",
+        "code",
+        "message",
+        "section_id",
+        "root_cause",
+        "details",
+    }
+    assert recorded["section_id"] == "3"
     assert len(recorded["root_cause"]) < len(raw["root_cause"])
     assert len(recorded["details"]["blob"]) < len(raw["details"]["blob"])
+
+
+def test_an_issue_entry_the_model_refuses_is_counted_not_raised():
+    """``isinstance(entry, dict)`` is not enough to admit an entry to the model.
+
+    ``ProcessingIssue.__post_init__`` byte-truncates ``root_cause``, so an entry
+    carrying a non-string there raises ``AttributeError: 'dict' object has no
+    attribute 'encode'`` — and before the guard existed that one entry killed the
+    whole scoring pass, which is exactly what
+    ``test_a_section_whose_metadata_is_not_a_dict_does_not_stop_the_document``
+    says must not happen. It is ``root_cause`` specifically: the same wrong type
+    in ``details``, ``message``, ``code`` or ``stage`` reads fine.
+    """
+    bad = {
+        "stage": "extraction",
+        "severity": "warning",
+        "code": "extraction_incomplete",
+        "message": "m",
+        "root_cause": {"not": "a string"},
+    }
+    out = analyze.score_processing_issues(
+        [
+            {"metadata": {"processing_issues": [bad]}},
+            _section(_issue("extraction_sparse")),
+        ]
+    )
+    # The pass survives, the good issue is still recorded, and the bad one is
+    # counted AND named rather than swallowed.
+    assert out["processing_issues"] == 1
+    assert out["processing_issues_by_code"] == {"extraction_sparse": 1}
+    assert out["processing_issues_malformed"] == 1
+    (why,) = out["processing_issues_malformed_why"]
+    assert "extraction_incomplete" in why and "AttributeError" in why
+
+
+def test_a_document_whose_every_issue_is_unparseable_does_not_read_as_clean():
+    """``0`` issues and ``0`` malformed is the clean reading. ``0`` issues with a
+    malformed count is a document that warned about something nobody can read, and
+    collapsing the two would be this issue's own defect reproduced inside its own
+    fix. Measured: ``malformed if issues else None`` survived a suite whose
+    malformed fixtures always carried one valid issue alongside."""
+    out = analyze.score_processing_issues(
+        [{"metadata": {"processing_issues": ["not a dict", 7]}}]
+    )
+    assert out["processing_issues"] == 0
+    assert out["processing_issues_malformed"] == 2
+    assert len(out["processing_issues_malformed_why"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +871,38 @@ def test_scoring_prints_a_warning_naming_the_codes(tmp_path, capsys):
     assert "1 issue(s) on 1 of 1 runs" in printed
 
 
+def test_the_notice_prints_for_a_warning_with_no_error_anywhere(tmp_path, capsys):
+    """The severity that matters most, and the one a notice keyed on ``error``
+    would silently skip.
+
+    ``extraction_rows_below_ocr_estimate`` fires at **warning** on the shipped
+    default: ``extraction/service.py`` chooses ``"error" if shortfall_action ==
+    "fail" else "warning"``, and ``system_defaults/base-extraction.yaml`` ships
+    ``row_shortfall_action: warn``. So a grid run on the default configuration —
+    which is the configuration #1361 was run on — carries no error-severity issue
+    at all, and a notice that needed one would print nothing on exactly the case
+    the notice exists for. Measured: keying the notice on
+    ``by_severity["error"]`` instead of on the issue count left the suite green
+    until this test existed.
+    """
+    aggregate.write_summary(
+        {},
+        [
+            _row(
+                "warned",
+                "d.pdf",
+                [_section(_issue("extraction_rows_below_ocr_estimate", "warning"))],
+            )
+        ],
+        str(tmp_path / "s"),
+    )
+    printed = capsys.readouterr().out
+    assert "processing issues" in printed
+    assert "warning=1" in printed
+    assert "error" not in printed
+    assert "extraction_rows_below_ocr_estimate=1" in printed
+
+
 def test_a_clean_grid_prints_no_warning(tmp_path, capsys):
     """Non-vacuity in the other direction: a notice printed on every run is one
     nobody reads."""
@@ -814,11 +938,21 @@ def test_the_cell_block_is_present_even_when_a_cell_recorded_nothing(tmp_path):
     """What makes the registration above work: a scored-and-clean cell must be
     distinguishable from a cell scored before the figure existed, so the block is
     always populated rather than emitted only when non-empty."""
-    summary, _ = _written(tmp_path, [_row("clean", "d.pdf", [_section()])])
+    summary, _ = _written(
+        tmp_path,
+        [_row("clean", f"d{i}.pdf", [_section()]) for i in range(10)],
+    )
     block = summary["cell_stats"]["clean"]["processing_issues"]
-    assert block["n_runs"] == 1
+    assert block["n_runs"] == 10
     assert block["n_issues"] == 0
     assert bool(block) is True
+    # Every one of the ten WAS scored and found clean. A cell reporting
+    # `n_runs_scored: 0` against `n_runs: 10` is claiming the opposite — that
+    # nothing here was measured — which is the reading `n_runs_scored` exists to
+    # distinguish. Measured: testing a clean cell only at n=1 with an
+    # issue-bearing row elsewhere let a truthiness test stand in for the type
+    # test, because the two agree on every row that carries an issue.
+    assert block["n_runs_scored"] == 10
 
 
 def test_the_recorder_reads_the_same_place_the_audit_block_does():

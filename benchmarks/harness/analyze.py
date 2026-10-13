@@ -820,6 +820,7 @@ def score_processing_issues(sections):
 
     issues = []
     malformed = 0
+    why: list[str] = []
     for sec in sections:
         md = sec.get("metadata")
         if not isinstance(md, dict):
@@ -829,12 +830,28 @@ def score_processing_issues(sections):
             continue
         if not isinstance(raw, list):
             malformed += 1
+            why.append(f"processing_issues is {type(raw).__name__}, not a list")
             continue
         for entry in raw:
             if not isinstance(entry, dict):
                 malformed += 1
+                why.append(f"issue entry is {type(entry).__name__}, not a dict")
                 continue
-            issues.append(ProcessingIssue.from_dict(entry).to_dict())
+            # `isinstance(entry, dict)` is not enough to admit it to the model.
+            # `ProcessingIssue.__post_init__` byte-truncates `root_cause`, so an
+            # entry carrying a non-string there raises `AttributeError` on
+            # `.encode` — and one such entry killed the whole scoring pass, which is
+            # the opposite of what a reader of malformed output must do. Narrow by
+            # construction: the only call inside is the model's, the failure is
+            # COUNTED and NAMED rather than swallowed, and a reason is on the row.
+            try:
+                issues.append(ProcessingIssue.from_dict(entry).to_dict())
+            except Exception as exc:  # noqa: BLE001 - reported on the row, not hidden
+                malformed += 1
+                why.append(
+                    f"issue entry {str(entry.get('code') or '?')[:60]!r} would not "
+                    f"read: {type(exc).__name__}: {exc}"
+                )
     by_severity, by_code, by_stage = {}, {}, {}
     for issue in issues:
         for tally, field in (
@@ -846,7 +863,13 @@ def score_processing_issues(sections):
             tally[name] = tally.get(name, 0) + 1
     return {
         "processing_issues": len(issues),
+        # Counted whether or not anything READ. A document whose every issue entry
+        # is unparseable must not report as clean — `malformed if issues else None`
+        # is the shape that does, and it is the issue's own defect.
         "processing_issues_malformed": malformed or None,
+        # ...and WHY, in the same spirit as `cost_unread` and `sections_unread`: a
+        # count alone cannot be acted on. JSON only; the CSV carries the count.
+        "processing_issues_malformed_why": why or None,
         # Severity is kept as its OWN axis rather than folded into the total: the
         # whole use of this figure is triage, and a warning and an error collapsed
         # into one count cannot be triaged.
