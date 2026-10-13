@@ -390,10 +390,25 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     """Does this shard row belong to the document at ``object_key``?
 
     Two shapes exist in the table and both have to match, which is why this is an OR.
-    Entries written with an ``ObjectKey`` attribute are matched on it; every entry
-    also encodes the key in its sort key as ``ts#<timestamp>#id#<object_key>``, which
-    is the only route to a row whose ``ObjectKey`` attribute was never written.
-    Matching one shape alone leaves the other orphaned in the document list.
+    The ``ObjectKey`` attribute is the primary route and is what the pipeline's own
+    writer sets (``idp_common.dynamodb.service`` puts the queued time in **both**
+    halves of the sort key, so its rows carry the document key only as an attribute).
+    Some rows instead encode the key in the sort key as
+    ``ts#<timestamp>#id#<object_key>``, which is the only route to a row whose
+    ``ObjectKey`` attribute was never written. Matching one shape alone leaves the
+    other orphaned in the document list.
+
+    ⚠️ **The sort-key arm anchors at the END, and a substring test is wrong here
+    because this feeds a delete.** The object key is the terminal segment of the sort
+    key, so ``f"#id#{object_key}" in sort_key`` also matched a *different* document
+    whose key merely starts with this one — measured, deleting ``invoices/report.pdf``
+    selected the rows for ``invoices/report.pdf.bak`` and
+    ``invoices/report.pdf (1).pdf``, both of which are ordinary names. Every row this
+    returns is deleted by key, so the sibling vanished from the document list while its
+    tracking record and its S3 bytes survived: the orphan shape #1238 exists to
+    prevent. It is the same hazard ``_is_document_output`` carries a warning about on
+    the S3 side — a prefix is not a path segment — arriving through the sort key
+    instead of through an S3 ``Prefix``.
 
     ⚠️ **This is a client-side predicate, and it has to be: the sort-key half cannot
     be a ``FilterExpression``.** DynamoDB refuses a key attribute in a ``Query``
@@ -413,7 +428,7 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     if entry.get("ObjectKey") == object_key:
         return True
     sort_key = entry.get("SK")
-    return isinstance(sort_key, str) and f"#id#{object_key}" in sort_key
+    return isinstance(sort_key, str) and sort_key.endswith(f"#id#{object_key}")
 
 
 def _query_shard_for_object_key(
@@ -823,6 +838,7 @@ def delete_single_document(
     # and leak those pinned bytes forever, so on a full document delete we purge
     # ALL versions (and any delete markers) under the prefix to reclaim storage.
     deleted_output_count = 0
+    purge_failures: List[Dict[str, Any]] = []
     try:
         paginator = s3_client.get_paginator("list_object_versions")
 
@@ -859,14 +875,26 @@ def delete_single_document(
                 # refused, so absence is the ordinary case.
                 failures = response["Errors"] if "Errors" in response else []
                 deleted_output_count += len(batch) - len(failures)
-                if failures:
-                    codes = ", ".join(sorted({f.get("Code", "?") for f in failures}))
-                    raise RuntimeError(
-                        f"{len(failures)} of {len(batch)} output object versions "
-                        f"were refused ({codes}): "
-                        f"{failures[0].get('Key')} — {failures[0].get('Message')}"
-                    )
+                # ⚠️ **Accumulated, not raised here.** Raising inside the loop abandoned
+                # every version after the refused batch — measured: one refused key in
+                # the first 1000-key batch of 1,510 versions left 510 never attempted,
+                # where the previous code purged all of them. The refusal is almost
+                # always a missing permission, which is identical for every remaining
+                # key, so stopping reclaims less and reports no more. Purge everything
+                # purgeable, then report, which is what ``document_versions.py`` does
+                # for the same operation.
+                purge_failures.extend(failures)
 
+        if purge_failures:
+            codes = ", ".join(sorted({f.get("Code") or "?" for f in purge_failures}))
+            sample = ", ".join(
+                f"{f.get('Key') or '?'}({f.get('Code') or '?'})"
+                for f in purge_failures[:5]
+            )
+            raise RuntimeError(
+                f"{len(purge_failures)} output object version(s) were refused "
+                f"({codes}); {deleted_output_count} were deleted. Sample: {sample}"
+            )
         logger.debug(f"Deleted {deleted_output_count} output object versions")
     except Exception as e:
         error_msg = f"Error deleting from output bucket: {str(e)}"

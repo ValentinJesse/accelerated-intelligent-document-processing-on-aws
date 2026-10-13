@@ -70,12 +70,23 @@ practice are deployment-level rather than per-document: a permission the executi
 is missing, or a request the service refuses. Both affect every document in the selection
 identically, so the banner names the cause rather than only a count.
 
-When a delete fails part-way, the document's **tracking record is deliberately kept**.
-That record's queued timestamp is the only route to the document's row in the list index,
-so discarding it would leave that row orphaned with nothing able to find it again. The
-document therefore stays in the list, and retrying the delete once the underlying cause
-is fixed completes the job. A selection where some documents were removed and others were
-not reports the failure for the whole call; the ones that were removed are gone.
+**What is left behind depends on which step failed, and the error names the steps that
+did complete.** The two cases differ in whether the document is still in the list, so it
+is worth knowing which you are looking at:
+
+- **The list-index cleanup failed.** The document's **tracking record is deliberately
+  kept**: that record's queued timestamp is the only route to its row in the list index,
+  so discarding it would leave that row orphaned with nothing able to find it again. The
+  document stays in the list, and retrying the delete once the underlying cause is fixed
+  completes the job.
+- **Only the output-object purge failed.** That does not hold the tracking record back,
+  so the document *is* removed from the list and some of its output objects remain in
+  the bucket. There is nothing left to retry from the UI; reclaiming those objects means
+  deleting the prefix directly, or re-running `idp-cli` against the key.
+
+A selection where some documents were removed and others were not reports the failure for
+the whole call and names each document it could not finish; the ones that were removed are
+gone.
 
 > **Note:** documents processed before v0.6.5 carry no provenance metadata. The `ItemType` backfill run at upgrade retypes them where it can prove they came from a test run; any it cannot prove remain in the Production view. See the 0.6.5 upgrade note in [CHANGELOG.md](../CHANGELOG.md).
 

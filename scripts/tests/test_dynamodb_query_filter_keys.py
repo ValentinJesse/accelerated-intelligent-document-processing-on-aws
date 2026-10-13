@@ -165,6 +165,14 @@ def _splatted_filter_expressions(
     the module, which over-approximates — a same-named dict in a sibling function
     counts — and over-approximating is the safe direction for a gate whose finding is
     "this call can never succeed".
+
+    ⚠️ **Three ways the key reaches the dict, and the one the repository actually uses
+    is not the dict literal.** Every filtered query in this tree today spells it
+    ``query_kwargs["FilterExpression"] = "..."`` — a *subscript* assignment after the
+    dict is built — and a version of this reading only ``Assign``/``AnnAssign`` of a
+    dict literal reported **16 passed** against the #1366 defect re-injected in that
+    spelling. ``.update({...})`` is covered for the same reason. A gate blind to the
+    live form is a gate that passes on the next occurrence.
     """
     names = {
         kw.value.id
@@ -175,6 +183,7 @@ def _splatted_filter_expressions(
         return []
     found: List[Tuple[int, str]] = []
     for node in ast.walk(module):
+        # Shape 1: `name = {...}` / `name: T = {...}` — the dict literal.
         target_names: List[str] = []
         value: ast.AST | None = None
         if isinstance(node, ast.Assign):
@@ -185,6 +194,31 @@ def _splatted_filter_expressions(
             value = node.value
         if value is not None and names.intersection(target_names):
             found.extend(_filter_expressions_in_dict(value))
+
+        # Shape 2: `name["FilterExpression"] = "..."` — a subscript assignment, which
+        # is how every filtered query in this repository is actually written.
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in names
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value == "FilterExpression"
+                    and (text := _literal_string(node.value)) is not None
+                ):
+                    found.append((getattr(node, "lineno", 0), text))
+
+        # Shape 3: `name.update({...})`.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in names
+        ):
+            for argument in node.args:
+                found.extend(_filter_expressions_in_dict(argument))
     return found
 
 
@@ -390,6 +424,35 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
             "and the one a matcher keyed on call.func misses entirely",
         ),
         (
+            "kw = {}\n"
+            'kw["FilterExpression"] = "contains(SK, :i)"\n'
+            "table.query(**kw)",
+            True,
+            "the SUBSCRIPT assignment — the spelling every filtered query in this "
+            "repository actually uses, and one a dict-literal-only reading misses",
+        ),
+        (
+            "kw = {}\n"
+            'kw.update({"FilterExpression": "contains(SK, :i)"})\n'
+            "table.query(**kw)",
+            True,
+            "and the .update form of the same thing",
+        ),
+        (
+            "kw = {}\n"
+            'kw["ProjectionExpression"] = "PK, SK"\n'
+            "table.query(**kw)",
+            False,
+            "a subscript assignment of a different key is not a filter",
+        ),
+        (
+            "kw = {}\n"
+            'kw["FilterExpression"] = "begins_with(PK, :p) AND SK = :sk"\n'
+            "table.scan(**kw)",
+            False,
+            "and the scan asymmetry survives the subscript form too",
+        ),
+        (
             'table.scan(FilterExpression="begins_with(PK, :p) AND SK = :sk")',
             False,
             "Scan permits key attributes in a filter — the asymmetry this gate reads",
@@ -428,6 +491,10 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
         "partition-key",
         "gsi-key",
         "bound-method-through-a-wrapper",
+        "subscript-assignment",
+        "dict-update",
+        "subscript-of-another-key",
+        "scan-through-a-subscript",
         "scan-is-allowed",
         "scan-through-a-wrapper",
         "prefix-is-not-a-match",

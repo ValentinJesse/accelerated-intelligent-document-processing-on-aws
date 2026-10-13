@@ -253,36 +253,49 @@ class TestParityWithTheSharedImplementation:
     a cleanup touches.
     """
 
+    #: ``(entry, expected)`` — the **right answer**, not merely a shared one.
+    #:
+    #: ⚠️ This matrix used to carry entries alone and assert only that the two copies
+    #: agreed. The prefix-sibling collision (``…/invoice.pdf.bak`` while deleting
+    #: ``…/invoice.pdf``) was already sitting in it, both copies answered ``True``, and
+    #: the suite was green: agreement is not correctness, and a parity-only test over
+    #: two copies of one mistake cannot see it. The expected value is now authored per
+    #: case and both copies are compared against *it*, so the parity property survives
+    #: as a consequence rather than as the whole assertion.
     CASES = [
-        {"ObjectKey": KEY},
-        {"SK": f"ts#{QUEUED}#id#{KEY}"},
-        {"SK": f"ts#{QUEUED}#id#{KEY}", "ObjectKey": KEY},
-        {"ObjectKey": "other.pdf", "SK": f"ts#{QUEUED}#id#other.pdf"},
-        {"ObjectKey": f"{KEY}.bak", "SK": f"ts#{QUEUED}#id#{KEY}.bak"},
-        {},
-        {"SK": None},
-        {"SK": 7},
-        {"ObjectKey": None},
-        {"SK": f"ts#{QUEUED}#id#prefix-{KEY}"},
+        ({"ObjectKey": KEY}, True),
+        ({"SK": f"ts#{QUEUED}#id#{KEY}"}, True),
+        ({"SK": f"ts#{QUEUED}#id#{KEY}", "ObjectKey": KEY}, True),
+        ({"ObjectKey": "other.pdf", "SK": f"ts#{QUEUED}#id#other.pdf"}, False),
+        # A right extension of the key. An ordinary filename, a different document, and
+        # its list row must not be selected for deletion.
+        ({"ObjectKey": f"{KEY}.bak", "SK": f"ts#{QUEUED}#id#{KEY}.bak"}, False),
+        ({"SK": f"ts#{QUEUED}#id#{KEY} (1).pdf"}, False),
+        ({}, False),
+        ({"SK": None}, False),
+        ({"SK": 7}, False),
+        ({"ObjectKey": None}, False),
+        # A left extension, which a substring test already answered correctly.
+        ({"SK": f"ts#{QUEUED}#id#prefix-{KEY}"}, False),
     ]
 
     def test_the_case_matrix_is_not_empty(self):
         """A parametrisation over an empty list collects as a skip, not a failure."""
-        assert len(self.CASES) >= 10
+        assert len(self.CASES) >= 11
 
-    @pytest.mark.parametrize("entry", CASES, ids=range(len(CASES)))
-    def test_the_two_predicates_agree(self, rld, entry):
-        assert rld.list_entry_names_document(entry, KEY) is shared_predicate(
-            entry, KEY
-        ), (
-            f"the vendored predicate and idp_common's disagree on {entry!r}; "
-            "they decide which rows a cleanup deletes"
+    @pytest.mark.parametrize("entry, expected", CASES, ids=range(len(CASES)))
+    def test_both_predicates_give_the_right_answer(self, rld, entry, expected):
+        assert rld.list_entry_names_document(entry, KEY) is expected, (
+            f"the vendored predicate is wrong on {entry!r}; it decides which rows a "
+            "cleanup deletes"
+        )
+        assert shared_predicate(entry, KEY) is expected, (
+            f"idp_common's predicate is wrong on {entry!r}"
         )
 
-    def test_the_matrix_exercises_both_answers(self, rld):
-        """Otherwise agreement could be agreement on one constant answer."""
-        answers = {rld.list_entry_names_document(e, KEY) for e in self.CASES}
-        assert answers == {True, False}
+    def test_the_matrix_exercises_both_answers(self):
+        """Otherwise the matrix could be asserting one constant answer."""
+        assert {expected for _entry, expected in self.CASES} == {True, False}
 
 
 def test_the_vendored_copy_still_has_no_idp_common_layer():

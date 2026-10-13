@@ -241,6 +241,40 @@ def test_the_cause_reaches_the_response_body(
     assert distinguishing in message, f"the cause is not reported: {message}"
 
 
+def test_no_account_id_or_arn_reaches_the_response_body(
+    dispatcher, resolver, monkeypatch
+):
+    """⚠️ Asserted end to end, because every layer passes the message through.
+
+    The resolver redacts, but the dispatcher copies ``errorMessage`` into the 500 body
+    verbatim and the UI interpolates whatever it is given — so the only place this
+    property can be *established* is at the boundary the browser reads. A redactor that
+    is correct and not wired in would pass the resolver's own unit tests.
+    """
+    denial = (
+        "Error deleting from output bucket: An error occurred (AccessDenied) when "
+        "calling the ListObjectVersions operation: User: "
+        "arn:aws:sts::000000000000:assumed-role/Stack-DeleteDocumentRole-Ab/Stack-x "
+        "is not authorized to perform: s3:ListBucketVersions on resource: "
+        '"arn:aws:s3:::stack-output-bucket"'
+    )
+    with patch.object(
+        resolver,
+        "delete_single_document",
+        return_value=_per_document("a.pdf", error=denial),
+    ):
+        status, body = _call(dispatcher, resolver, ["a.pdf"], monkeypatch)
+
+    rendered = json.dumps(body)
+    assert status != 200
+    assert "000000000000" not in rendered, f"an account id reached the body: {rendered}"
+    assert "arn:aws:sts::" not in rendered
+    assert "arn:aws:s3:::" not in rendered
+    # The actionable half still arrives.
+    assert "AccessDenied" in rendered
+    assert "s3:ListBucketVersions" in rendered
+
+
 def test_a_partial_failure_in_a_multi_select_is_not_a_200(
     dispatcher, resolver, monkeypatch
 ):

@@ -364,6 +364,38 @@ class TestQueryShardForObjectKey:
             "both shapes must be selected and another document's row must not be"
         )
 
+    def test_a_prefix_sibling_is_never_selected_for_deletion(self):
+        """⚠️ Over-matching here deletes a **different document's** list row.
+
+        The object key is the terminal segment of the sort key, so a substring test
+        matched every document whose key merely starts with this one —
+        ``invoices/report.pdf`` selected ``invoices/report.pdf.bak`` and
+        ``invoices/report.pdf (1).pdf``, both ordinary names and both carrying their own
+        ``ObjectKey``. Every row this function returns is then deleted by key, so the
+        sibling disappeared from the document list while its tracking record and its S3
+        bytes survived: #1238's orphan, created by the cleanup meant to prevent it.
+
+        Asserted at this level rather than only on the predicate because this is the
+        function whose output feeds the delete, and because the same collision sat in a
+        *parity* matrix that compared the two implementations to each other — both
+        agreed, and both were wrong. Agreement is not correctness.
+        """
+        target = {"PK": "pk", "SK": f"ts#t1#id#{KEY}", "ObjectKey": KEY}
+        siblings = [
+            {"PK": "pk", "SK": f"ts#t2#id#{KEY}.bak", "ObjectKey": f"{KEY}.bak"},
+            {
+                "PK": "pk",
+                "SK": f"ts#t3#id#{KEY} (1).pdf",
+                "ObjectKey": f"{KEY} (1).pdf",
+            },
+        ]
+        table = _table()
+        table.query.return_value = {"Items": [target, *siblings]}
+
+        assert _query_shard_for_object_key(table, "pk", KEY) == [target], (
+            "a prefix sibling was selected for deletion"
+        )
+
     def test_the_query_names_no_key_attribute_in_a_filter(self):
         """The repair itself: the shard query carries no ``FilterExpression`` at all.
 
@@ -392,6 +424,9 @@ class TestQueryShardForObjectKey:
             ({"SK": None}, False),
             ({"SK": 7}, False),
             ({"ObjectKey": KEY, "SK": None}, True),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY}.bak"}, False),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY} (1).pdf"}, False),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#prefix-{KEY}"}, False),
         ],
         ids=[
             "attribute-match",
@@ -401,6 +436,9 @@ class TestQueryShardForObjectKey:
             "null-sort-key",
             "non-string-sort-key",
             "attribute-wins-over-a-null-sort-key",
+            "a-right-extension-is-a-different-document",
+            "and-so-is-a-renamed-copy",
+            "a-left-extension-is-a-different-document",
         ],
     )
     def test_the_selection_predicate(self, entry, expected):
@@ -933,6 +971,45 @@ class TestDeleteSingleDocument:
         assert any("AccessDenied" in message for message in result["errors"]), (
             f"the cause did not reach the caller: {result['errors']}"
         )
+
+    def test_a_refusal_does_not_abandon_the_remaining_versions(self):
+        """⚠️ Reporting the failure must not reclaim **less** than staying silent did.
+
+        The refusal is almost always a missing permission, identical for every
+        remaining key, so stopping at the first refused batch purges less and reports
+        no more. Measured on the shape that exposes it — 1,510 versions across two
+        listing pages, one key refused in the first 1,000-key batch — raising inside
+        the loop left 510 versions never attempted, where the code this replaces
+        purged all 1,510 (and called it a success). So the failures accumulate and the
+        raise happens after the last batch.
+
+        Asserted on the number of ``delete_objects`` calls, because the returned count
+        alone is produced with or without the remaining batches being attempted.
+        """
+        versions = [
+            {"Key": f"{KEY}/sections/{i}.json", "VersionId": f"v{i}"}
+            for i in range(1510)
+        ]
+        s3 = _s3([{"Versions": versions[:1000]}, {"Versions": versions[1000:]}])
+        refused = {
+            "Key": versions[0]["Key"],
+            "VersionId": "v0",
+            "Code": "AccessDenied",
+            "Message": "Access Denied",
+        }
+        s3.delete_objects.side_effect = [
+            {"Errors": [refused]},  # first 1000-key batch: one key refused
+            {},  # second batch, which must still be attempted
+        ]
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert s3.delete_objects.call_count == 2, (
+            "the batch after the refusal was never attempted"
+        )
+        assert result["deleted"]["output_files"] == 1509
+        assert result["success"] is False
+        assert any("AccessDenied" in message for message in result["errors"])
 
     def test_a_purge_with_no_refusals_is_unaffected(self):
         """The ordinary case, asserted so the check above cannot be vacuous.

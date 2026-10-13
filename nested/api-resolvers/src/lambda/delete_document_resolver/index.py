@@ -12,6 +12,7 @@ across CLI, SDK, and Web UI.
 import json
 import logging
 import os
+import re
 from typing import List
 
 import boto3
@@ -25,6 +26,38 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 # Initialize AWS clients
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
+
+
+#: Any ARN, in any partition. Matched to the first whitespace, quote or comma, which is
+#: how an ARN is delimited inside an AWS error sentence.
+_ARN = re.compile(r"arn:[a-z0-9-]*:[^\s\"',;)]*")
+
+
+def _redact_arns(text: str) -> str:
+    """Strip ARNs out of a message that is about to be shown in a browser.
+
+    The reason a failed delete now reports its cause is that "it failed" is not
+    actionable — but an AWS authorization denial names the **execution role's ARN and
+    the resource ARN**, both of which embed this deployment's account id:
+
+        User: arn:...:assumed-role/<stack>-DeleteDocumentResolverFunctionRole-.../...
+        is not authorized to perform: dynamodb:Query on resource: arn:...:table/...
+
+    What a reader needs out of that is the error code and the action — "not authorized
+    to perform: dynamodb:Query" — and those survive redaction. The account id does not
+    need to reach a browser to make the message useful, and this repository treats a
+    committed account id as a gate failure (``scripts/check_account_ids.py``), so
+    putting one in a UI banner would be inconsistent with that posture even though the
+    operation is Admin/Author-gated.
+
+    Redaction rather than truncation, because truncating at the operation name would
+    also discard details that are the whole answer and carry no identifiers — the
+    rejected-expression fault ends with "Primary key attribute: SK", which is what
+    tells a maintainer *which* attribute was refused. The unredacted text stays in the
+    resolver's log, which is where an operator with access to the account should read
+    it.
+    """
+    return _ARN.sub("arn:<redacted>", text)
 
 
 def _caller_in_groups(event, allowed):
@@ -85,7 +118,22 @@ def handler(event, context):
                 logger.info(f"Successfully deleted document: {object_key}")
             else:
                 errors = result.get("errors", [])
-                failures.append(f"{object_key}: {'; '.join(str(e) for e in errors)}")
+                # Which steps DID complete, so the message cannot imply that nothing
+                # happened to a document most of whose cleanup succeeded. An S3 purge
+                # failure in particular does not hold back the tracking record, so the
+                # document is gone from the list even though this call failed — saying
+                # only "0 deleted" would send the reader looking for a row that is not
+                # there. The log already carries the full per-step dict.
+                done = [
+                    name
+                    for name, value in (result.get("deleted") or {}).items()
+                    if value
+                ]
+                failures.append(
+                    f"{object_key}: "
+                    + _redact_arns("; ".join(str(e) for e in errors))
+                    + (f" [completed: {', '.join(sorted(done))}]" if done else "")
+                )
                 logger.error(f"Failed to delete document {object_key}: {errors}")
 
         logger.info(
@@ -108,10 +156,18 @@ def handler(event, context):
         # usually a deployment-level fault (a missing permission, a rejected
         # expression) that is identical for every document and actionable only if it is
         # said out loud. The operation is Admin/Author-gated.
+        # "could not be completely deleted" rather than "deleted N of M": a document
+        # whose output purge was refused has already had its list row, run records and
+        # tracking record removed, because an S3 failure deliberately does not hold the
+        # record back. Reporting that as "deleted 0 of 1" is true only of *complete*
+        # deletes and reads to a user as "nothing happened" — after which the document
+        # is gone from the list anyway. The per-document detail above says which steps
+        # did complete.
         if failures:
             raise RuntimeError(
-                f"Deleted {deleted_count} of {len(object_keys)} document(s); "
-                f"{len(failures)} failed — " + " | ".join(failures)
+                f"{len(failures)} of {len(object_keys)} document(s) could not be "
+                f"completely deleted ({deleted_count} completed) — "
+                + " | ".join(failures)
             )
         return True
 

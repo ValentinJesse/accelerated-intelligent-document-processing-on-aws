@@ -49,8 +49,8 @@ const dispatcherFailure = (message: string) => ({
 });
 
 const RESOLVER_MESSAGE =
-  'Deleted 0 of 1 document(s); 1 failed — invoices/march.pdf: Error in list entry deletion: ' +
-  'An error occurred (ValidationException) when calling the Query operation';
+  '1 of 1 document(s) could not be completely deleted (0 completed) — invoices/march.pdf: ' +
+  'Error in list entry deletion: An error occurred (ValidationException) when calling the Query operation';
 
 const deleteOnce = async (keys: string[]) => {
   const hook = renderHook(() => useGraphQlApi({ initialPeriodsToLoad: 1 }));

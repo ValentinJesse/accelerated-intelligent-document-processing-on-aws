@@ -138,7 +138,9 @@ class TestTheReportedOutcome:
         assert "ThrottlingException" in message, (
             f"the cause is not reported to the caller: {message}"
         )
-        assert "2 of 3" in message, f"the partial count is not reported: {message}"
+        assert "1 of 3" in message and "2 completed" in message, (
+            f"the partial count is not reported: {message}"
+        )
 
     def test_the_raise_carries_every_failure_not_just_the_first(self, resolver):
         """All of them, because a deployment fault fails every document the same way.
@@ -157,6 +159,98 @@ class TestTheReportedOutcome:
         message = str(caught.value)
         assert "a:" in message and "c:" in message, message
         assert "b:" not in message, f"a document that succeeded is named: {message}"
+
+    def test_an_iam_denial_reaches_the_caller_without_its_arns(self, resolver):
+        """⚠️ The message is shown in a browser, and an AWS denial names ARNs.
+
+        An authorization failure's text carries the execution role's ARN and the
+        resource ARN, both of which embed the deployment's account id. The reason the
+        cause is reported at all is that "it failed" is not actionable — and what makes
+        it actionable is the error code and the refused action, which survive
+        redaction. The account id does not need to reach a browser to make the message
+        useful, and this repository treats a committed account id as a gate failure.
+
+        Redaction rather than truncation at the operation name: the rejected-expression
+        fault ends with the attribute that was refused, which is the whole answer and
+        carries no identifier.
+        """
+        denial = (
+            "Error in list entry deletion: An error occurred (AccessDeniedException) "
+            "when calling the Query operation: User: "
+            "arn:aws:sts::000000000000:assumed-role/Stack-DeleteDocumentRole-Ab/Stack-x"
+            " is not authorized to perform: dynamodb:Query on resource: "
+            "arn:aws:dynamodb:us-east-1:000000000000:table/Stack-TrackingTable"
+        )
+        failing = [
+            {
+                "success": False,
+                "object_key": "a",
+                "deleted": {"input_file": True, "list_entries": False},
+                "errors": [denial],
+            }
+        ]
+        with patch.object(
+            resolver, "delete_single_document", side_effect=failing
+        ):
+            with pytest.raises(RuntimeError) as caught:
+                resolver.handler(_event(["a"]), MagicMock())
+
+        message = str(caught.value)
+        assert "arn:aws:sts::" not in message
+        assert "arn:aws:dynamodb:" not in message
+        assert "000000000000" not in message, (
+            f"an account id reached the caller: {message}"
+        )
+        # The actionable half survives.
+        assert "AccessDeniedException" in message
+        assert "dynamodb:Query" in message
+        # And the steps that did complete are named, so the message cannot read as
+        # "nothing happened" for a document whose cleanup mostly succeeded.
+        assert "completed: input_file" in message, message
+
+    def test_the_rejected_expression_detail_is_not_truncated_away(self, resolver):
+        """The detail after the operation name is sometimes the entire answer.
+
+        "Primary key attribute: SK" is what names the attribute DynamoDB refused. It
+        carries no identifier, so a truncating sanitizer would discard the one thing a
+        maintainer needs while a redacting one keeps it.
+        """
+        fault = (
+            "Error in list entry deletion: An error occurred (ValidationException) "
+            "when calling the Query operation: Filter Expression can only contain "
+            "non-primary key attributes: Primary key attribute: SK"
+        )
+        failing = [
+            {"success": False, "object_key": "a", "deleted": {}, "errors": [fault]}
+        ]
+        with patch.object(resolver, "delete_single_document", side_effect=failing):
+            with pytest.raises(RuntimeError) as caught:
+                resolver.handler(_event(["a"]), MagicMock())
+
+        assert "Primary key attribute: SK" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:s3:::my-bucket",
+            "arn:aws-us-gov:s3:::my-bucket/key",
+            "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/T",
+        ],
+        ids=["commercial", "govcloud", "china"],
+    )
+    def test_every_partition_is_redacted(self, resolver, arn):
+        """GovCloud and China ARNs are not spelled ``arn:aws:``.
+
+        A redactor matching only the commercial partition would pass every test here
+        and leak on the deployments this repository explicitly supports.
+        """
+        assert "arn:" in resolver._redact_arns(f"denied on {arn} today")
+        assert arn not in resolver._redact_arns(f"denied on {arn} today")
+
+    def test_redaction_leaves_an_iam_action_alone(self, resolver):
+        """``s3:DeleteObjectVersion`` is colon-separated and must not be mangled."""
+        text = "not authorized to perform: s3:DeleteObjectVersion"
+        assert resolver._redact_arns(text) == text
 
     def test_a_caller_outside_the_two_groups_is_refused(self, resolver):
         # Defence in depth, unchanged by this change and worth keeping pinned: the

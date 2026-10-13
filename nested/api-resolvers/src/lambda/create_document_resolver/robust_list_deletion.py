@@ -99,9 +99,17 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     """Does this shard row belong to the document at ``object_key``?
 
     Two shapes exist in the table and both have to match, which is why this is an OR.
-    Entries written with an ``ObjectKey`` attribute are matched on it; every entry also
-    encodes the key in its sort key as ``ts#<timestamp>#id#<object_key>``, which is the
-    only route to a row whose ``ObjectKey`` attribute was never written.
+    The ``ObjectKey`` attribute is the primary route; some rows instead encode the key
+    in the sort key as ``ts#<timestamp>#id#<object_key>``, which is the only route to a
+    row whose ``ObjectKey`` attribute was never written.
+
+    ⚠️ **The sort-key arm anchors at the END, and a substring test is wrong here because
+    this feeds a delete.** The object key is the terminal segment, so
+    ``f"#id#{object_key}" in sort_key`` also matched a *different* document whose key
+    merely starts with this one — ``invoices/report.pdf`` selected the rows for
+    ``invoices/report.pdf.bak`` and ``invoices/report.pdf (1).pdf``. Every row this
+    returns is deleted by key, so the sibling would vanish from the document list while
+    its tracking record survived.
 
     ⚠️ **This is a client-side predicate, and it has to be: the sort-key half cannot be
     a ``FilterExpression``.** DynamoDB refuses a key attribute in a ``Query`` filter —
@@ -120,7 +128,7 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     if entry.get('ObjectKey') == object_key:
         return True
     sort_key = entry.get('SK')
-    return isinstance(sort_key, str) and f"#id#{object_key}" in sort_key
+    return isinstance(sort_key, str) and sort_key.endswith(f"#id#{object_key}")
 
 
 def query_shard_for_object_key(tracking_table, list_pk: str, object_key: str) -> List[Dict[str, Any]]:
