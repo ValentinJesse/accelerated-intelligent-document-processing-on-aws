@@ -494,6 +494,29 @@ _SPELLINGS: list[tuple[str, list[str], list[str]]] = [
 ]
 
 
+def _splice_index(position: str, block: list[str]) -> int:
+    """Where the comparison probe's sentinel goes, as an offset into the block.
+
+    A function rather than a dict literal inside the test, so its refusal is
+    reachable from a probe the way every other refusal in this module is. Against
+    the real thirteen-entry block it can never fire, and a refusal nothing can
+    reach is one nobody has measured.
+    """
+    indices = {
+        "start-of-list": 0,
+        "mid-list": len(block) - 1,
+        "end-of-list": len(block),
+    }
+    middle = indices["mid-list"]
+    assert 0 < middle < len(block), (
+        f"the {_PROPERTY} block is {len(block)} line(s) long, so the mid-list splice "
+        f"offset is {middle}, which is not strictly inside it. The three positions "
+        "then stop being three distinct inputs and `mid-list` measures what one of "
+        "the ends already does. Splice at a named interior entry instead."
+    )
+    return indices[position]
+
+
 def test_the_probe_block_is_the_real_block() -> None:
     """Control: the probes' locator and the gate's parse must agree.
 
@@ -543,26 +566,33 @@ def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
     Spliced into the whole template rather than the one-resource frame the probes
     use, so nothing about the frame can be what makes it visible.
 
-    All three positions are driven, and the reason is that one position tests the
-    parse while three test the **comparison** as well. :func:`_unbuilt` is where a
-    silently-dropped entry would next be possible, and a sentinel sitting in the
-    middle is seen by a comparison that discards either end -- measured, with the
-    sentinel mid-list, ``set(expected[:-1]) - built`` and ``set(expected[1:]) -
-    built`` both passed, and the first of those is the drop-the-tail shape this
-    whole module exists to prevent. A single splice position cannot distinguish
-    them; putting the sentinel first, in the middle and last does.
+    What each of the three positions buys is worth being exact about, because the
+    obvious summary -- "one tests the parse, three test the comparison" -- is not
+    quite what is true.
 
-    Document position alone is not enough, though, and that is why each position
-    brings its own sentinel from :data:`_POSITION_SENTINELS`: ``_unbuilt`` sorts
-    before it compares, so a comparison truncating the sorted list sees nothing of
-    where a line was spliced. Both orders are therefore asserted -- the document
-    position it landed in, and the sort rank it occupies -- so each case is a
-    measurement of the comparison in the order that comparison actually works in.
+    :func:`_unbuilt` is where a silently-dropped entry would next be possible after
+    the parse, and the shapes a comparison realistically acquires act on the *ends*
+    of a list: a slice, a sort then a slice, a ``reverse=True`` then a slice.
+    ``start-of-list`` and ``end-of-list`` are what catch those, and they need the
+    sentinel to land at that end in **both** of the orders such a comparison might
+    truncate -- document order, and sorted order, since ``_unbuilt`` sorts before it
+    subtracts. That is why each position brings its own sentinel from
+    :data:`_POSITION_SENTINELS` and why both orders are asserted: with one interior
+    name for all three, ``set(sorted(set(expected))[:-1]) - built`` passed every
+    position, and that is the drop-the-tail shape the whole module exists to prevent.
 
-    Two spellings remain uncovered and are left so deliberately, because closing
-    them needs an input nothing plausible writes: dropping a fixed interior index,
-    and dropping the element at ``len(expected) // 2``. Both survive. A comparison
-    that discards an interior element is not a shape a slice or a sort produces.
+    ``mid-list`` is not what catches an end-truncating comparison. It covers the
+    parse at an interior block offset, and it keeps the exact-equality of
+    ``_unbuilt`` measured there rather than only at the ends. Its own property is
+    that it really is interior in both orders, which is asserted, because a
+    ``mid-list`` that collapsed onto one of the ends would leave two of the three
+    cases measuring the same input.
+
+    Two spellings remain uncovered, measured and left so deliberately: dropping a
+    fixed interior index, and dropping the element at ``len(expected) // 2``. No
+    splice position catches either, because they need an index nothing plausible
+    writes -- a comparison that discards an interior element is not a shape a slice,
+    a sort or a set operation produces.
     """
     sentinel = _POSITION_SENTINELS[position]
     assert sentinel not in _built_images(), (
@@ -573,16 +603,7 @@ def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
     lines = _template_text().splitlines()
     start, block = _block_bounds()
     indent = _tail_indent(block)
-    assert len(block) >= 2, (
-        f"the {_PROPERTY} block is {len(block)} line(s) long, so the mid-list splice "
-        "index collapses onto the start-of-list one and two of these three cases "
-        "measure the same input. Splice at a named interior entry instead."
-    )
-    index = {
-        "start-of-list": 0,
-        "mid-list": len(block) - 1,
-        "end-of-list": len(block),
-    }[position]
+    index = _splice_index(position, block)
     mutated = (
         lines[: start + index]
         + [f"{indent}# a note about the entry below"]
@@ -773,6 +794,30 @@ def test_a_block_with_nothing_to_splice_onto_is_refused(
     """
     with pytest.raises(AssertionError, match=expected):
         _block_bounds(text)
+
+
+def test_a_block_too_short_to_have_an_interior_is_refused() -> None:
+    """A one-entry block would make ``mid-list`` the same input as ``start-of-list``.
+
+    Silently, which is the shape that matters: both cases would pass, the pair would
+    read as two measurements, and the interior would be covered by neither. The real
+    block holds thirteen entries, so this refusal cannot fire against the template
+    and is driven synthetically, like every other refusal in this module.
+    """
+    with pytest.raises(AssertionError, match="not strictly inside it"):
+        _splice_index("mid-list", ['        - "alpha-function"'])
+
+
+def test_the_three_splice_positions_are_distinct_against_the_real_block() -> None:
+    """And the live block is long enough, which is what makes the refusal inert."""
+    block = _block_lines()
+    offsets = {
+        position: _splice_index(position, block) for position in _POSITION_SENTINELS
+    }
+    assert len(set(offsets.values())) == 3, offsets
+    assert offsets["start-of-list"] < offsets["mid-list"] < offsets["end-of-list"], (
+        offsets
+    )
 
 
 def _buildspec_document(*values: str) -> str:
