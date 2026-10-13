@@ -268,9 +268,9 @@ class CacheUnitOmission:
     (``tests/unit/reporting/bedrock_cache_dimension_digest.py``, refreshable from
     the public files with no credential), and the unreachability premise is
     asserted against the two code constants, for every member — which is what the
-    older allowlist in ``test_pricing_lookup.py`` did for the eight of these
-    eleven whose model ids a template enum or a shipped preset names. The other
-    three — ``us.amazon.nova-premier-v1:0`` and the two
+    older allowlist in ``test_pricing_lookup.py`` did for those of these entries
+    whose model ids a template enum or a shipped preset names. The three that it
+    did not reach — ``us.amazon.nova-premier-v1:0`` and the two
     ``claude-3-haiku-20240307`` profiles — reach a deployment through
     ``pricing.yaml`` itself, which doubles as the set of model ids configuration
     validation accepts (``config.merge_utils._load_valid_bedrock_models``), so
@@ -313,7 +313,7 @@ CACHE_DIMENSION_READING_DATE = "2026-10-13"
 #: Registered in ``scripts/tests/gate_exemptions.json`` as
 #: ``EXPECTED_CACHE_UNIT_OMISSIONS``. Owned by
 #: ``tests/unit/reporting/test_cache_unit_omission_basis.py``, which derives the
-#: universe from ``config_library/pricing.yaml`` itself — so a twelfth entry that
+#: universe from ``config_library/pricing.yaml`` itself — so a further entry that
 #: omits a cache unit fails there rather than inheriting a reason written for
 #: somebody else's model.
 EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
@@ -482,27 +482,6 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             "CACHEPOINT_SUPPORTED_MODELS, and Nova does not cache implicitly.",
             ("cacheReadInputTokens",),
         ),
-        (
-            "bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "Claude Sonnet 4.5",
-            True,
-            AWS_BEDROCK_PRICE_LISTS[1],
-            "This entry is the one that already carried a basis, and the basis is "
-            "a live measurement rather than a price-list reading: a repeated "
-            "identical prompt through this GovCloud inference profile still "
-            "reported cacheReadInputTokens=0, so a cachePoint buys nothing there. "
-            "AWS nevertheless publishes both dimensions for the model in BOTH "
-            "GovCloud regions — cache read $0.36/MTok, 5-minute cache write "
-            "$4.50/MTok, in us-gov-west-1 and us-gov-east-1 alike — so the "
-            "omission is not a statement about pricing. The static half of the "
-            "premise is that this id is absent from CACHEPOINT_SUPPORTED_MODELS, "
-            "which no live call is needed to check; the behavioural half cannot "
-            "be re-checked offline, and is exactly why this entry is "
-            "priced_by_aws=True. If the profile ever starts honouring cache "
-            "points, the reads are reported as unpriced instead of billed at "
-            "$0.00 against a published $0.36/MTok.",
-            ("cacheReadInputTokens", "cacheWriteInputTokens"),
-        ),
     )
     for unit in units
 )
@@ -566,8 +545,8 @@ def classify_absent_unit(pricing_key: str, unit: str, value: Any) -> Verdict:
     point — a pricing entry added next month that omits a cache rate is reported
     rather than silently priced at $0.00, which is the class behind
     [#1206](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1206)
-    rather than its eleven instances. A user-supplied pricing table is held to
-    the same rule, and a zero count still costs nothing, so the only rows this
+    rather than the instances that revealed it. A user-supplied pricing table is
+    held to the same rule, and a zero count still costs nothing, so the only rows this
     reaches are ones that metered real cache activity against an entry carrying
     no rate for it.
 

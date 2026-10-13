@@ -5,7 +5,7 @@
 
 The owning test for ``idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS``.
 ``config_library/pricing.yaml`` omits ``cacheReadInputTokens`` and
-``cacheWriteInputTokens`` on eleven ``bedrock/`` entries, and an omitted unit was
+``cacheWriteInputTokens`` on several ``bedrock/`` entries, and an omitted unit was
 priced at exactly $0.00 by both cost implementations on one service-wide
 justification written for all eleven models at once — two of which recorded a
 basis and nine of which recorded none. That is the defect shape this repository
@@ -14,8 +14,8 @@ is a property of individual members. Issue
 [#1206](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1206).
 
 **The universe is derived from ``pricing.yaml``, not from a list written here**,
-which is the whole point: the eleven entries are today's instance and a twelfth
-model added next month is the class. Three things follow and each is a test
+which is the whole point: the registered entries are today's instance and one
+more model added next month is the class. Three things follow and each is a test
 below.
 
 * Every ``(bedrock/<id>, cache unit)`` omission in the shipped file must be
@@ -79,8 +79,8 @@ CACHE_UNITS = ("cacheReadInputTokens", "cacheWriteInputTokens")
 BEDROCK_PREFIX = "bedrock/"
 
 #: The units whose published rates pin a recorded ``price_list_model`` to the
-#: pricing entry citing it. Both, not one: on the input rate alone the eleven
-#: entries have 2 to 11 candidate models each.
+#: pricing entry citing it. Both, not one: on the input rate alone the entries
+#: then registered had 2 to 11 candidate models each.
 IDENTITY_UNITS = ("inputTokens", "outputTokens")
 
 _REPO_ROOT = os.path.abspath(
@@ -244,7 +244,7 @@ def test_the_register_is_not_empty_and_is_keyed_per_entry_and_unit():
 
 @pytest.mark.unit
 def test_every_omission_in_the_shipped_file_is_registered():
-    """The class, not the eleven instances: a new row omitting a rate fails here."""
+    """The class, not today's instances: a new row omitting a rate fails here."""
     unregistered = sorted(_omissions() - set(_registered()))
     assert not unregistered, (
         "shipped bedrock pricing entries omit a cache unit with no recorded "
@@ -560,8 +560,8 @@ def test_a_rate_collision_cannot_change_a_recorded_verdict():
     """How far the price-list half of a premise actually goes, measured.
 
     The identity of a recorded ``price_list_model`` is established by its
-    published input and output rates matching the pricing entry's. That pins 18
-    of the 21 members to exactly one model out of 141, and leaves three with a
+    published input and output rates matching the pricing entry's. That pins most
+    members to exactly one model out of the price list, and leaves a few with a
     handful of candidates — different real models that happen to be priced
     identically, which vendors do.
 
@@ -628,8 +628,9 @@ def test_most_member_identities_are_pinned_to_exactly_one_model():
     assert len(unique) >= 15, (
         f"only {len(unique)} of {len(EXPECTED_CACHE_UNIT_OMISSIONS)} members have "
         "their price-list model pinned to exactly one candidate by the entry's "
-        "own published rates; it was 18. Below that the identity check is close "
-        "to the state it replaced"
+        "own published rates. Below that the identity check is close to the "
+        "state it replaced, where the input rate alone left 2 to 11 candidates "
+        "per entry"
     )
 
 
@@ -786,7 +787,7 @@ def test_the_runtime_verdict_follows_the_recorded_basis(entry: CacheUnitOmission
 @pytest.mark.unit
 @pytest.mark.parametrize("unit", CACHE_UNITS)
 def test_an_unregistered_bedrock_entry_omitting_a_cache_unit_is_reported(unit: str):
-    """The twelfth omission, at runtime rather than in a gate.
+    """The unregistered omission, at runtime rather than in a gate.
 
     The static test above fails a new ``pricing.yaml`` row that omits a rate, and
     that is the primary catch. This is the second one, and it covers the case the
