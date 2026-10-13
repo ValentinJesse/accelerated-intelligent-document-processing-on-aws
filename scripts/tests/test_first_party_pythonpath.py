@@ -55,6 +55,7 @@ sys.path.pop(0)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import first_party_provenance as fpp  # noqa: E402
+import make_recipes  # noqa: E402
 
 sys.path.pop(0)
 
@@ -263,6 +264,36 @@ def test_both_makefiles_pin_the_same_checkout() -> None:
 # --------------------------------------------------------------------------- #
 # measured: what the wrapper actually does to an interpreter
 # --------------------------------------------------------------------------- #
+def _importable_first_party_packages() -> list[str]:
+    """Every importable package under the first-party roots, from the filesystem."""
+    packages = sorted(
+        entry.name
+        for root in first_party_roots(REPO_ROOT)
+        for entry in root.iterdir()
+        if (entry / "__init__.py").is_file()
+    )
+    assert packages, "no importable package found under the first-party roots"
+    return packages
+
+
+def _provenance_probe(packages: list[str]) -> str:
+    return (
+        "import importlib\n"
+        f"for name in {packages!r}:\n"
+        "    print(name, importlib.import_module(name).__file__)\n"
+    )
+
+
+def _assert_every_origin_is_in_this_checkout(output: str, *, how: str) -> None:
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert lines, f"the provenance probe printed nothing {how}"
+    for line in lines:
+        name, _, origin = line.partition(" ")
+        assert Path(origin).resolve().is_relative_to(REPO_ROOT), (
+            f"{how}, {name} resolved to {origin}, outside {REPO_ROOT}"
+        )
+
+
 def test_every_first_party_package_resolves_in_this_checkout_under_the_wrapper() -> (
     None
 ):
@@ -272,24 +303,51 @@ def test_every_first_party_package_resolves_in_this_checkout_under_the_wrapper()
     ``__file__``. On the machine this was written on, without the pin, four of the five
     answered from a different project and one from another worktree of this repository.
     """
-    packages = sorted(
-        entry.name
-        for root in first_party_roots(REPO_ROOT)
-        for entry in root.iterdir()
-        if (entry / "__init__.py").is_file()
+    packages = _importable_first_party_packages()
+    _assert_every_origin_is_in_this_checkout(
+        _run_under_wrapper(_provenance_probe(packages)),
+        how="under the pinned wrapper",
     )
-    assert packages, "no importable package found under the first-party roots"
-    code = (
-        "import importlib\n"
-        f"for name in {packages!r}:\n"
-        "    print(name, importlib.import_module(name).__file__)\n"
+
+
+def test_the_integration_recipe_pins_this_checkout_too() -> None:
+    """``make test-integration`` is the one target that cannot use the wrapper.
+
+    It calls real AWS, so ``$(PYTEST_HERMETIC)`` would strip the credentials and
+    region those tests exist to use —
+    ``test_offline_suites_are_hermetic.test_library_integration_target_keeps_the_real_aws_environment``
+    asserts that it does not go through it. Taking the whole wrapper off took the
+    ``PYTHONPATH`` pin with it, and nothing asserted the pin, so the suite that
+    talks to real infrastructure was the one free to measure a different checkout
+    (#1094, #1365). Measured before the fix, from ``lib/idp_common_pkg`` with no
+    ambient ``PYTHONPATH``: ``idp_sdk`` and ``idp_cli`` resolved out of another
+    checkout of this repository.
+
+    What is asserted is the **capability**, not the spelling. The command is read
+    back from ``make --dry-run``, so a recipe that hand-rolled its own ``env
+    PYTHONPATH=lib/...`` — relative, or naming only one root — fails here exactly
+    as a recipe with no pin at all does, while a rename of
+    ``$(PYTEST_FIRST_PARTY)`` does not fail here for the wrong reason.
+
+    ⚠️ The ambient ``PYTHONPATH`` is stripped from the probe's environment. Anyone
+    running this suite the documented way has the five roots exported already, and
+    the child would inherit a correct answer from its caller with the pin deleted
+    from the makefile entirely.
+    """
+    command = make_recipes.dry_run_command("test-integration", LIBRARY_MAKEFILE_DIR)
+    packages = _importable_first_party_packages()
+    result = make_recipes.run_probe(
+        command,
+        _provenance_probe(packages),
+        cwd=LIBRARY_MAKEFILE_DIR,
+        env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
     )
-    for line in _run_under_wrapper(code).splitlines():
-        name, _, origin = line.partition(" ")
-        assert Path(origin).resolve().is_relative_to(REPO_ROOT), (
-            f"under the pinned wrapper, {name} still resolved to {origin}, outside "
-            f"{REPO_ROOT}"
-        )
+    assert result.returncode == 0, (
+        f"the provenance probe failed to run under `{command}`:\n{result.stderr}"
+    )
+    _assert_every_origin_is_in_this_checkout(
+        result.stdout, how=f"under the command `make test-integration` runs ({command})"
+    )
 
 
 def test_the_wrapper_keeps_a_pin_the_caller_set_as_well() -> None:

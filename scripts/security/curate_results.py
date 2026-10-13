@@ -46,6 +46,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = REPO_ROOT / "security" / "test-results"
 
+# The SRT gate's own scope decision, imported rather than reimplemented.
+#
+# The curated snapshot is read as the record of what a release's security tests
+# established, so a verdict in it that disagrees with the gate that produced it is
+# worse than no verdict: three consecutive snapshots published
+# `SRT — FAIL ❌ (7 open/reopened HIGH)` for a tree whose gate was green, because
+# this script applied one of the two partitions `scripts/srt/run.py` applies and
+# not the other (#1365). Calling the same function is what keeps them from drifting
+# again — a copy of the rule here would agree today and diverge on the next change
+# to it.
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "srt"))
+from ci_paths import partition_by_name_heuristic_scope  # noqa: E402
+
+sys.path.pop(0)
+
 # ---------------------------------------------------------------------------
 # Redaction — the single choke point every emitted string passes through.
 # ---------------------------------------------------------------------------
@@ -249,6 +264,20 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
         for i in issues
         if prio(i) == "HIGH" and (i.get("status") or "").lower() in ("open", "reopened")
     ]
+    # The second of the gate's two partitions, in the same order `run.py` applies
+    # them: Bandit's B105/B106 match an identifier's NAME against a password
+    # wordlist, and SRT promotes both to HIGH unconditionally, so a fixture key
+    # called `pass_count` arrives at the priority of a real credential. In test
+    # code that no deployment artifact is built from they are reported at Bandit's
+    # own severity and do not gate; everywhere that ships — including a test-shaped
+    # file inside a Lambda's CodeUri, which `sam build` copies into the artifact —
+    # they still do. See NAME_HEURISTIC_EXEMPT in scripts/srt/ci_paths.py for why
+    # no Bandit rule can express that scope, and why this cannot be a baseline.
+    #
+    # Applied to the gating list rather than to `issues`, so the priority × status
+    # matrix below still counts every CI-visible finding. Nothing is dropped: the
+    # demoted findings are listed in their own section.
+    open_high, name_scoped = partition_by_name_heuristic_scope(open_high, REPO_ROOT)
     gate = (
         "PASS ✅"
         if not open_high
@@ -280,13 +309,23 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
         "(Syft), and the security-matrix review, aggregated by the "
         "[Sample Security Review Tool](https://github.com/aws-samples/sample-security-review-tool). "
         "The gate is HIGH findings that are **open or reopened** (i.e. not "
-        "suppressed or resolved); lower tiers are reported as counts (they are "
+        "suppressed or resolved) and not scoped out of it by the rule in "
+        "`scripts/srt/ci_paths.py`; lower tiers are reported as counts (they are "
         "dominated by tracked third-party/vendored code).",
         "",
         "## Summary",
         "",
         f"- **Gate (open/reopened HIGH findings):** {gate}",
         f"- **CI-visible findings:** {len(issues)}",
+        *(
+            [
+                f"- **Scoped out of the gate:** {len(name_scoped)} identifier-name "
+                "finding(s) (Bandit B105/B106) in test code no deployment artifact "
+                "is built from — listed below, reported at Bandit's own severity"
+            ]
+            if name_scoped
+            else []
+        ),
         f"- **Source:** {source_desc}"
         + (
             f" — {dropped} git-ignored finding(s) excluded to match the CI view"
@@ -337,8 +376,9 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
             "## HIGH findings by check (disposition)",
             "",
             "Every HIGH check-ID flagged, with how many are in each status. "
-            "A green gate means all are resolved or suppressed (0 Open and "
-            "0 reopened).",
+            "A green gate means every one of them is either resolved, suppressed, "
+            "or an identifier-name finding scoped out of the gate (see the section "
+            "below and the Summary count above).",
             "",
             "| Source | Check | " + " | ".join(statuses) + " |",
             "|--------|-------|" + "|".join(["--:"] * len(statuses)) + "|",
@@ -347,6 +387,29 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
             c = by_check[(src, cid)]
             cells = " | ".join(str(c.get(s, 0)) for s in statuses)
             lines.append(f"| {redact(src)} | `{redact(cid)}` | {cells} |")
+        lines.append("")
+
+    if name_scoped:
+        lines += [
+            "## ℹ️ Identifier-name findings in test code (non-blocking)",
+            "",
+            "Bandit's B105/B106 match an identifier's **name** against a password "
+            "wordlist, never its value, and SRT promotes both to HIGH regardless of "
+            "what was matched. In test code that no deployment artifact is built "
+            "from they are reported at Bandit's own severity instead of blocking; "
+            "the same name shape still gates anywhere that ships. This is the scope "
+            "decision `make srt-scan` applies, applied here so this snapshot and "
+            "that gate give the same verdict.",
+            "",
+            "| Source | Check | Path | Line | Issue |",
+            "|--------|-------|------|-----:|-------|",
+        ]
+        for i in name_scoped:
+            lines.append(
+                f"| {redact(i.get('source', ''))} | `{redact(i.get('check_id', ''))}` "
+                f"| `{redact(i.get('path', ''))}` | {i.get('line', '')} "
+                f"| {redact(i.get('issue', ''))} |"
+            )
         lines.append("")
 
     if open_high:
@@ -396,6 +459,7 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
         "status": "run",
         "total": len(issues),
         "open_high": len(open_high),
+        "name_scoped": len(name_scoped),
         "gate": "pass" if not open_high else "fail",
     }
     return "\n".join(lines), meta
