@@ -139,8 +139,26 @@ in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configu
   it when carried into a US or EU stack, and an `eu.` id stored in a Canada
   stack is not rewritten. The picklists hide both, but a stored value stays
   until someone edits it.
-- **ca-west-1** receives the same handling as ca-central-1 but has not been
-  validated.
+- **Embedding calls are not costed.** Multi-document discovery's embedding
+  model (`global.cohere.embed-v4:0` in Canada, `us.cohere.embed-v4:0`
+  elsewhere) emits no metering entry — `generate_embedding` returns a bare
+  vector — and neither id has a row in `config_library/pricing.yaml`, so
+  embedding usage does not appear in cost reporting. Pre-existing and not
+  specific to Canada; the pricing coverage gate exempts embedding models for
+  this reason.
+- **ca-west-1 is handled, but the model lists are derived from ca-central-1.**
+  A `ca-west-1` stack resolves to the same `ca` region type and gets the same
+  picklists, swaps and Knowledge Base default, which is validated for
+  ca-central-1 only. Checked live on 2026-10-13: of the 47 ids the Canada
+  picklists offer, four cannot be called from ca-west-1 —
+  `global.xai.grok-4.6`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+  `us.anthropic.claude-opus-4-5-20251101-v1:0` and
+  `us.anthropic.claude-sonnet-4-5-20250929-v1:0` — and
+  `global.cohere.embed-v4:0`, the multi-document discovery embedding default,
+  has no ca-west-1 profile. `ca.amazon.nova-lite-v1:0`, which the Knowledge
+  Base condition selects, is callable there. Verify with the command in
+  [Verifying model availability](#verifying-model-availability) against your
+  own Region before relying on a model.
 
 ## Deploying to ca-central-1
 
