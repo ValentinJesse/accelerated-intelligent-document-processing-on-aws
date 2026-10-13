@@ -690,7 +690,18 @@ class TestTheListFieldsPresentAcrossSchemaShapes:
         }
         issue = self._issue(schema, {"Account Number": "1"})
         assert issue.details["list_fields_present"] == []
-        assert "cut off before it finished" in issue.message
+        # The WHOLE message, which is what pins the empty branch of the
+        # list-fields clause: an "is not in" assertion let a mutation of its
+        # `else ""` put arbitrary text into the sentence and still pass.
+        assert issue.message == (
+            "The model's extraction response was cut off before it finished, so "
+            "the result holds only the part that was emitted. Scalar fields and "
+            "the rows that did arrive can still be perfectly correct, so no "
+            "accuracy or confidence signal flags this. Simple extraction returns "
+            "one response per section, so a section whose answer does not fit in "
+            "one response loses the tail; use Advanced (agentic) extraction, "
+            "which shards the section across requests, or split the document."
+        )
 
 
 class TestTheRemedyIsAvailableToTheDeploymentItIsGivenTo:
