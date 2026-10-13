@@ -107,6 +107,14 @@ Cross-check against the file map below.
 - [ ] `src/lambda/update_configuration/index.py` — `US_ONLY_MODELS` (or EU
       filtering). Keep explicit sets complete even when a `startswith` fallback
       covers the new ID.
+- [ ] `src/lambda/update_configuration/index.py` — Canada: if ca-central-1 has
+      no inference profile and no in-region hosting for the new ID (check with
+      `aws bedrock list-inference-profiles --region ca-central-1 --type-equals
+      SYSTEM_DEFINED` and `aws bedrock list-foundation-models --region
+      ca-central-1`), add it to `CA_UNAVAILABLE_MODELS`; otherwise Canada
+      picklists offer it and it fails at inference. If it becomes a shipped
+      default that Canada cannot call, also add a one-way swap to
+      `CA_MODEL_MAPPINGS`.
 - [ ] `src/ui/src/constants/schemaConstants.ts` — dropdown `{label,value}` per
       model.
 - [ ] `src/ui/.../SchemaInspector.tsx` — any other hardcoded UI list.
