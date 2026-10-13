@@ -40,19 +40,31 @@ import os
 import re
 from typing import Iterable, Mapping, Optional, Set
 
-try:  # pragma: no cover - which branch runs depends on the Lambda's package
-    from idp_common.api_adapter import ResourceAccessDenied
-except ImportError:  # pragma: no cover - the vendored copy, in a Lambda with no layer
-    # This module is vendored byte-identically into resolver packages that do not
-    # carry `idp_common` (see scripts/tests/test_s3_targets_vendored.py, which
-    # enforces that), so the canonical class is not importable there. Declaring it
-    # locally is the documented pattern and it still works, because the dispatcher
-    # recognises the class by its NAME: a resolver reached through `lambda:Invoke`
-    # surfaces its exception as the `errorType` string and the class object never
-    # crosses that boundary. `ResourceNotFound` and `AuthorizationError` are already
-    # declared this way elsewhere in the tree.
-    class ResourceAccessDenied(PermissionError):  # type: ignore[no-redef]
-        """A refusal by a per-object control. See idp_common.api_adapter."""
+
+class ResourceAccessDenied(PermissionError):
+    """A refusal by a per-object control rather than by the caller's group.
+
+    Declared here rather than imported from :mod:`idp_common.api_adapter`, which
+    holds the canonical class, and the reason is this module's vendoring: it is
+    copied **byte-identically** into resolver packages that carry no ``idp_common``
+    layer (``scripts/tests/test_s3_targets_vendored.py`` enforces the copy is
+    identical), so an import that resolves inside the package would fail inside the
+    copy, and a conditional import would make the two declarations differ.
+
+    Declaring it twice is sound rather than merely tolerable, because the consumer
+    is across a process boundary: the dispatcher recognises this refusal by its
+    class **NAME**, since a resolver reached through ``lambda:Invoke`` surfaces its
+    exception as the ``errorType`` string and the class object never crosses that
+    boundary. ``ResourceNotFound`` and ``AuthorizationError`` are already declared
+    this way elsewhere in the tree for the same reason.
+
+    It must stay a ``PermissionError`` subclass and its messages must keep the
+    ``Unauthorized`` prefix — those are what map the refusal to 403 rather than 500
+    on the two in-process mappings and on a dispatcher that predates the class. See
+    :class:`idp_common.api_adapter.ResourceAccessDenied` for what the label means
+    and why an unattributed refusal is read strictly.
+    """
+
 
 # Environment variables that name a bucket this deployment owns. A name that is
 # unset simply contributes nothing — the set is the intersection of what the code

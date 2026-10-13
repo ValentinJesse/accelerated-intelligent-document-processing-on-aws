@@ -380,7 +380,11 @@ class TestATimingOutDeploymentIsNotAGreenRun:
         allowed-role and ANY-auth cell reported a pass and the process exited 0.
         """
         monkeypatch.setattr(
-            h, "call", lambda api_base, field, args, token: h.ApiResult(0, None, None, "<timeout>")
+            h,
+            "call",
+            lambda api_base, field, args, token: h.ApiResult(
+                0, None, None, "<timeout>"
+            ),
         )
         results = []
 

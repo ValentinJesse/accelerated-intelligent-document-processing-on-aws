@@ -116,7 +116,9 @@ def _denial_response(message: str, control: str) -> Dict[str, Any]:
     behaviour #1308 is about.
     """
     if control not in AUTHZ_CONTROLS:  # pragma: no cover - defensive
-        raise ValueError(f"unknown authz control {control!r}; expected one of {AUTHZ_CONTROLS}")
+        raise ValueError(
+            f"unknown authz control {control!r}; expected one of {AUTHZ_CONTROLS}"
+        )
     return _http_response(
         403,
         {
@@ -129,6 +131,7 @@ def _denial_response(message: str, control: str) -> Dict[str, Any]:
             ]
         },
     )
+
 
 # REST API Gateway abandons an integration after 29s (account default) and
 # answers the browser `504` with no body, so anything slower than this is

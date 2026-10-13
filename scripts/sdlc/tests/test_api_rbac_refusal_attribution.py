@@ -86,7 +86,9 @@ def _dispatcher_control_vocabulary() -> dict:
             continue
         for target in node.targets:
             name = getattr(target, "id", "")
-            if name.startswith("AUTHZ_CONTROL") and isinstance(node.value, ast.Constant):
+            if name.startswith("AUTHZ_CONTROL") and isinstance(
+                node.value, ast.Constant
+            ):
                 found[name] = node.value.value
     return found
 
@@ -165,7 +167,11 @@ def test_a_body_with_no_label_reports_none_rather_than_guessing():
 
         def read(self):
             return json.dumps(
-                {"errors": [{"message": "Unauthorized: x", "errorType": "Unauthorized"}]}
+                {
+                    "errors": [
+                        {"message": "Unauthorized: x", "errorType": "Unauthorized"}
+                    ]
+                }
             ).encode()
 
         def __enter__(self):
@@ -309,6 +315,35 @@ def test_only_an_explicit_resource_label_leaves_the_strict_verdict(control):
     assert _disallowed_cell(control).outcome == "PASS"
 
 
+@pytest.mark.parametrize(
+    "control", [h.CONTROL_GROUP_FLOOR, h.CONTROL_RESOLVER, h.CONTROL_UNLABELLED]
+)
+def test_a_failing_cells_detail_names_the_control_so_triage_starts_there(control):
+    """The report line has to say which layer refused, verbatim.
+
+    "DENIED but allowed (403/Unauthorized)" is what sent a reader to CloudWatch to
+    find out which of two controls answered, and establishing that the eight were
+    not a regression took a by-hand comparison against a prior run. An unattributed
+    refusal says so in words rather than leaving the field blank.
+    """
+    detail = _allowed_cell(control).detail
+
+    assert "control=" in detail
+    assert (control or "unattributed") in detail
+    assert str(403) in detail
+
+
+def test_the_resource_detail_names_the_field_a_reader_would_grep_for():
+    """Both the label's own field name and its value, so the report line and the
+    response body can be matched up without a second lookup."""
+    allowed = _allowed_cell(h.CONTROL_RESOURCE).detail
+    disallowed = _disallowed_cell(h.CONTROL_RESOURCE).detail
+
+    for detail in (allowed, disallowed):
+        assert h.CONTROL_FIELD in detail
+        assert h.CONTROL_RESOURCE in detail
+
+
 def test_the_resource_label_is_the_only_one_that_moves_a_verdict():
     """Non-vacuity of the parametrisation above: if nothing moved the verdict, the
     whole distinction would be inert and every test here would still pass."""
@@ -321,7 +356,9 @@ def test_an_inconclusive_result_still_wins_over_the_label():
     """A 5xx or a dead connection establishes nothing whatever the body claims, and
     a response carrying a ``resource`` label must not promote one into an answer."""
     timed_out = h.classify("Admin", ALLOWED, 0, None, None, h.CONTROL_RESOURCE)
-    crashed = h.classify("Admin", ALLOWED, 500, "InternalError", None, h.CONTROL_RESOURCE)
+    crashed = h.classify(
+        "Admin", ALLOWED, 500, "InternalError", None, h.CONTROL_RESOURCE
+    )
 
     assert timed_out.outcome == "ERROR"
     assert "request did not complete" in timed_out.detail
@@ -333,16 +370,36 @@ def test_an_iam_only_op_refused_by_a_resource_control_fails():
     """Every Cognito caller must be refused by the floor's IAM_ONLY branch. A
     per-object refusal means the request was routed to a resolver, which for these
     operations is the leak the cell exists to catch."""
-    assert h.classify("Admin", h.IAM, 403, "Unauthorized", None, h.CONTROL_RESOURCE).outcome == "FAIL"
-    assert h.classify("Admin", h.IAM, 403, "Unauthorized", None, h.CONTROL_GROUP_FLOOR).outcome == "PASS"
+    assert (
+        h.classify(
+            "Admin", h.IAM, 403, "Unauthorized", None, h.CONTROL_RESOURCE
+        ).outcome
+        == "FAIL"
+    )
+    assert (
+        h.classify(
+            "Admin", h.IAM, 403, "Unauthorized", None, h.CONTROL_GROUP_FLOOR
+        ).outcome
+        == "PASS"
+    )
 
 
 def test_an_any_group_op_behaves_like_an_allowed_cell():
     """``getChatMessages`` is ``ANY_GROUP``, which the harness expands to the
     stack's group names, so all four roles are allowed cells. The ``ANY`` policy
     takes the same branch and must agree."""
-    assert h.classify("Viewer", h.ANY, 403, "Unauthorized", None, h.CONTROL_RESOURCE).outcome == "ERROR"
-    assert h.classify("Viewer", h.ANY, 403, "Unauthorized", None, h.CONTROL_GROUP_FLOOR).outcome == "FAIL"
+    assert (
+        h.classify(
+            "Viewer", h.ANY, 403, "Unauthorized", None, h.CONTROL_RESOURCE
+        ).outcome
+        == "ERROR"
+    )
+    assert (
+        h.classify(
+            "Viewer", h.ANY, 403, "Unauthorized", None, h.CONTROL_GROUP_FLOOR
+        ).outcome
+        == "FAIL"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +560,11 @@ def test_no_declared_per_object_control_can_read_as_a_group_failure(op_name):
         if groups == "ANY_GROUP"
         else set(groups)
     )
-    role = "Admin" if allowed in (h.ANY, h.IAM) or "Admin" in allowed else sorted(allowed)[0]
+    role = (
+        "Admin"
+        if allowed in (h.ANY, h.IAM) or "Admin" in allowed
+        else sorted(allowed)[0]
+    )
 
     resource = h.classify(role, allowed, 403, "Unauthorized", None, h.CONTROL_RESOURCE)
     floor = h.classify(role, allowed, 403, "Unauthorized", None, h.CONTROL_GROUP_FLOOR)
@@ -564,7 +625,10 @@ def _function_source(path: Path, name: str) -> str:
     to the body that serves the operation."""
     source = path.read_text()
     for node in ast.parse(source).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
             segment = ast.get_source_segment(source, node)
             assert segment, f"could not read the source of {name} in {path.name}"
             return segment
@@ -597,7 +661,9 @@ def test_the_argument_guard_runs_before_the_per_object_control(
     guard_match = re.search(guard, source)
     control_match = re.search(control, source)
 
-    assert guard_match, f"{resolver}:{function}: the argument guard for {op_name} is gone"
+    assert guard_match, (
+        f"{resolver}:{function}: the argument guard for {op_name} is gone"
+    )
     assert control_match, (
         f"{resolver}:{function}: the per-object control for {op_name} is gone"
     )
@@ -621,4 +687,137 @@ def test_the_three_operations_still_send_the_argument_that_reaches_the_floor(op_
     assert empties, (
         f"{op_name} no longer sends an empty required argument, so its resolver's "
         f"validation will not fire ahead of its per-object control: {args}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The per-object refusals that DECLARE themselves, and the ones that do not
+# ---------------------------------------------------------------------------
+# A label is only as good as the raise sites that set it, and the dispatcher cannot
+# attribute a refusal the resolver did not declare. These are the sites converted
+# for #1308 — the controls the live matrix actually provokes on the three operations
+# the issue named, plus the shared S3 helper the fourth and fifth reach.
+#
+# ⚠️ This list is NOT the set of all per-object controls in the tree, and it is not
+# an exemption for the rest. `key_scope.py`'s six refusals, the config-version scope
+# refusals in `reprocess_document_resolver`, `upload_resolver` and
+# `list_documents_*`, and the in-band `{success:false,error:{type:"Unauthorized"}}`
+# 200 the configuration and sync resolvers return are all still UNATTRIBUTED, which
+# downstream means the strict verdict. That is the safe direction and it is a
+# deliberate bound on this change rather than a claim that those are group
+# refusals: the live matrix drives none of them to a refusal today (its roles are
+# unscoped and its `getFileContents` bucket is the input bucket, which no scope axis
+# partitions), so converting them would be unexercised churn on the authorization
+# path. Convert one when the matrix can reach it.
+_DECLARED_RESOURCE_REFUSALS = (
+    ("idp_common/s3_targets.py", "assert_bucket_allowed"),
+    ("idp_common/s3_targets.py", "assert_key_writable"),
+    ("test_set_resolver/index.py", "_enforce_selection_scope"),
+    ("get_agent_chat_messages_resolver/index.py", "handler"),
+)
+
+
+def _raised_names(path: Path, function: str) -> set:
+    """The class names raised inside one top-level function."""
+    source = path.read_text()
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function
+        ):
+            names = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Raise) and sub.exc is not None:
+                    exc = sub.exc
+                    callee = exc.func if isinstance(exc, ast.Call) else exc
+                    name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+                    if name:
+                        names.add(name)
+            return names
+    raise AssertionError(f"{path.name} has no top-level function named {function}")
+
+
+def test_the_declared_resource_refusal_list_is_not_empty():
+    assert len(_DECLARED_RESOURCE_REFUSALS) >= 4
+
+
+@pytest.mark.parametrize(
+    "relative,function",
+    _DECLARED_RESOURCE_REFUSALS,
+    ids=[f"{r.split('/')[-2]}:{f}" for r, f in _DECLARED_RESOURCE_REFUSALS],
+)
+def test_a_converted_per_object_control_still_declares_itself(relative, function):
+    """Reverting one of these to a bare ``PermissionError`` would lose the
+    attribution for that operation silently — the dispatcher would label it
+    ``resolver``, the harness would apply the strict verdict, and the cell would go
+    back to reading as a group-check failure."""
+    base = (
+        _REPO / "lib" / "idp_common_pkg"
+        if relative.startswith("idp_common/")
+        else _RESOLVERS
+    )
+    raised = _raised_names(base / relative, function)
+
+    assert "ResourceAccessDenied" in raised, (
+        f"{relative}:{function} no longer declares its per-object refusal; raised "
+        f"{sorted(raised)}"
+    )
+
+
+def test_the_two_declarations_of_the_class_agree_on_what_matters():
+    """The helper declares its own class rather than importing the canonical one,
+    because it is vendored byte-identically into a package with no ``idp_common``.
+    Two declarations are sound only because the consumer is across a PROCESS
+    boundary and matches by name — so assert the name, and assert the two
+    properties the in-process mappings and an older dispatcher rely on."""
+    from idp_common.api_adapter import ResourceAccessDenied as canonical
+    from idp_common.s3_targets import ResourceAccessDenied as local
+
+    assert canonical.__name__ == local.__name__ == "ResourceAccessDenied"
+    assert issubclass(canonical, PermissionError)
+    assert issubclass(local, PermissionError)
+
+
+def test_nothing_in_the_dispatcher_process_calls_the_s3_helper():
+    """Why two same-named classes cannot bite in-process.
+
+    The dispatcher's own ``except ResourceAccessDenied`` is the canonical class, so
+    it would not catch the helper's. That is harmless only while no module the
+    dispatcher executes IN ITS OWN PROCESS calls the helper — the resolvers that do
+    are reached through ``lambda:Invoke``, where the match is by name. If that ever
+    changes, the helper has to import the canonical class instead.
+    """
+    for module in sorted(_DISPATCHER.glob("*.py")):
+        assert "s3_targets" not in module.read_text(), (
+            f"{module.name} now references the S3 helper in the dispatcher's own "
+            "process, where the two declarations of ResourceAccessDenied are "
+            "DIFFERENT classes and `except ResourceAccessDenied` would miss one"
+        )
+
+
+def test_the_vendored_copy_of_the_s3_helper_declares_it_too():
+    """The read path's Lambda carries a byte-identical copy of the helper (there is
+    a parity gate for that), and it has no ``idp_common`` to import the class from.
+    If the local fallback declaration were dropped the copy would stop importing."""
+    vendored = _RESOLVERS / "get_file_contents_resolver" / "s3_targets.py"
+    canonical = _REPO / "lib" / "idp_common_pkg" / "idp_common" / "s3_targets.py"
+
+    assert vendored.read_text() == canonical.read_text()
+    assert "ResourceAccessDenied" in _raised_names(vendored, "assert_bucket_allowed")
+    source = vendored.read_text()
+    assert "class ResourceAccessDenied(PermissionError)" in source, (
+        "the layerless copy needs its own declaration; the canonical import is not "
+        "available in that package"
+    )
+
+
+def test_the_group_floor_does_not_declare_itself_as_a_resource_refusal():
+    """The adversarial direction: if ``authz.enforce`` raised the per-object class,
+    a GROUP refusal would arrive labelled ``resource`` and the harness would stop
+    failing on it. Assert the floor raises its own class and nothing else."""
+    raised = _raised_names(_DISPATCHER / "authz.py", "enforce")
+
+    assert raised == {"GroupFloorDenied"}, (
+        f"authz.enforce raises {sorted(raised)}; only its own class may label the "
+        "group floor"
     )
