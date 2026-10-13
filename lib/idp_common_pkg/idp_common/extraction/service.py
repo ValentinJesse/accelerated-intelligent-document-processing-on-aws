@@ -3828,10 +3828,14 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             # select it is advice that breaks the run — and `incomplete`, the stop
             # reason those models report, is exactly the one that brings a reader
             # here.
-            resolved_model = str(
-                self._pending_extraction_model or self.config.extraction.model or ""
+            # No `str(... or "")` wrapper: `is_openai_responses_model` returns False
+            # for a falsy id, so the wrapper was unreachable defence — and a
+            # random-sample mutation of its fallback was semantically EQUIVALENT
+            # (no input could distinguish `""` from any other non-OpenAI string),
+            # which no test can catch. Deleting the line is the honest fix.
+            can_use_agentic = not is_openai_responses_model(
+                self._pending_extraction_model or self.config.extraction.model
             )
-            can_use_agentic = not is_openai_responses_model(resolved_model)
             if is_agentic:
                 rec = (
                     " Reduce the rows a single shard is asked for "
