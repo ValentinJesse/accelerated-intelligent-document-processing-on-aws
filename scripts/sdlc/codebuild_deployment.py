@@ -3556,10 +3556,27 @@ def _deploy_primary_stack_attempt(stack_name, admin_email, template_url):
     # stays `CREATE_PLAN` so the gate is exercised unless somebody decides
     # otherwise.
     malware_mode = _integration_malware_mode()
-    cmd += (
-        f" --parameters PermissionsBoundaryArn={permissions_boundary_arn}"
-        f" MalwareScanning={malware_mode}"
-    )
+    # ⚠️ `--parameters` is ONE Click option taking ONE value, so the pairs are
+    # built as a list, comma-joined and shell-quoted — the same shape the other
+    # two deploy call sites in this repository use, and adopted here because the
+    # separator is load-bearing and an f-string concatenation hides that.
+    #
+    # Appending a second pair after a space made the shell hand Click only the
+    # first token; the second became a positional argument, `idp-cli deploy`
+    # exited 2 with "Got unexpected extra argument", and no stack was created at
+    # all (issue #1371). Joining and quoting removes the whole class rather than
+    # the one occurrence: a pair added to this list cannot reintroduce it.
+    #
+    # Note the CLI's own `parse_parameters` treats whitespace inside the value as
+    # a pair boundary, so the grammar is not what rejected the broken command —
+    # Click did, before the grammar was ever reached. A test that exercises only
+    # the grammar passes on the broken form.
+    param_pairs = [
+        # Must equal the service role's CreatedRolePermissionsBoundaryArn.
+        f"PermissionsBoundaryArn={permissions_boundary_arn}",
+        f"MalwareScanning={malware_mode}",
+    ]
+    cmd += f' --parameters "{",".join(param_pairs)}"'
     # Full nested-stack creation can legitimately run long; don't let the default
     # test-command timeout kill a healthy in-progress deploy. check=False so a
     # rollback is captured (with cf_events) and classified rather than raising.
