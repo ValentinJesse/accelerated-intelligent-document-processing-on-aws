@@ -1159,11 +1159,16 @@ The queue page shows:
   Studio, with the page images, per-field confidence, the JSON tab, and the
   revision history.
 - **Save & next in queue** — saves the correction and moves straight to the next
-  available document, without waiting for the queue to be re-read. A document is
-  marked reviewed once **every** one of its sections carries a human verdict, so
-  on a multi-section packet a save records the section you were working on and the
-  confirmation says how many sections the document has; finish it from the section
-  tabs, or use **No changes needed**, which submits every section at once.
+  available document, without waiting for the queue to be re-read.
+- **Multi-section documents take more than one save.** A document is marked
+  reviewed once **every** one of its sections carries a human verdict, so a save
+  records the section you were working on and then moves to the next *document* —
+  it does not walk the remaining sections of the one you were in. The
+  confirmation says how many sections the document has, and the row stays
+  "Awaiting review" until they are all done; reopen it from the queue to work the
+  rest, using the section tabs above the editor. **Labels are correct — mark
+  reviewed** is the one control that covers a whole document at once: it submits
+  every section unchanged.
 - **Show reviewed documents** — reviewed work drops out of the queue, so this is
   the way back to a document whose label you already confirmed, including to
   search for one by name. Those rows are not held in the browser, so revealing

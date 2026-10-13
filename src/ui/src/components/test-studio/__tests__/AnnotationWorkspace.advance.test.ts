@@ -18,9 +18,11 @@
  *
  * The queue in hand already names the next document, so the advance no longer
  * waits for anything. The two functions below are what it advances with, and the
- * source-level checks pin the two ways the fix can be undone — re-awaiting the
- * reload, and handing Cloudscape's click event to a function whose first
- * parameter is now a document key.
+ * source-level checks pin the ways the fix can be undone: re-awaiting the reload,
+ * retiring a document the reviewer only skipped or only part-reviewed, and —
+ * found in review of this change — letting an overlapping background reload
+ * replace the queue with rows that predate the save that triggered it, which
+ * would make the save undo itself on screen a few seconds later.
  *
  * Asserted at source level rather than by rendering, for the reason given in
  * AnnotationWorkspace.editGating.test.ts: the component needs the GraphQL
@@ -146,11 +148,66 @@ describe('the advance does not wait for the queue reload', () => {
     expect(body).not.toContain('await loadQueue');
   });
 
-  it('keeps the click event out of the reviewed-document parameter', () => {
-    // `onClick={advanceToNext}` compiles and is wrong: Cloudscape passes a
-    // CustomEvent, which would arrive as `reviewedKey` and retire the document
-    // being skipped as though it had been reviewed.
+  it('skips a document without retiring it as reviewed', () => {
+    // The argument is what distinguishes skipping from finishing, and passing one
+    // here is the mistake that type checking cannot see: `advanceToNext(
+    // selected.objectKey)` is well-typed and would mark a document the reviewer
+    // deliberately skipped as reviewed, hiding it from the queue.
+    //
+    // Handing the handler over unwrapped is the other way to pass an argument by
+    // accident — Cloudscape calls it with a CustomEvent — but that one `tsc`
+    // rejects outright (TS2322: CustomEvent is not assignable to `string |
+    // undefined`), so it needs no assertion here.
     expect(SOURCE).toContain('onClick={() => advanceToNext()}');
-    expect(SOURCE).not.toMatch(/onClick=\{advanceToNext\}/);
+  });
+
+  it('claims a document as reviewed only where every section of it is', () => {
+    // applyReviewedToQueue's contract is a precondition on its caller, and this
+    // is the caller: `sectionsRemaining` is what decides whether the document is
+    // retired from the rail. Passing `documentName` unconditionally would tick a
+    // packet after one of its sections was saved — the state the save
+    // confirmation used to claim and the test set's Review state column denied.
+    expect(SOURCE).toContain('advanceToNext(sectionsRemaining ? undefined : documentName)');
+  });
+});
+
+describe('an overlapping reload cannot undo a save', () => {
+  const body = SOURCE.slice(
+    SOURCE.indexOf('const loadQueue = useCallback('),
+    SOURCE.indexOf('[testSetId, requestedDoc, showReviewed, responseGuard]'),
+  );
+
+  it('is positioned in the source where this test expects to find it', () => {
+    // Guards the assertions below from passing vacuously on an empty slice, and
+    // names loadQueue's dependency list, which is the slice's end marker.
+    expect(body).toContain('query: getAnnotationQueue');
+  });
+
+  it('claims the response guard before awaiting, and discards a superseded reply', () => {
+    // Background refreshes make overlapping reloads ordinary: a reload started
+    // before a save lands after it, carrying rows that predate it, and a
+    // `setQueue` with those rows puts the saved document back in the rail as
+    // outstanding with the counters rolled back. The claim has to happen BEFORE
+    // the await or precedence is decided by which reply finished last, which is
+    // the thing being guarded against. Same guard, same reason, as the test set
+    // documents table.
+    const claimAt = body.indexOf('responseGuard.claim()');
+    const awaitAt = body.indexOf('await client.graphql');
+    expect(claimAt).toBeGreaterThan(-1);
+    expect(claimAt).toBeLessThan(awaitAt);
+    expect(body).toContain('if (!isCurrentLoad()) return;');
+  });
+
+  it('does not raise the page banner for a refresh nobody asked for', () => {
+    // The error Alert is not dismissible and the "Queue complete" alert is gated
+    // on there being no error, so a background failure would sit over the
+    // document being worked on, offering no action, and hide the completion
+    // message. Every setError on this path is therefore conditional.
+    expect(body).toContain('if (!background) setError(null)');
+    expect(body).toContain("if (!background) setError('The annotation queue could not be loaded.')");
+    expect(body).toContain('if (!background && isCurrentLoad()) {');
+    // Counted, so a fourth call added later has to be guarded too rather than
+    // slipping past three assertions that each still pass.
+    expect(body.match(/setError\(/g) ?? []).toHaveLength(3);
   });
 });

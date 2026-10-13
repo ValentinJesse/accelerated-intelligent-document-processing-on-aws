@@ -65,6 +65,7 @@ import ReviewCelebration from './ReviewCelebration';
 import type { TestSetDocumentSectionRef } from './GroundTruthVisualEditor';
 import { TEST_STUDIO_PATH, testSetDetailHref, testSetAnnotateHref } from '../../routes/constants';
 import { renderAlertCount, renderLabelSource, renderQualityTier } from './TestSetDetail';
+import { createLatestResponseGuard } from './latestResponseOnly';
 
 const client = generateClient();
 const logger = new ConsoleLogger('AnnotationWorkspace');
@@ -354,24 +355,52 @@ const AnnotationWorkspace = (): React.JSX.Element => {
   }, [testSetId]);
 
   /**
+   * One guard per mounted workspace, for the same reason TestSetDetail holds
+   * one: `useRef(createLatestResponseGuard())` would build a fresh guard on
+   * every render and discard all but the first.
+   */
+  const responseGuard = useMemo(createLatestResponseGuard, []);
+
+  /**
    * `background` reconciles without blocking: the spinner and every control
    * gated on `isLoading` are left alone, so a refresh that takes ~9s on a large
    * set runs behind whatever the reviewer is already doing. Used by the
    * post-save advance, which has no reason to wait for it.
+   *
+   * ⚠️ Which makes **overlapping reloads the ordinary case**, so a reply has to
+   * prove it is still the newest before it may replace the queue. Save two
+   * documents nine seconds apart and the first reload lands after the second
+   * save: its rows predate that save, so a `setQueue` with them puts the second
+   * document back in the rail as outstanding and rolls the counters back — the
+   * save undoing itself on screen, which is the complaint this whole change
+   * exists to fix, reintroduced by the fix. The replies can also genuinely
+   * invert, because each one's duration scales with the sections it hydrates;
+   * that is the reasoning in `latestResponseOnly.ts`, and it applies here for
+   * the same reason it applies to the table.
+   *
+   * A background failure is deliberately **not** raised as the page-level
+   * banner. Nothing the reviewer did caused it, there is no action it can offer,
+   * and the banner is not dismissible — so it would sit over the document they
+   * are working in, and suppress the "Queue complete" alert, which is gated on
+   * there being no error. The next foreground load still reports.
    */
   const loadQueue = useCallback(
     async (preserveSelection = true, background = false) => {
       if (!testSetId) return;
+      // Claimed before the await, so precedence is decided by which request
+      // started last rather than by which happened to finish last.
+      const isCurrentLoad = responseGuard.claim();
       if (!background) setIsLoading(true);
-      setError(null);
+      if (!background) setError(null);
       try {
         const response = await client.graphql({
           query: getAnnotationQueue,
           variables: { testSetId, limit: QUEUE_PAGE_SIZE, includeCompleted: showReviewed },
         });
+        if (!isCurrentLoad()) return;
         const data = response.data?.getAnnotationQueue as QueueState | null;
         if (!data) {
-          setError('The annotation queue could not be loaded.');
+          if (!background) setError('The annotation queue could not be loaded.');
           return;
         }
         setQueue(data);
@@ -391,16 +420,21 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         // A scope denial is the expected failure for an unassigned annotator, so
         // it gets actionable copy rather than "please try again".
         const message = String((err as { errors?: { message?: string }[] })?.errors?.[0]?.message ?? err);
-        setError(
-          message.includes('Unauthorized')
-            ? 'You are not assigned to this test set. Ask the person who shared this link to assign it to your account.'
-            : 'Failed to load the annotation queue. Please try again.',
-        );
+        // A superseded request's failure must not put a banner over the request
+        // whose rows are actually being shown, for the same reason its success
+        // must not replace them.
+        if (!background && isCurrentLoad()) {
+          setError(
+            message.includes('Unauthorized')
+              ? 'You are not assigned to this test set. Ask the person who shared this link to assign it to your account.'
+              : 'Failed to load the annotation queue. Please try again.',
+          );
+        }
       } finally {
         if (!background) setIsLoading(false);
       }
     },
-    [testSetId, requestedDoc, showReviewed],
+    [testSetId, requestedDoc, showReviewed, responseGuard],
   );
 
   useEffect(() => {
@@ -588,7 +622,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         {
           type: 'success',
           content: sectionsRemaining
-            ? `Saved. ${documentName} has ${saved?.sectionCount} sections — it is marked reviewed once every one of them is.`
+            ? `Saved. ${documentName} has ${saved?.sectionCount} sections and is marked reviewed once every one of them is — reopen it from the queue to work the rest.`
             : `Saved. ${documentName} is now marked reviewed.`,
           dismissible: true,
           onDismiss: () => setFlashItems([]),
@@ -738,6 +772,30 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       </Button>
     </SpaceBetween>
   );
+
+  /**
+   * The reveal for reviewed documents, shared by the two places that offer it:
+   * the queue rail, and the action on the "Queue complete" alert.
+   *
+   * One definition because the progress line is the whole point and it was easy
+   * to fix in one place and leave the other dead. The alert's copy is the path
+   * an annotator who has finished the set takes, and it triggers the same
+   * `includeCompleted` reload — which the spinner at the top of the page cannot
+   * report, since that one is gated on there being no queue yet and by this
+   * point there is one.
+   *
+   * Null once the reviewed documents are showing: there is nothing left to
+   * reveal, and the rows themselves are the confirmation.
+   */
+  const showReviewedControl = !showReviewed ? (
+    <Button iconName="status-positive" onClick={() => setShowReviewed(true)}>
+      Show reviewed documents
+    </Button>
+  ) : isLoading ? (
+    <Box fontSize="body-s" color="text-body-secondary">
+      <Spinner /> Loading reviewed documents…
+    </Box>
+  ) : null;
 
   const content = (
     <ContentLayout
@@ -905,11 +963,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
         )}
 
         {queue && queue.documents.length === 0 && !error && !labelJobRunning && (
-          <Alert
-            type="success"
-            header="Queue complete"
-            action={!showReviewed && <Button onClick={() => setShowReviewed(true)}>Show reviewed documents</Button>}
-          >
+          <Alert type="success" header="Queue complete" action={showReviewedControl}>
             Every document in this test set has been reviewed. Reopen a document to check or change a label you already confirmed.
           </Alert>
         )}
@@ -968,17 +1022,7 @@ const AnnotationWorkspace = (): React.JSX.Element => {
                       unless asked — so the toggle costs a queue reload, which is slow
                       enough on a large set to look like a dead click. Hence the progress
                       line while it runs, in place of the button. */}
-                  {!showReviewed ? (
-                    <Button iconName="status-positive" onClick={() => setShowReviewed(true)}>
-                      Show reviewed documents
-                    </Button>
-                  ) : (
-                    isLoading && (
-                      <Box fontSize="body-s" color="text-body-secondary">
-                        <Spinner /> Loading reviewed documents…
-                      </Box>
-                    )
-                  )}
+                  {showReviewedControl}
                   <Cards
                     items={pagedQueue}
                     trackBy="objectKey"

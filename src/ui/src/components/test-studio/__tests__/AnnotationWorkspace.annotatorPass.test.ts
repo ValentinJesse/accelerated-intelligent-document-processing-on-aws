@@ -35,12 +35,17 @@ const CURVE = readFileSync(
 );
 
 describe('reaching a document that has already been reviewed', () => {
+  // One definition, rendered in both places that offer the reveal — the rail and
+  // the "Queue complete" alert's action.
+  const reveal = SOURCE.slice(SOURCE.indexOf('const showReviewedControl ='), SOURCE.indexOf('const content = ('));
+
   it('offers the reveal while there is still other work, not only once the queue empties', () => {
     // The regression is positional: this control existed, but only as the `action` of
     // the "Queue complete" alert. Rendering it in the rail is what makes it reachable
     // at the moment it is needed.
     const rail = SOURCE.slice(SOURCE.indexOf('filteringPlaceholder="Find a document"'));
-    expect(rail).toMatch(/\{!showReviewed \? \(\s*<Button iconName="status-positive" onClick=\{\(\) => setShowReviewed\(true\)\}/);
+    expect(rail).toContain('{showReviewedControl}');
+    expect(reveal).toMatch(/<Button iconName="status-positive" onClick=\{\(\) => setShowReviewed\(true\)\}/);
   });
 
   it('renders the reveal as a control rather than as the filter box’s caption', () => {
@@ -48,9 +53,16 @@ describe('reaching a document that has already been reviewed', () => {
     // `variant="inline-link"` directly under the filter box it read as part of that
     // box's caption — the place Cloudscape puts match counts — so an annotator
     // looking for their reviewed documents did not find it.
-    const rail = SOURCE.slice(SOURCE.indexOf('filteringPlaceholder="Find a document"'));
-    const reveal = rail.slice(rail.indexOf('{!showReviewed'), rail.indexOf('setShowReviewed(true)}'));
     expect(reveal).not.toContain('variant="inline-link"');
+  });
+
+  it('reports progress on both copies, since revealing them costs a queue reload', () => {
+    // Shared rather than duplicated because the first fix did the rail and left the
+    // alert's copy inert — and the alert is the path an annotator who has finished
+    // the set takes. The top-of-page spinner cannot cover it: that one is gated on
+    // there being no queue yet, and by this point there is one.
+    expect(reveal).toContain('Loading reviewed documents');
+    expect(SOURCE).toContain('action={showReviewedControl}');
   });
 
   it('does not claim there is nothing to review when a filter is what emptied the list', () => {
