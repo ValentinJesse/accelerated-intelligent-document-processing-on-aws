@@ -279,6 +279,7 @@ export const EXTRACTION_MODEL_OVERRIDE_OPTIONS = [
   { label: 'eu.anthropic.claude-opus-5:1m', value: 'eu.anthropic.claude-opus-5:1m' },
   { label: 'eu.anthropic.claude-opus-5-5', value: 'eu.anthropic.claude-opus-5-5' },
   { label: 'eu.anthropic.claude-opus-5-5:1m', value: 'eu.anthropic.claude-opus-5-5:1m' },
+  // Canada (Central) - the only ca. profile AWS offers
   { label: 'ca.amazon.nova-lite-v1:0', value: 'ca.amazon.nova-lite-v1:0' },
   { label: 'global.amazon.nova-2-lite-v1:0', value: 'global.amazon.nova-2-lite-v1:0' },
   {

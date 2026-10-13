@@ -799,9 +799,25 @@ def supports_forced_tool_choice(model_id: str) -> bool:
 # Build set of base model names (without region/tier prefixes) for inference profile resolution.
 # e.g., "us.anthropic.claude-sonnet-4-6" -> "anthropic.claude-sonnet-4-6"
 # and "eu.amazon.nova-2-lite-v1:0:priority" -> "amazon.nova-2-lite-v1:0"
+#
+# The prefix set is _REGION_PREFIXES, not a local tuple. A hand-rolled ("us",
+# "eu", "global") here silently ignored every other geo an entry can carry, so
+# the `ca.`, `apac.`, `au.`, `jp.` or `us-gov.` spelling of a cachePoint-capable
+# model contributed no base name — and BedrockClient._is_model_cachepoint_supported
+# resolves an inference-profile ARN to its foundation model and looks the result
+# up in THIS set, so such a model would quietly lose prompt caching when it is
+# named by ARN.
+#
+# Latent when ca.amazon.nova-lite-v1:0 was added (its base is already seeded by
+# the us. twin, so the set is the same 23 names either way); the first model
+# offered under a geo prefix with no us. twin is what would have made it real.
+#
+# The tier/version suffix handling is deliberately NOT _strip_region_and_1m():
+# that helper strips `:1m`, which here must be KEPT, since a 1m profile is a
+# separate entry in the list above.
 for _model_id in CACHEPOINT_SUPPORTED_MODELS:
     _parts = _model_id.split(".", 1)
-    if len(_parts) == 2 and _parts[0] in ("us", "eu", "global"):
+    if len(_parts) == 2 and _parts[0] in _REGION_PREFIXES:
         _base = _parts[1]
         # Strip tier suffixes (:priority, :flex) but keep version suffixes (:0, :1m)
         if _base.endswith(":priority") or _base.endswith(":flex"):
