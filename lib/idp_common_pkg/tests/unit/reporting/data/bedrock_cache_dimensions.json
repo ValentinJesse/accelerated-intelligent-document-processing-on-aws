@@ -1,0 +1,977 @@
+{
+  "model_count": 141,
+  "models": {
+    "Claude 2.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 16
+    },
+    "Claude 2.1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 2
+    },
+    "Claude 3 Haiku": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 70
+    },
+    "Claude 3 Opus": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 12
+    },
+    "Claude 3 Sonnet": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 78
+    },
+    "Claude 3.5 Haiku": {
+      "cacheReadInputTokens": [
+        "1e-07",
+        "8e-08"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-06",
+        "1e-06"
+      ],
+      "token_dimension_count": 28
+    },
+    "Claude 3.5 Sonnet": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 62
+    },
+    "Claude 3.5 Sonnet v2": {
+      "cacheReadInputTokens": [
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06"
+      ],
+      "token_dimension_count": 66
+    },
+    "Claude 3.7 Sonnet": {
+      "cacheReadInputTokens": [
+        "3.6e-07",
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06",
+        "4.5e-06"
+      ],
+      "token_dimension_count": 96
+    },
+    "Claude Fable 5": {
+      "cacheReadInputTokens": [
+        "1.1e-06",
+        "1e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-05",
+        "1.375e-05"
+      ],
+      "token_dimension_count": 245
+    },
+    "Claude Fable 5.1": {
+      "cacheReadInputTokens": [
+        "2.5e-07",
+        "2.75e-07",
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-05",
+        "1.375e-05",
+        "1.5e-05"
+      ],
+      "token_dimension_count": 205
+    },
+    "Claude Haiku 4.5": {
+      "cacheReadInputTokens": [
+        "1.1e-07",
+        "1e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-06",
+        "1.375e-06"
+      ],
+      "token_dimension_count": 385
+    },
+    "Claude Haiku 5.5": {
+      "cacheReadInputTokens": [
+        "1.1e-08",
+        "1.2e-08",
+        "1e-08"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-07",
+        "1.375e-07",
+        "1.5e-07"
+      ],
+      "token_dimension_count": 530
+    },
+    "Claude Instant": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 16
+    },
+    "Claude Mythos 5": {
+      "cacheReadInputTokens": [
+        "1.1e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "1.375e-05"
+      ],
+      "token_dimension_count": 5
+    },
+    "Claude Mythos 5.1": {
+      "cacheReadInputTokens": [
+        "2.5e-07",
+        "2.75e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-05",
+        "1.375e-05"
+      ],
+      "token_dimension_count": 195
+    },
+    "Claude Mythos Preview": {
+      "cacheReadInputTokens": [
+        "2.75e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "3.4375e-05"
+      ],
+      "token_dimension_count": 10
+    },
+    "Claude Opus 4": {
+      "cacheReadInputTokens": [
+        "1.5e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "1.875e-05"
+      ],
+      "token_dimension_count": 18
+    },
+    "Claude Opus 4.1": {
+      "cacheReadInputTokens": [
+        "1.5e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "1.875e-05"
+      ],
+      "token_dimension_count": 12
+    },
+    "Claude Opus 4.5": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "6.25e-06",
+        "6.875e-06"
+      ],
+      "token_dimension_count": 262
+    },
+    "Claude Opus 4.6": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "6.25e-06",
+        "6.875e-06"
+      ],
+      "token_dimension_count": 350
+    },
+    "Claude Opus 4.7": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "6.25e-06",
+        "6.875e-06"
+      ],
+      "token_dimension_count": 255
+    },
+    "Claude Opus 4.8": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07",
+        "6e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "6.25e-06",
+        "6.875e-06",
+        "7.5e-06"
+      ],
+      "token_dimension_count": 265
+    },
+    "Claude Opus 5": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07",
+        "6e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "6.25e-06",
+        "6.875e-06",
+        "7.5e-06"
+      ],
+      "token_dimension_count": 392
+    },
+    "Claude Opus 5.5": {
+      "cacheReadInputTokens": [
+        "2.2e-07",
+        "2.4e-07",
+        "2e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "5.5e-06",
+        "5e-06",
+        "6e-06"
+      ],
+      "token_dimension_count": 265
+    },
+    "Claude Sonnet 4": {
+      "cacheReadInputTokens": [
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06"
+      ],
+      "token_dimension_count": 138
+    },
+    "Claude Sonnet 4.5": {
+      "cacheReadInputTokens": [
+        "3.3e-07",
+        "3.6e-07",
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06",
+        "4.125e-06",
+        "4.5e-06"
+      ],
+      "token_dimension_count": 365
+    },
+    "Claude Sonnet 4.6": {
+      "cacheReadInputTokens": [
+        "3.3e-07",
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06",
+        "4.125e-06"
+      ],
+      "token_dimension_count": 364
+    },
+    "Claude Sonnet 5": {
+      "cacheReadInputTokens": [
+        "2.2e-07",
+        "2.4e-07",
+        "2e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "2.5e-06",
+        "2.75e-06",
+        "3e-06"
+      ],
+      "token_dimension_count": 285
+    },
+    "Claude Sonnet 5.5": {
+      "cacheReadInputTokens": [
+        "1.1e-07",
+        "1.2e-07",
+        "1e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "2.5e-06",
+        "2.75e-06",
+        "3e-06"
+      ],
+      "token_dimension_count": 245
+    },
+    "Command": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Command R": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Command R+": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Command-Light": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "DeepSeek V3.1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 160
+    },
+    "DeepSeek v3.2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Devstral": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Embed English": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 17
+    },
+    "Embed Multilingual": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 17
+    },
+    "Embed v4": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 23
+    },
+    "GLM 4.7": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "GLM 4.7 Flash": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "GLM 5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "GPT OSS Safeguard 120B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "GPT OSS Safeguard 20B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Gemma 3 12B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Gemma 3 27B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Gemma 3 4B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Grok 4.7": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07",
+        "6.6e-07",
+        "6e-07"
+      ],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 700
+    },
+    "Jamba 1.5 Large": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Jamba 1.5 Mini": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Jamba-Instruct": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 2
+    },
+    "Jurassic Mid": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Jurassic Ultra": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Kimi K2 Thinking": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 152
+    },
+    "Kimi K2.5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Kimi K3": {
+      "cacheReadInputTokens": [
+        "3.3e-07",
+        "3.6e-07",
+        "3.96e-07",
+        "3e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.75e-06",
+        "4.125e-06",
+        "4.5e-06",
+        "4.95e-06"
+      ],
+      "token_dimension_count": 930
+    },
+    "Llama 3 70B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 14
+    },
+    "Llama 3 8B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 14
+    },
+    "Llama 3.1 405B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 10
+    },
+    "Llama 3.1 405B Latency Optimized": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 2
+    },
+    "Llama 3.1 70B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 13
+    },
+    "Llama 3.1 70B Latency Optimized": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 6
+    },
+    "Llama 3.1 8B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 13
+    },
+    "Llama 3.2 11B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 9
+    },
+    "Llama 3.2 1B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 17
+    },
+    "Llama 3.2 3B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 17
+    },
+    "Llama 3.2 90B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 9
+    },
+    "Llama 3.3 70B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 13
+    },
+    "Llama 3.3 70B Custom": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 2
+    },
+    "Llama 4 Maverick 17B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 16
+    },
+    "Llama 4 Scout 17B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 16
+    },
+    "Llama2-13B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Llama2-70B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Magistral Small 1.2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Marengo Embed 2.7": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "Marengo Embed 3.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "MiniMax M2.5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Minimax M2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Minimax M2.1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Ministral 14B 3.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Ministral 3B 3.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Ministral 8B 3.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Mistral 7B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 18
+    },
+    "Mistral Large": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 18
+    },
+    "Mistral Large 2407": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Mistral Large 3": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 152
+    },
+    "Mistral Small": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 4
+    },
+    "Mixtral 8x7B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 18
+    },
+    "NVIDIA Nemotron 3 Super 120B A12B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 240
+    },
+    "NVIDIA Nemotron Nano 2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "NVIDIA Nemotron Nano 2 VL": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Nemotron Nano 3 30B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Nova 2.0 Lite": {
+      "cacheReadInputTokens": [
+        "1.025e-07",
+        "1.05e-07",
+        "1.0725e-07",
+        "1.1e-07",
+        "1.21e-07",
+        "1.32e-07",
+        "7.5e-08",
+        "8.25e-08",
+        "8.5e-07",
+        "8.5e-08",
+        "8.75e-08",
+        "8.8e-08",
+        "8e-08",
+        "9.075e-08",
+        "9.35e-08",
+        "9.5e-08",
+        "9.75e-08",
+        "9.9e-08",
+        "9e-08"
+      ],
+      "cacheWriteInputTokens": [
+        "0"
+      ],
+      "token_dimension_count": 547
+    },
+    "Nova 2.0 Omni": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 785
+    },
+    "Nova 2.0 Pro": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 620
+    },
+    "Nova 2.5 Sonic": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "Nova Canvas": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "Nova Lite": {
+      "cacheReadInputTokens": [
+        "1.575e-08",
+        "1.5e-08",
+        "1.625e-08",
+        "1.65e-08",
+        "1.6e-08",
+        "1.725e-08",
+        "1.775e-08",
+        "1.875e-08",
+        "1.8e-08",
+        "1.95e-08",
+        "2.025e-08",
+        "2.2e-08",
+        "2.4e-08"
+      ],
+      "cacheWriteInputTokens": [
+        "0"
+      ],
+      "token_dimension_count": 118
+    },
+    "Nova MME": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 2
+    },
+    "Nova Micro": {
+      "cacheReadInputTokens": [
+        "1.025e-08",
+        "1.05e-08",
+        "1.15e-08",
+        "1.175e-08",
+        "1.1e-08",
+        "1.3e-08",
+        "1.4e-08",
+        "1e-08",
+        "8.75e-09",
+        "9.25e-09",
+        "9.5e-09",
+        "9.75e-09"
+      ],
+      "cacheWriteInputTokens": [
+        "0"
+      ],
+      "token_dimension_count": 97
+    },
+    "Nova Premier": {
+      "cacheReadInputTokens": [
+        "6.25e-07"
+      ],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 39
+    },
+    "Nova Pro": {
+      "cacheReadInputTokens": [
+        "2.175e-07",
+        "2.1e-07",
+        "2.2e-07",
+        "2.35e-07",
+        "2.375e-07",
+        "2.3e-07",
+        "2.4e-07",
+        "2.5e-07",
+        "2.625e-07",
+        "2.7e-07",
+        "2.95e-07",
+        "2e-07",
+        "3.2e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "0"
+      ],
+      "token_dimension_count": 298
+    },
+    "Nova Pro Latency Optimized": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 6
+    },
+    "Nova Reel": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "Nova Sonic": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 12
+    },
+    "Nova Sonic 2.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 16
+    },
+    "OpenAI GPT-6 Astra": {
+      "cacheReadInputTokens": [
+        "1.1e-06",
+        "1e-06"
+      ],
+      "cacheWriteInputTokens": [
+        "1.25e-05",
+        "1.375e-05"
+      ],
+      "token_dimension_count": 176
+    },
+    "Palmyra X4": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 8
+    },
+    "Palmyra X5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 8
+    },
+    "Pegasus 1.2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 41
+    },
+    "Pixtral Large 25.02": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 14
+    },
+    "Qwen3 235B A22B 2507": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Qwen3 32B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 200
+    },
+    "Qwen3 Coder 30B A3B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 200
+    },
+    "Qwen3 Coder 480B A35B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 160
+    },
+    "Qwen3 Coder Next": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "Qwen3 Next 80B A3B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 140
+    },
+    "Qwen3 VL 235B A22B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "R1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 6
+    },
+    "Ray v2": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "Rerank 3.5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "SD3.5LargeV1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "SD3LargeV1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "SI-Core-V1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "SI-Ultra-V1": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 0
+    },
+    "TwelveLabs Pegasus 1.5": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 36
+    },
+    "Voxtral Mini 1.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Voxtral Small 1.0": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 176
+    },
+    "Writer Palmyra Vision 7B": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 208
+    },
+    "google.gemma-4-26b-a4b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 40
+    },
+    "google.gemma-4-31b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 40
+    },
+    "google.gemma-4-e2b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 39
+    },
+    "gpt-oss-120b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 232
+    },
+    "gpt-oss-20b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 232
+    },
+    "openai.gpt-5.4": {
+      "cacheReadInputTokens": [
+        "3.3e-07"
+      ],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 6
+    },
+    "openai.gpt-5.6-luna": {
+      "cacheReadInputTokens": [
+        "2.64e-08"
+      ],
+      "cacheWriteInputTokens": [
+        "3.3e-07"
+      ],
+      "token_dimension_count": 24
+    },
+    "openai.gpt-5.6-terra": {
+      "cacheReadInputTokens": [
+        "2.64e-07"
+      ],
+      "cacheWriteInputTokens": [
+        "3.3e-06"
+      ],
+      "token_dimension_count": 24
+    },
+    "qwen3-next-80b-a3b": {
+      "cacheReadInputTokens": [],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 8
+    },
+    "xai.grok-4.3": {
+      "cacheReadInputTokens": [
+        "2.4e-07",
+        "2e-07"
+      ],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 60
+    },
+    "xai.grok-4.6": {
+      "cacheReadInputTokens": [
+        "5.5e-07",
+        "5e-07",
+        "6.6e-07",
+        "6e-07"
+      ],
+      "cacheWriteInputTokens": [],
+      "token_dimension_count": 648
+    }
+  },
+  "retrieved": "2026-10-13",
+  "sources": [
+    {
+      "offer_code": "AmazonBedrock",
+      "offer_version": "20261010182242",
+      "product_count": 13315,
+      "publication_date": "2026-10-10T18:22:42Z"
+    },
+    {
+      "offer_code": "AmazonBedrockFoundationModels",
+      "offer_version": "20261012084008",
+      "product_count": 7026,
+      "publication_date": "2026-10-12T08:40:08Z"
+    }
+  ]
+}

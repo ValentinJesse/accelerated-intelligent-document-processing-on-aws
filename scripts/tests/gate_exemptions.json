@@ -282,22 +282,7 @@
       "ratchet": "staleness",
       "reason": "Embedding models emit no metering entry, so there is no key for a pricing row to price. test_coverage_exempt_has_no_stale_entries asserts each is still encountered by the enumeration.",
       "crossReferences": [
-        "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py::_NO_CACHE_UNITS_EXPECTED"
-      ],
-      "memberKind": "Bedrock model id",
-      "ratchetEvidence": "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py"
-    },
-    "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py::_NO_CACHE_UNITS_EXPECTED": {
-      "kind": "exemption",
-      "turnsOff": "the cache-pricing coverage requirement for eleven model ids",
-      "premise": [
-        "JUDGEMENT"
-      ],
-      "ratchet": "staleness",
-      "reason": "Same shape as its sibling. Entry strength varies: some are one-line checks against CACHEPOINT_SUPPORTED_MODELS, one is an unrepeatable live measurement.",
-      "crossReferences": [
-        "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py::_COVERAGE_EXEMPT",
-        "lib/idp_common_pkg/idp_common/metering_units.py::NON_CHARGEABLE_METERING_UNITS"
+        "lib/idp_common_pkg/idp_common/metering_units.py::EXPECTED_CACHE_UNIT_OMISSIONS"
       ],
       "memberKind": "Bedrock model id",
       "ratchetEvidence": "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py"
@@ -2658,12 +2643,35 @@
         1212,
         1206
       ],
-      "reason": "Six entries, each carrying its own sourcing rather than sharing one, because whether a unit is a billing dimension is a property of the unit and the service. Four cite AWS's public Bedrock price list by URL and say what it showed; the owning test re-asserts those four against a committed digest of that file, derived by bedrock_price_list_digest.py, and re-derives it live under CHECK_AWS_PRICE_LIST=1. That is a computed premise, but the computation is a reading of a published price list rather than a fact about this tree, so there is no gate_premises predicate for it and the entry says JUDGEMENT instead of naming one it does not call. Two entries are judgements outright and labelled so: 'requests' on a LambdaHook is a counter this project injects for shape parity with a Bedrock response, not a third party's billing dimension, so no price list settles it; and the two cache units on Bedrock record the behaviour that already shipped, whose per-model basis needs a live call and is issue 1206. Two ratchets, both in the named test: non-vacuity per member, which derives the metered-unit universe from the writers' own source and the unlisted set from the real pricing file, so an entry that shields nothing fails rather than pre-declaring whatever next carries that name; and a pinned entry count, so a seventh free unit is a deliberate edit with its sourcing reviewed beside it.",
+      "reason": "Four entries, each carrying its own sourcing rather than sharing one, because whether a unit is a billing dimension is a property of the unit and the service. Three cite AWS's public Bedrock price list by URL and say what it showed; the owning test re-asserts those against a committed digest of that file, derived by bedrock_price_list_digest.py, and re-derives it live under CHECK_AWS_PRICE_LIST=1. That is a computed premise, but the computation is a reading of a published price list rather than a fact about this tree, so there is no gate_premises predicate for it and the entry says JUDGEMENT instead of naming one it does not call. One entry is a judgement outright and labelled so: 'requests' on a LambdaHook is a counter this project injects for shape parity with a Bedrock response, not a third party's billing dimension, so no price list settles it. It held six entries until issue 1206: the two Bedrock cache units were declared here at SERVICE scope, which priced a cache read at $0.00 on eleven different models' behalf from one reason, nine of them with no recorded basis -- and whether a prompt-cache read is chargeable is a property of the model, since AWS prices one on Nova Premier and publishes no such dimension for Claude 3 Haiku in any region. They are now EXPECTED_CACHE_UNIT_OMISSIONS, registered separately, one entry per pricing key and unit. Two ratchets, both in the named test: non-vacuity per member, which derives the metered-unit universe from the writers' own source and the unlisted set from the real pricing file, so an entry that shields nothing fails rather than pre-declaring whatever next carries that name; and a pinned entry count, so a fifth free unit is a deliberate edit with its sourcing reviewed beside it.",
       "crossReferences": [
         "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::EXPECTED_SHIELDED_SITES",
         "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::EXPECTED_WRITER_UNITS",
         "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::METERING_WRITERS",
-        "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py::_NO_CACHE_UNITS_EXPECTED"
+        "lib/idp_common_pkg/idp_common/metering_units.py::EXPECTED_CACHE_UNIT_OMISSIONS"
+      ]
+    },
+    "lib/idp_common_pkg/idp_common/metering_units.py::EXPECTED_CACHE_UNIT_OMISSIONS": {
+      "kind": "exemption",
+      "memberKind": "(shipped bedrock pricing key, omitted prompt-cache metering unit) pair",
+      "predicateConsidered": {
+        "file_absent_or_untracked": "Matched only on the phrase 'is absent', which here describes membership of a Python list -- a model id absent from bedrock.client.CACHEPOINT_SUPPORTED_MODELS -- and not a path. Every file this entry names is tracked and present, and that membership question is computed per member by the owning test rather than restated in prose."
+      },
+      "turnsOff": "the unpriced report for ONE cache unit on ONE pricing entry, and only for a member whose priced_by_aws is false. Such a member's metering row is written as $0.00 rather than as a NULL cost, in both cost implementations (idp_common/reporting/save_reporting_data.py::_get_unit_cost and benchmarks/harness/lib.py::price_metering). A member whose priced_by_aws is TRUE turns nothing off: it records the basis for the pricing.yaml omission and is deliberately NOT shielded at runtime, so the unit is still reported. A cache unit absent from any bedrock entry this register does not name is reported.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "lib/idp_common_pkg/tests/unit/reporting/test_cache_unit_omission_basis.py",
+      "issues": [
+        1206,
+        1212
+      ],
+      "reason": "This replaced two entries in NON_CHARGEABLE_METERING_UNITS that declared the two cache units free for the whole 'bedrock' service. That was one justification attached to a set where the justification is a property of individual members: AWS prices a cache read at $0.625/MTok on Nova Premier and publishes no cache dimension for Claude 3 Haiku in any of 17 regions, so a service-wide reason is false for one of them whichever way it is written. Measured before the change: a million cache-read tokens and a million cache-write tokens on each of the eleven shipped entries that omit the units came back as exactly $0.00 from both implementations with no unpriced marker, while a key with no entry at all was reported -- so the entry axis was visible and the unit axis was not. Each member now names the price-list model it was read against and what that reading showed, and both halves of its premise are computed rather than read. The price-list half is asserted against a committed digest of AWS's two public offer files (bedrock_cache_dimension_digest.py, unauthenticated, refreshable with --refresh); priced_by_aws must equal whether that digest carries a non-zero rate, in both directions, and the digest's retrieval date must equal the date metering_units records. The reachability half -- that this code path can never meter the unit for the model, because the id is absent from bedrock.client.CACHEPOINT_SUPPORTED_MODELS and is not one of prompt_cache._IMPLICIT_CACHE_BASE_NAMES -- is asserted per member against those two constants, with both import targets probed first so a renamed or emptied list cannot make it pass vacuously. The premise is labelled JUDGEMENT rather than naming a gate_premises predicate because neither computation is a fact about this tree: one is a reading of a third party's published price list and the other spans two modules of the library under test, and a predicate takes one member and answers about the repository. Universe closure rather than a pinned count: the member set is DERIVED from config_library/pricing.yaml and asserted equal in both directions, so a twelfth entry omitting a cache rate fails for being unregistered and a member whose entry has since gained the rate fails for being stale. A count would be redundant beside that, and would turn paying the debt down -- adding a rate and deleting the member -- into a red gate. Non-vacuity is covered by the same closure plus a floor on the number of bedrock entries the YAML walk reads, which is deliberately NOT a floor on the number omitting: an empty derived list makes every parametrised assertion collect as a pytest skip, which reads green and proves nothing.",
+      "crossReferences": [
+        "lib/idp_common_pkg/idp_common/metering_units.py::NON_CHARGEABLE_METERING_UNITS",
+        "lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py::_COVERAGE_EXEMPT",
+        "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::EXPECTED_SHIELDED_SITES"
       ]
     },
     "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::EXPECTED_WRITER_UNITS": {
@@ -2700,6 +2708,7 @@
       "reason": "Discovered on the EXPECTED_ fragment; a pin rather than a carve-out. Non-vacuity on its own only demands that a declaration shield at least ONE site, which left a declaration able to shrink from 94 shielded pricing entries to 1 while still reading as a live decision. Each number is measured from config_library/pricing.yaml by the owning test, so a new pricing entry arriving under an existing declaration's cover fails rather than being absorbed, and rates being added fails too -- which is the signal that a declaration is on its way out. One number per member, because how much each one shields is a property of that member.",
       "crossReferences": [
         "lib/idp_common_pkg/idp_common/metering_units.py::NON_CHARGEABLE_METERING_UNITS",
+        "lib/idp_common_pkg/idp_common/metering_units.py::EXPECTED_CACHE_UNIT_OMISSIONS",
         "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::EXPECTED_WRITER_UNITS",
         "lib/idp_common_pkg/tests/unit/reporting/test_non_chargeable_units.py::METERING_WRITERS"
       ]
