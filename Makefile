@@ -102,6 +102,8 @@ setup: ## Install all packages into current Python environment (no venv)
 	$$SETUP_PIP install -r src/lambda/calculate_capacity/requirements-test.txt && \
 	echo "Installing cfn-lint for CloudFormation template validation..." && \
 	$$SETUP_PIP install cfn-lint==$(CFN_LINT_VERSION) && \
+	echo "Installing the pinned ruff for the lint gates..." && \
+	$$SETUP_PIP install ruff==$(RUFF_VERSION) && \
 	echo "" && \
 	echo -e "$(GREEN)✅ Setup complete! idp_common, idp-cli, idp_sdk, idp_mcp_connector, idp_feature_sdk, and test dependencies are now installed.$(NC)" && \
 	echo -e "$(YELLOW)   Tip: Use 'make setup-venv' instead to install into an isolated virtual environment.$(NC)"
@@ -127,6 +129,11 @@ setup-venv: ## Create .venv and install all packages into it
 	$(VENV_DIR)/bin/pip install -r src/lambda/calculate_capacity/requirements-test.txt
 	@echo "Installing cfn-lint for CloudFormation template validation..."
 	$(VENV_DIR)/bin/pip install cfn-lint==$(CFN_LINT_VERSION)
+	@# lib/idp_common_pkg declares ruff as a RANGE (>=0.14.0,<0.16), so the pass
+	@# above resolves to whatever the newest matching release is on the day. This
+	@# narrows it to the exact version CI runs — see RUFF_VERSION.
+	@echo "Installing the pinned ruff for the lint gates..."
+	$(VENV_DIR)/bin/pip install ruff==$(RUFF_VERSION)
 	@echo ""
 	@echo -e "$(GREEN)✅ Setup complete! Virtual environment created at $(VENV_DIR)$(NC)"
 	@echo -e "$(GREEN)   idp_common, idp-cli, idp_sdk, idp_mcp_connector, idp_feature_sdk, and test dependencies are now installed.$(NC)"
@@ -146,14 +153,58 @@ setup-venv: ## Create .venv and install all packages into it
 lint: ruff-lint format check-lint-debt check-arn-partitions check-account-ids check-filtered-scans check-data-plane-tags check-retired-services check-threat-model-currency check-markdown-links validate-buildspec cfn-lint ui-lint codegen-check ## Run all linting (ruff, format, ARN checks, account-id scan, filtered scans, retired-service docs, threat-model currency, Markdown links, buildspec, UI, codegen). Use FORCE=1 to force UI lint re-run despite checksum match.
 fastlint: ruff-lint format check-lint-debt check-arn-partitions check-account-ids check-filtered-scans check-data-plane-tags check-retired-services check-threat-model-currency check-markdown-links validate-buildspec ## Quick lint without UI checks
 
+# Pin the linter, for the same reason spelled out at CFN_LINT_VERSION below: an
+# UNPINNED tool on a blocking gate is the one realistic way this red-lines the
+# branch with no code change. ruff ships new rules often, promotes checks to
+# ERROR class, and changes `ruff format` output between releases — and a
+# formatting change arrives as a diff on a file nobody touched rather than as an
+# error, which is the hardest shape to triage. ruff 0.16 began formatting Python
+# code blocks inside Markdown, failing `ruff format --check` on ~49 README and
+# skill-file snippets; that is what the <0.16 cap in
+# lib/idp_common_pkg/pyproject.toml is holding off, and this pin is the exact
+# version inside that range the tree is formatted against.
+#
+# This is the SINGLE SOURCE OF TRUTH for the ruff version. Both CI configs
+# install this exact version, scripts/setup/dev_setup_ubuntu.sh installs it, and
+# scripts/check_lint_debt.py reads it from here so that a finding-count mismatch
+# measured under a different ruff says so instead of looking like a code change.
+# scripts/tests/test_ci_gate_parity.py fails if any of those drift from this.
+RUFF_VERSION := 0.15.13
+
+# `make setup` and `make setup-venv` install RUFF_VERSION exactly, so an
+# environment built through this Makefile runs the pinned linter rather than
+# whatever the pyproject range happens to resolve to today.
+#
+# The recipes below still invoke `ruff` as a BARE command, and that is a
+# decision rather than an oversight. `$(VENV_DIR)/bin/ruff` does not exist in a
+# linked git worktree — a worktree has no .venv of its own, so `ruff` resolves
+# through PATH to the main checkout's — and does not exist at all after `make
+# setup`, which installs into the ambient environment. Hardcoding the venv path
+# would hard-fail both. So the pin is CONSTRUCTED at install time, ASSERTED by
+# test, and REPORTED rather than enforced at invocation: the remedy for a
+# mismatch is a network install, and a lint gate that cannot run offline is a
+# worse problem than one that measured a near neighbour and said so. `cfn-lint`
+# has the same bare-command property.
+define ruff_version_note
+@RUNNING=$$(ruff --version 2>/dev/null | awk '{print $$2}'); \
+if [ -n "$$RUNNING" ] && [ "$$RUNNING" != "$(RUFF_VERSION)" ]; then \
+echo -e "$(YELLOW)⚠️  ruff $$RUNNING is first on PATH, but this repo pins ruff $(RUFF_VERSION) (RUFF_VERSION in the Makefile).$(NC)"; \
+echo -e "$(YELLOW)   Findings and formatting are both properties of the linter version, so this run may not match CI.$(NC)"; \
+echo -e "$(YELLOW)   Align it with: pip install 'ruff==$(RUFF_VERSION)'$(NC)"; \
+fi
+endef
+
 ruff-lint: ## Run ruff linting with auto-fix
+	$(ruff_version_note)
 	ruff check --fix
 
 format: ## Format Python code with ruff
+	$(ruff_version_note)
 	ruff format
 
 lint-cicd: ## CI/CD lint — checks only, no modifications
 	@echo "Running code quality checks..."
+	$(ruff_version_note)
 	@if ! ruff check; then \
 		echo -e "$(RED)ERROR: Ruff linting failed!$(NC)"; \
 		echo -e "$(YELLOW)Please run 'make ruff-lint' locally to fix these issues.$(NC)"; \
