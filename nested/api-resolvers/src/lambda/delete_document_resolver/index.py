@@ -29,8 +29,19 @@ s3 = boto3.client("s3")
 
 
 #: Any ARN, in any partition. Matched to the first whitespace, quote or comma, which is
-#: how an ARN is delimited inside an AWS error sentence.
+#: how an ARN is delimited inside an AWS error sentence. The partition segment is a
+#: pattern rather than the literal ``aws``, because GovCloud and China spell it
+#: ``aws-us-gov`` and ``aws-cn`` and this repository supports both.
 _ARN = re.compile(r"arn:[a-z0-9-]*:[^\s\"',;)]*")
+
+#: A standalone 12-digit run, which is what an AWS account id looks like.
+#:
+#: The ARN pattern above covers every message shape actually observed on this path —
+#: an authorization denial names the principal and the resource as ARNs — but "the
+#: shapes I could name" is a weaker claim than "no account id", and the two are one
+#: differently-worded service error apart. The lookarounds keep it from matching part
+#: of a longer number.
+_BARE_ACCOUNT_ID = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 
 def _redact_arns(text: str) -> str:
@@ -56,8 +67,16 @@ def _redact_arns(text: str) -> str:
     tells a maintainer *which* attribute was refused. The unredacted text stays in the
     resolver's log, which is where an operator with access to the account should read
     it.
+
+    A bare 12-digit run is redacted as well, for the message that names an account
+    without wrapping it in an ARN. ⚠️ **That can also mask a 12-digit run inside the
+    error detail** — the purge failure quotes a sample of refused object keys, and a
+    key like ``invoices/202601120001.pdf`` would come back partly masked. The document
+    being reported is named *outside* this function, in the ``"{object_key}: "`` prefix
+    the caller builds, so identifying which document failed is unaffected; what is lost
+    is a duplicate of that key inside the detail.
     """
-    return _ARN.sub("arn:<redacted>", text)
+    return _BARE_ACCOUNT_ID.sub("<account>", _ARN.sub("arn:<redacted>", text))
 
 
 def _caller_in_groups(event, allowed):

@@ -250,6 +250,78 @@ class TestTheReportedOutcome:
         text = "not authorized to perform: s3:DeleteObjectVersion"
         assert resolver._redact_arns(text) == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'resource: "arn:aws:s3:::my-bucket"',
+            "resource: 'arn:aws:s3:::my-bucket'",
+            "denied on arn:aws:s3:::my-bucket.",
+            "denied on arn:aws:s3:::my-bucket\nand then",
+            "ends with arn:aws:s3:::my-bucket",
+            "arn:aws:s3:::my-bucket, and more",
+        ],
+        ids=[
+            "double-quoted",
+            "single-quoted",
+            "trailing-full-stop",
+            "before-a-newline",
+            "at-end-of-string",
+            "comma-separated",
+        ],
+    )
+    def test_an_arn_is_redacted_however_it_is_delimited(self, resolver, text):
+        """The delimiter is where a pattern like this usually leaks.
+
+        An AWS sentence ends an ARN with a quote, a full stop, a comma, a newline or
+        nothing at all, and a pattern tuned to one of those passes its own test and
+        leaks on the rest.
+        """
+        assert "arn:aws:s3:::my-bucket" not in resolver._redact_arns(text)
+
+    def test_a_bare_account_id_is_redacted_too(self, resolver):
+        """⚠️ The ARN pattern covers the shapes observed; it is not a bound on them.
+
+        An authorization denial names the principal and the resource as ARNs, which is
+        why redacting ARNs covers this path today. But "the message shapes I can name"
+        is a weaker claim than "no account id", and the two are one differently-worded
+        service error apart — so a standalone 12-digit run is redacted as well.
+        """
+        redacted = resolver._redact_arns(
+            "account 123456789012 is not authorized; expected owner 210987654321"
+        )
+        assert "123456789012" not in redacted
+        assert "210987654321" not in redacted
+        assert "is not authorized" in redacted
+
+    def test_redaction_does_not_touch_a_longer_number(self, resolver):
+        """The lookarounds, so a 13-digit value is not partly masked."""
+        assert "12345678901234" in resolver._redact_arns("size 12345678901234 bytes")
+
+    def test_the_document_key_is_outside_the_redaction_scope(self, resolver):
+        """A key may legitimately contain a 12-digit run, and must stay readable.
+
+        Redaction applies to the error *detail*, not to the ``"<key>: "`` prefix the
+        message is built from — so a date-stamped filename is still identifiable even
+        though the copy of it quoted inside an AWS message is masked. Which document
+        failed is the one thing the reader cannot do without.
+        """
+        key = "invoices/202601120001.pdf"
+        failing = [
+            {
+                "success": False,
+                "object_key": key,
+                "deleted": {},
+                "errors": [f"refused for arn:aws:s3:::b/{key}"],
+            }
+        ]
+        with patch.object(resolver, "delete_single_document", side_effect=failing):
+            with pytest.raises(RuntimeError) as caught:
+                resolver.handler(_event([key]), MagicMock())
+
+        assert key in str(caught.value), (
+            "the failing document is no longer identifiable"
+        )
+
     def test_a_caller_outside_the_two_groups_is_refused(self, resolver):
         # Defence in depth, unchanged by this change and worth keeping pinned: the
         # boolean above is only reachable by an Admin or an Author.
