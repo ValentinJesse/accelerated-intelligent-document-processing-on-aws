@@ -2733,6 +2733,20 @@
       "ratchet": "universe-closure",
       "ratchetEvidence": "scripts/tests/test_prefix_mapping_call_sites.py",
       "reason": "Discovered through the prose route, on a comment saying `allowed_profiles` is 'deliberately NOT in SEAMS' -- which reads as an exclusion and is instead the fact being asserted. Two of the four sites must omit a caller scope and two must pass one: ingest is an EventBridge S3 event with no caller to scope, and the dry run performs its own check because it has to null individual response fields rather than refuse. A blanket requirement would therefore be wrong, but so would silence -- a flip in either direction is an authorization change, and one already happened: the dry run's local check kept a narrower subject set than the library's after the library gained a third subject, so the preview could approve a destination the upload then refused. Closure is by equality with CALL_SITES, which is itself derived from `git ls-files` rather than authored, so a fifth caller fails for being unrecorded before anyone reads this entry. There is no per-member fact to compute: whether a given Lambda has a caller identity at all is a property of its event source, which no predicate can read. What a reviewer should check is that the equality bites -- delete an `allowed_profiles=` argument and watch it fail. Registered rather than reworded, since rewording to slip past discovery is what this registry exists to prevent."
+    },
+    "scripts/tests/test_dynamodb_query_filter_keys.py::GUARDED_CALLS": {
+      "kind": "exemption",
+      "memberKind": "a boto3 DynamoDB Table method name whose FilterExpression argument this gate reads -- `query` today, and `scan` is the operation left out",
+      "turnsOff": "the key-attribute-in-a-FilterExpression check, for every DynamoDB operation not named in the tuple. In practice that is `scan`: a filtered scan naming `PK` or `SK` is not reported, while the same expression on a `query` is.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "non-vacuity",
+      "ratchetEvidence": "scripts/tests/test_dynamodb_query_filter_keys.py",
+      "issues": [
+        1366
+      ],
+      "reason": "Not computable from this tree: it is a property of the DynamoDB API, which documents the two operations oppositely. Query -- 'A FilterExpression does not allow key attributes. You cannot define a filter expression based on a partition key or a sort key' -- so the call is refused with ValidationException on every attempt. Scan -- 'With Scan, you can specify any attributes in a filter expression, including partition key and sort key attributes' -- so it is correct there. Guarding both would mean an exemption for every legitimate filtered scan in the repository, and the first thing a reviewer would learn is to add one. Measured: lifting the exclusion reports 11 sites, all of them scans, including nested/api-resolvers/src/lambda/test_results_resolver/index.py:1677, which was mistaken for a fourth instance of #1366 and is not one. test_the_scan_exclusion_is_not_shielding_nothing asserts the exclusion still shields at least one such site, so it cannot go dead and pre-approve whatever next occupies the name. The count is reported rather than pinned to equality: writing a new legitimate filtered scan is a correct thing to do and must not turn this gate red."
     }
   }
 }
