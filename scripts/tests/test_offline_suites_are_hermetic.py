@@ -799,3 +799,145 @@ def test_suite_collects_without_an_aws_region(workdir: str, args: list[str]):
         f"{result.returncode} with no AWS region, credentials or profile in the "
         f"environment — the environment a CI runner has.{hint}\n\n{output}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The coverage producer: the one pytest invocation that is not a `make` recipe
+# ---------------------------------------------------------------------------
+#
+# `scripts/coverage_all.py` runs each tree's suite from Python, so no amount of
+# checking `make` recipes reaches it, and the checks above stop at
+# `test-packages-cicd`. It therefore sat outside the control's universe rather than
+# being carved out of it — the shape this repository keeps rediscovering — and the
+# cost was not a suite that fails on a runner but something quieter: the figures it
+# produces are a ratchet's **input**, and `check_coverage_debt.py --write` records
+# them permanently.
+#
+# `boto3.DEFAULT_SESSION` is created by the first bare `boto3.client(...)` in a
+# process and caches the credentials it resolved, so a `monkeypatch.setenv` applied
+# afterwards is ignored by every later client in that process. Whether a
+# `try: ...get_caller_identity() / except:` branch is covered then depends on which
+# test ran *first in its worker*, which xdist's `--dist load` decides afresh each
+# run. Measured on `idp_feature_sdk`, 461 tests and 0 skips in every cell:
+# `pack.py` at 99.44% or 100.00% from one run to the next at a fixed `-n 4`, and
+# 100.00% at every worker count once the AWS environment is neutralised. #1377.
+
+
+def _coverage_all():
+    """`scripts/coverage_all.py`, imported by path (it is a script, not a package)."""
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "coverage_all.py"
+    spec = importlib.util.spec_from_file_location("coverage_all_probe", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_coverage_producer_neutralises_everything_the_wrapper_does():
+    """Its variable list is DERIVED from the Makefile here, never compared by eye.
+
+    Two copies of a list of environment variables drift, and the direction that
+    matters is the quiet one: a variable added to `HERMETIC_AWS` because it turned
+    out to be a credential source, and not added here, leaves the coverage producer
+    reading that source while every `make` recipe no longer does.
+    """
+    unset, assigned = _hermetic_spec()
+    module = _coverage_all()
+    missing = sorted(set(unset) - set(module.HERMETIC_AWS_UNSET))
+    assert not missing, (
+        f"$({WRAPPER_VAR}) unsets {missing} and coverage_all.HERMETIC_AWS_UNSET does "
+        f"not, so `scripts/coverage_all.py` measures every tree with those AWS "
+        f"sources still readable while every `make` recipe strips them. Add them to "
+        f"HERMETIC_AWS_UNSET in scripts/coverage_all.py."
+    )
+    assert module.HERMETIC_AWS_SET == assigned, (
+        f"$({WRAPPER_VAR}) assigns {assigned} and coverage_all.HERMETIC_AWS_SET has "
+        f"{module.HERMETIC_AWS_SET}. These neutralise the sources no unset can reach "
+        f"(the shared config files, and IMDS), so a difference here is a difference "
+        f"in what the coverage figures measure."
+    )
+
+
+def test_the_coverage_producer_really_leaves_no_resolvable_credentials():
+    """Measured through the producer's own function, not inferred from its list.
+
+    The test above compares two lists; this one requires that putting a *polluted*
+    environment through `coverage_all.hermetic_aws_env` leaves botocore nothing to
+    resolve. A list that looks right while the function fails to apply it — reading
+    `os.environ` afresh, say, or updating a copy — passes the comparison and fails
+    here.
+    """
+    env = _coverage_all().hermetic_aws_env(_polluted_env())
+    env["AWS_DEFAULT_REGION"] = "us-east-1"
+    probe = (
+        "import boto3\n"
+        "creds = boto3.Session(region_name='us-east-1').get_credentials()\n"
+        "print('NONE' if creds is None else 'RESOLVED '"
+        " + (creds.access_key or '<empty>'))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"the credentials probe itself failed to run: {result.stderr[-2000:]}"
+    )
+    assert result.stdout.strip() == "NONE", (
+        f"under coverage_all.hermetic_aws_env botocore still resolved credentials "
+        f"(probe said {result.stdout.strip()!r}). Every tree's coverage is then "
+        f"measured against whichever account this machine is signed in to, so a "
+        f"branch guarding a live AWS call is covered or not according to which test "
+        f"ran first in each xdist worker, and the figure moves run to run. See #1377."
+    )
+
+
+def test_every_coverage_tree_is_measured_through_the_neutralisation(monkeypatch):
+    """The function existing is not the function being called, for every tree.
+
+    This is the half that catches a control present and not consulted: it intercepts
+    the `subprocess.run` `coverage_all.run` makes and inspects the environment that
+    pytest would actually have received, for each registry tree in turn. A `run`
+    that neutralises eight trees and not the ninth fails here naming it.
+    """
+    module = _coverage_all()
+    unset, assigned = _hermetic_spec()
+    seen: dict[str, dict[str, str]] = {}
+
+    class _Result:
+        returncode = 0
+
+    def _capture(cmd, cwd=None, env=None, **kwargs):
+        seen[str(cwd)] = dict(env or {})
+        return _Result()
+
+    # The producer builds its environment from `os.environ`, so the pollution has to
+    # be visible there: a probe built from the ambient environment measures nothing
+    # on a runner, which has no AWS environment to strip, and would pass for the
+    # wrong reason. Same argument as `_polluted_env`'s.
+    monkeypatch.setattr(os, "environ", _polluted_env())
+    monkeypatch.setattr(module.subprocess, "run", _capture)
+    for tree in module._ccd.TREES:
+        module.run(tree, sys.executable, parallel=False)
+
+    assert len(seen) == len({str(REPO_ROOT / t.cwd) for t in module._ccd.TREES}), (
+        f"expected one measured invocation per distinct tree directory, captured "
+        f"{sorted(seen)}. A parse or a registry change has made this probe vacuous."
+    )
+    for cwd, env in sorted(seen.items()):
+        leaked = sorted(name for name in unset if name in env)
+        assert not leaked, (
+            f"the pytest invocation coverage_all.py makes in {cwd} still carries "
+            f"{leaked}, so that tree's coverage is measured against this machine's "
+            f"AWS environment. Route it through coverage_all.hermetic_aws_env. #1377."
+        )
+        for name, value in assigned.items():
+            assert env.get(name) == value, (
+                f"the pytest invocation in {cwd} has {name}={env.get(name)!r}, "
+                f"expected {value!r}. That source is one no unset can reach, so "
+                f"leaving it is enough to make the figures machine-dependent. #1377."
+            )
