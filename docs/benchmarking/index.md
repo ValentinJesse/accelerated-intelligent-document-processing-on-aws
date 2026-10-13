@@ -92,6 +92,17 @@ as a silent one. Nothing in the recorder enumerates issue codes: the tallies are
 keyed on each issue's own values, so a code added to any service is recorded without
 a harness change.
 
+⚠️ **Two stages are outside this, and a zero does not cover them.** The figures come
+from the section's `result.json`, which holds the issues of every stage up to and
+including assessment. `rule_validation` and `postprocessing` record onto the section
+*after* that, and nothing rewrites the object afterwards — so their issues reach the
+DynamoDB tracking row only, and a `processing_issues: 0` is silent about them rather
+than evidence they did not fire. The tracking row is not read instead because it
+would need de-duplicating against the S3 copy of everything earlier, and it is
+deleted with its stack while the S3 artifacts outlive it. The boundary is pinned by
+a universe-closure test over the stage constants, so a third such stage fails that
+test rather than going quietly unread.
+
 Scoring is **resolver-free** — it reads S3 output and DynamoDB metering directly, so it
 works on any stack version (useful for cross-release comparisons).
 

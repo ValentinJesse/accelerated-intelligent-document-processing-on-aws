@@ -90,6 +90,30 @@ ISSUE_CODE_PASS_THROUGH_SITES = {
 # parametrised coverage below looking complete.
 STAGES_THAT_EMIT = ("extraction", "classification", "assessment")
 
+# Stages whose issues this reader CANNOT see, and why — one entry, one stage's worth
+# of reason. Both record onto the section through
+# `document_failure.record_section_failure` from a handler in `patterns/unified/src/`,
+# and both run AFTER assessment with nothing rewriting the section's `result.json`
+# afterwards, so their issues reach the DynamoDB tracking row and never the S3 object
+# `score_processing_issues` reads. The reasoning for not adding the tracking row as a
+# second source is in that function's docstring.
+#
+# This is a declared boundary, not an exemption from scrutiny: the universe-closure
+# test below partitions every `*_STAGE` constant in `document_failure.py` across the
+# covered set and this one, so a THIRD such stage fails rather than being silently
+# unread — which is the failure mode the whole issue is about.
+STAGES_NOT_IN_RESULT_JSON = {
+    "rule_validation": (
+        "patterns/unified/src/rule-validation-function and "
+        "rule-validation-orchestration-function record onto the section after "
+        "assessment; nothing rewrites result.json"
+    ),
+    "postprocessing": (
+        "patterns/unified/src/processresults_function records onto the section "
+        "after assessment; nothing rewrites result.json"
+    ),
+}
+
 
 def _string_constants(tree):
     """``NAME = "literal"`` at module or class scope — and deliberately not deeper.
@@ -268,6 +292,46 @@ def test_discovery_reaches_the_code_this_issue_is_about():
 @pytest.mark.parametrize("stage", STAGES_THAT_EMIT)
 def test_discovery_reaches_every_emitting_stage(stage):
     assert any(code.startswith(stage) for code in CODES), sorted(CODES)
+
+
+def test_every_declared_stage_is_either_covered_or_a_named_boundary():
+    """Universe closure over the stages, which is the half an AST walk of
+    ``idp_common`` cannot give on its own.
+
+    ``rule_validation`` and ``postprocessing`` issues are built by handlers in
+    ``patterns/unified/src/`` through ``document_failure.record_section_failure``, a
+    pass-through this discovery deliberately does not resolve — so they appear in
+    neither ``CODES`` nor ``STAGES``, and nothing above would notice that this
+    reader cannot see them. The stage NAMES are declared in ``document_failure.py``,
+    so that is the authority to close against: every ``*_STAGE = "..."`` constant
+    must be either a stage whose issues reach the section's ``result.json`` or a
+    named entry in :data:`STAGES_NOT_IN_RESULT_JSON`. A third such stage added later
+    lands in neither and fails here.
+    """
+    source = IDP_COMMON / "document_failure.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    declared = {
+        value
+        for name, value in _string_constants(tree).items()
+        if name.endswith("_STAGE")
+    }
+    assert declared, f"no *_STAGE constants found in {source}"
+    unaccounted = declared - STAGES - set(STAGES_NOT_IN_RESULT_JSON)
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} is a processing-issue stage that is neither "
+        "discovered as emitting into a section's result.json nor declared in "
+        "STAGES_NOT_IN_RESULT_JSON. Decide which it is: if its issues reach "
+        "metadata.processing_issues the reader already covers it and discovery "
+        "should find it; if they do not, say so there with the reason, because "
+        "otherwise this harness reports those runs as clean."
+    )
+    # Non-vacuity in the other direction: the boundary list must name stages that
+    # really are outside the covered set, or it is pre-declaring whatever next
+    # takes those names.
+    assert not (set(STAGES_NOT_IN_RESULT_JSON) & STAGES)
+    assert set(STAGES_NOT_IN_RESULT_JSON) <= declared, sorted(
+        set(STAGES_NOT_IN_RESULT_JSON) - declared
+    )
 
 
 def test_the_only_unreadable_sites_are_the_known_pass_throughs():

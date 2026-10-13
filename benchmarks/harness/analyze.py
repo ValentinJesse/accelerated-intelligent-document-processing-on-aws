@@ -786,10 +786,25 @@ def score_processing_issues(sections):
     every lossy count it reported.
 
     Read off the same place :func:`score_audit_metadata` reads its audit block: the
-    section's ``result.json`` ``metadata``. That key is the complete per-section set
-    rather than extraction's own, because extraction preserves the issues of stages
-    it does not own (``owned_stages`` in ``extraction/service.py``) and assessment
-    merges into the same key rather than replacing it.
+    section's ``result.json`` ``metadata``. That key holds the issues of every stage
+    that runs up to and including assessment, not just extraction's own, because
+    extraction preserves the issues of stages it does not own (``owned_stages`` in
+    ``extraction/service.py``) and assessment merges into the same key rather than
+    replacing it.
+
+    ⚠️ **Two stages are outside that, and reading S3 cannot see them.**
+    ``rule_validation`` and ``postprocessing`` record onto the section through
+    ``document_failure.record_section_failure`` (from the handlers in
+    ``patterns/unified/src/``), and both run *after* assessment with nothing
+    rewriting the section's ``result.json`` afterwards — so their issues reach the
+    DynamoDB tracking row and never the object this reads. The tracking row is not
+    used instead, for three reasons that all point the same way: it would need
+    de-duplication against the S3 copy of every earlier stage's issues, it means a
+    second large attribute fetched per run on a path that already scans, and it is
+    gone as soon as the stack is (three release stacks already are), where the S3
+    artifacts outlive it. ``test_processing_issues_recorded.py`` closes the
+    ``*_STAGE`` universe against this boundary, so a *third* such stage fails there
+    rather than going quietly unread.
 
     Nothing here enumerates issue types. The tallies are keyed on each issue's own
     ``severity``/``code``/``stage``, and ``processing_issue_detail`` carries the
