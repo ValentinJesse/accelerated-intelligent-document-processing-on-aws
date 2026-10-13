@@ -41,6 +41,22 @@ It deliberately does **not** fail when coverage *rises*. A ratchet that demanded
 baseline be rewritten on every improvement would be re-recorded reflexively, and a file
 whose real coverage had fallen would be re-recorded along with it. `--write` is explicit.
 
+## What it quotes beside a finding, which is not a finding of its own
+
+A figure is a property of the **test set** that produced it, so every tree records the
+conditions it was measured under — how many tests were collected, and how many of them
+were skipped. When a file
+is reported as fallen or missing, the skip counts are quoted beside it if this run skipped
+materially more than the recording run did, because that is the difference between a file
+that lost lines and a file whose tests did not run here. A capability gate removes tests
+silently on a machine lacking the capability: `idp_feature_sdk` reported three files
+falling by up to 7.80 points on a runner with no AWS SAM CLI while all three were intact,
+its `tests/conftest.py` having skipped 24 tests that the recording machine ran (#1377).
+
+A count difference **never fails on its own**. Coverage is allowed to rise, a run with
+fewer skips measures more, and a gate that red-lined a branch for a condition nobody
+caused would be switched off. The line adds information to a finding that already exists.
+
 ## What makes it refuse, which is not the same as failing
 
 A verdict needs a measurement, so two inputs produce **no verdict at all** (exit 2)
@@ -167,6 +183,30 @@ class Tree(NamedTuple):
     #: moves that figure by nothing at all and the instrument moves it by 33 points, so
     #: the flag is not what protects those files -- `scripts/coverage_all.py` is, through
     #: :func:`coverage_all.subprocess_coverage_env`.
+    #:
+    #: ⚠️ **Read that as a statement about subprocess instrumentation, not as a general
+    #: claim that the worker count cannot move a figure.** It can, for a file whose
+    #: branches depend on **process-global** state, because the worker count decides how
+    #: the tests are partitioned into processes and `--dist load` makes the partition vary
+    #: run to run. The live instance was credential resolution: `boto3.DEFAULT_SESSION`
+    #: caches the credentials the first bare `boto3.client(...)` in a process resolved, so
+    #: a later `monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")` is ignored and a
+    #: `try: ...get_caller_identity() / except:` branch is covered or not according to
+    #: which test ran first in that worker. Measured on `idp_feature_sdk`, 461 tests and 0
+    #: skips in every cell: `pack.py` came out 99.44% or 100.00% from one run to the next
+    #: at a fixed `-n 4`. What removes it is neutralising the AWS environment rather than
+    #: pinning the worker count -- `coverage_all.hermetic_aws_env`, under which the same
+    #: file measured 100.00% at every worker count tried. Issue #1377.
+    #:
+    #: ⚠️ **A capability difference is a third thing again, and `serial` does not help
+    #: with it either.** An absent tool changes the *test set*, not the schedule: with no
+    #: AWS SAM CLI on `PATH` the autouse fixture in `lib/idp_feature_sdk/tests/conftest.py`
+    #: skips every test that would shell out to `sam`, and that tree measures `437 passed,
+    #: 24 skipped` for 97.15% instead of `461 passed` for 99.94% -- reproduced exactly, to
+    #: the hundredth on each of the three files that move, by removing `sam` from `PATH`
+    #: on a machine that has it. So a baseline recorded where a tool is installed is
+    #: **unreachable** where it is not, and the conditions a figure was measured under are
+    #: part of the figure.
     #:
     #: What this flag is for, then, is cost and caution: it keeps a tree on the
     #: measurement conditions its recorded baseline was taken under. `scripts` stays
@@ -387,6 +427,29 @@ class RunTrust(NamedTuple):
     state: str
     #: One line naming the evidence, printed as-is.
     detail: str
+    #: How many tests the run **collected** — those it ran plus those it skipped.
+    #:
+    #: This is pytest's `<testsuite tests="...">`, which is the total rather than the
+    #: number that executed. `437 passed, 24 skipped` is recorded as 461 and 24, so the
+    #: two together say how much of the suite ran; naming it `collected` is what keeps a
+    #: reader of the baseline from reading 461 as "461 tests ran".
+    collected: int = 0
+    #: How many it **skipped** — the measurement condition that matters most here.
+    #:
+    #: A figure is a property of the test set that produced it, and the cheapest
+    #: observable summary of that set is how much of it did not run. A capability gate
+    #: (`shutil.which("sam")` is the live one; a missing optional dependency and an
+    #: unreachable service are the same shape) silently removes tests on a machine
+    #: lacking the capability, so the same suite at the same commit measures a different
+    #: tree. `idp_feature_sdk` is `461 passed, 0 skipped` for 99.94% where SAM is
+    #: installed and `437 passed, 24 skipped` for 97.15% where it is not.
+    #:
+    #: Recording the **count** rather than a list of tools is deliberate. Which tool
+    #: gates which test is not derivable, so enumerating them would be authored guesswork
+    #: in a generated file; the number of tests that did not run is measured, needs no
+    #: maintenance, and covers every capability gate including the ones nobody has met
+    #: yet. Issue #1377.
+    skipped: int = 0
 
 
 def run_record_path(report: Path) -> Path:
@@ -444,6 +507,14 @@ def run_trust(report: Path) -> RunTrust:
         errors = sum(int(s.get("errors") or 0) for s in suites)
         failures = sum(int(s.get("failures") or 0) for s in suites)
         tests = sum(int(s.get("tests") or 0) for s in suites)
+        # `skipped` is read the same way as the three above and, like them, is taken as
+        # the larger of the attribute and the elements, so a producer that writes only
+        # one spelling is still read. Unlike them it is not grounds for refusing a
+        # report: a skip is a test declining to run, not a run that did not finish.
+        skipped = max(
+            sum(int(s.get("skipped") or 0) for s in suites),
+            len(list(root.iter("skipped"))),
+        )
     except ValueError as exc:
         return RunTrust(
             "unverified", f"{record.name} has an unreadable test count ({exc})"
@@ -470,7 +541,12 @@ def run_trust(report: Path) -> RunTrust:
             f"{record.name} records 0 tests, so nothing executed and the report "
             f"describes no measurement",
         )
-    return RunTrust("clean", f"{record.name} records {tests} test(s), 0 errors")
+    return RunTrust(
+        "clean",
+        f"{record.name} records {tests} test(s) collected, {skipped} skipped, 0 errors",
+        tests,
+        skipped,
+    )
 
 
 class Unchecked(NamedTuple):
@@ -488,8 +564,61 @@ class Unchecked(NamedTuple):
     reason: str
 
 
+#: How many more tests this run may skip than the recording run before it is mentioned.
+#:
+#: Not zero: a handful of skips move between runs for reasons nobody chose (a slow optional
+#: dependency, a platform guard) and naming them beside every finding would train a reader
+#: to scroll past the line. A capability gate taking a whole feature out is the case worth
+#: a sentence, and the live one is 24.
+SKIP_DRIFT_WORTH_MENTIONING = 5
+
+
+def _conditions_diagnosis(
+    tree: Tree, recorded_conditions: dict | None, trust: RunTrust
+) -> str | None:
+    """One line on the measurement conditions, when they explain a finding.
+
+    Returned only when a file has already been reported as fallen or missing, so this
+    **adds information to an existing finding and never creates one**. That restraint is
+    the point: a count difference on its own is not a regression — coverage is allowed to
+    rise, and a run with *fewer* skips measures more — so failing on it would red-line
+    branches for a condition nobody caused, which is how a gate gets switched off.
+
+    What it answers is the question that cost a day: whether the file really lost lines,
+    or whether the tests that covered them did not run here. `idp_feature_sdk` reports
+    three files falling by 1.27, 5.21 and 7.80 points on a runner with no AWS SAM CLI,
+    and all three are intact — 24 tests were skipped by the autouse fixture in its
+    `tests/conftest.py`, and the baseline was recorded where `sam` was installed.
+    """
+    if not recorded_conditions:
+        return (
+            f"[{tree.name}] its baseline records no measurement conditions, so whether "
+            f"the run above executed the same tests cannot be checked. This report "
+            f"collected {trust.collected} test(s) and skipped {trust.skipped} of them. "
+            f"Re-record with --write to capture them."
+        )
+    was_skipped = recorded_conditions.get("skipped")
+    was_collected = recorded_conditions.get("collected")
+    if was_skipped is None or was_collected is None:
+        return None
+    drift = trust.skipped - was_skipped
+    if drift < SKIP_DRIFT_WORTH_MENTIONING:
+        return None
+    return (
+        f"[{tree.name}] this report skipped {trust.skipped} test(s) where its baseline "
+        f"was recorded over a run that skipped {was_skipped} ({was_collected} collected "
+        f"then, {trust.collected} now). {drift} more test(s) declined to run here, so check "
+        f"whether the file(s) above lost lines or whether the tests covering them were "
+        f"skipped — a capability gate (an absent CLI, a missing optional dependency) "
+        f"removes tests silently on a machine that lacks the capability, and a baseline "
+        f"recorded on a more capable machine is a floor this environment cannot reach."
+    )
+
+
 def check_tree(
-    tree: Tree, recorded: dict[str, float]
+    tree: Tree,
+    recorded: dict[str, float],
+    recorded_conditions: dict | None = None,
 ) -> tuple[list[str], float | None]:
     """Compare one tree against its recorded baseline. Returns (problems, overall)."""
     report = _resolve_report(tree)
@@ -497,10 +626,12 @@ def check_tree(
         return [], None
     measured = read_report(report, tree_root(tree))
     problems: list[str] = []
+    looks_worse = False
 
     for path, was in sorted(recorded.items()):
         now = measured.get(path)
         if now is None:
+            looks_worse = True
             problems.append(
                 f"[{tree.name}] {path} is recorded at {was:.2f}% but the report does not "
                 f"mention it. If it moved or was deleted, re-record with --write; if it "
@@ -508,11 +639,17 @@ def check_tree(
             )
             continue
         if now < was - TOLERANCE_PCT:
+            looks_worse = True
             problems.append(
                 f"[{tree.name}] {path} fell from {was:.2f}% to {now:.2f}% "
                 f"(-{was - now:.2f} points, tolerance {TOLERANCE_PCT}). Add tests for the "
                 f"lines it lost, or re-record deliberately with --write."
             )
+
+    if looks_worse:
+        diagnosis = _conditions_diagnosis(tree, recorded_conditions, run_trust(report))
+        if diagnosis:
+            problems.append(diagnosis)
 
     unaccounted = [
         path
@@ -595,7 +732,9 @@ def check(required: tuple[str, ...] = ()) -> CheckResult:
             unchecked.append(Unchecked(tree.name, trust.detail))
             continue
         recorded = trees.get(tree.name, {}).get("files", {})
-        tree_problems, overall = check_tree(tree, recorded)
+        tree_problems, overall = check_tree(
+            tree, recorded, trees.get(tree.name, {}).get("conditions")
+        )
         if overall is None:  # pragma: no cover - the report resolved a moment ago
             unchecked.append(Unchecked(tree.name, "its report disappeared mid-run"))
             continue
@@ -666,8 +805,18 @@ def write_baseline() -> int:
             for path, rate in sorted(measured.items())
             if path in tracked and not any(path.startswith(k) for k in NOT_MEASURED)
         }
-        trees[tree.name] = {"total": report_total(report), "files": files}
-        print(f"  ✓ {tree.name}: {len(files)} file(s) at {report_total(report):.2f}%")
+        trees[tree.name] = {
+            "total": report_total(report),
+            # The conditions this figure was measured under, so a later comparison can
+            # tell a file that lost lines from one whose tests did not run here. See
+            # `RunTrust.skipped` for why the count is recorded and a tool list is not.
+            "conditions": {"collected": trust.collected, "skipped": trust.skipped},
+            "files": files,
+        }
+        print(
+            f"  ✓ {tree.name}: {len(files)} file(s) at {report_total(report):.2f}% "
+            f"({trust.collected} test(s) collected, {trust.skipped} skipped)"
+        )
 
     if refusals:
         print(
@@ -706,6 +855,19 @@ def write_baseline() -> int:
                     "",
                     "A tree with no report is left untouched rather than erased, so a",
                     "partial run cannot silently discard another tree's baseline.",
+                    "",
+                    "Each tree's `conditions` are the measurement conditions its figures",
+                    "were taken under: how many tests were COLLECTED, and how many of",
+                    "them SKIPPED. A figure is a property of the test set that produced",
+                    "it, and a capability gate (an absent CLI, a missing optional",
+                    "dependency) removes tests silently on a machine without it -- so a",
+                    "baseline recorded on a more capable machine is a floor the gate's",
+                    "own environment cannot reach. idp_feature_sdk was exactly that:",
+                    "recorded at 99.94% where the AWS SAM CLI was installed, and",
+                    "unreachable in CI, which skips 24 tests and measures 97.15%. A count",
+                    "difference is never itself a failure -- it is quoted beside a fall,",
+                    "so a reader can tell a file that lost lines from one whose tests",
+                    "did not run.",
                 ],
                 "generator": "python3 scripts/check_coverage_debt.py --write",
                 "tolerancePct": TOLERANCE_PCT,

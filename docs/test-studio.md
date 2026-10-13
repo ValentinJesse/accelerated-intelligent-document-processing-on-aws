@@ -681,9 +681,13 @@ The document detail page offers two views:
   Multi-section baselines get a section selector that also scopes the page
   images to that section's `split_document.page_indices`; when a baseline
   carries `explainability_info` geometry (created via **Copy to Baseline**),
-  focusing a field highlights its bounding box on the page image. Saves write
-  back to the section's `baseline/.../result.json` and append an
-  `_editHistory` provenance entry.
+  focusing a field highlights its bounding box on the page image. The page
+  images carry **Zoom**, **Pan** and **Rotate** controls — rotate turns the
+  page in 90° steps for a sideways or upside-down scan, re-fitting it to the
+  panel and carrying any bounding-box highlight around with it. Rotation
+  applies to every page you then navigate to, and **Reset View** clears it
+  along with zoom and pan. Saves write back to the section's
+  `baseline/.../result.json` and append an `_editHistory` provenance entry.
 
 Note: page images are rendered in the browser from the source document
 (test set documents are unprocessed, so no pipeline page images exist).

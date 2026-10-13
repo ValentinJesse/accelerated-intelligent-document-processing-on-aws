@@ -398,7 +398,12 @@ def _install(monkeypatch, tmp_path, trees, baseline: dict | None = None) -> Path
 
 
 def _write_run_record(
-    report: Path, *, errors: int = 0, failures: int = 0, tests: int = 7
+    report: Path,
+    *,
+    errors: int = 0,
+    failures: int = 0,
+    tests: int = 7,
+    skipped: int = 0,
 ) -> Path:
     """The JUnit XML a pytest run writes beside its coverage report.
 
@@ -409,15 +414,21 @@ def _write_run_record(
     record = ccd.run_record_path(report)
     record.write_text(
         f'<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests">'
-        f'<testsuite name="pytest" errors="{errors}" failures="{failures}" skipped="0" '
-        f'tests="{tests}" time="1.5"/></testsuites>\n',
+        f'<testsuite name="pytest" errors="{errors}" failures="{failures}" '
+        f'skipped="{skipped}" tests="{tests}" time="1.5"/></testsuites>\n',
         encoding="utf-8",
     )
     return record
 
 
 def _write_tree_report(
-    tree, rates: dict[str, float], total: float = 80.0, *, run_record: bool = True
+    tree,
+    rates: dict[str, float],
+    total: float = 80.0,
+    *,
+    run_record: bool = True,
+    tests: int = 7,
+    skipped: int = 0,
 ) -> Path:
     report = ccd.report_path(tree)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -432,7 +443,7 @@ def _write_tree_report(
         encoding="utf-8",
     )
     if run_record:
-        _write_run_record(report)
+        _write_run_record(report, tests=tests, skipped=skipped)
     return report
 
 
@@ -1515,3 +1526,161 @@ class TestTheCIPreconditionNeedsNoCIChange:
             if block.startswith("coverage-debt:")
         )
         assert "$(CHECK_COVERAGE_DEBT_ARGS)" in recipe.split("\n\n")[0], recipe[:400]
+
+
+@pytest.mark.unit
+class TestMeasurementConditions:
+    """A figure is a property of the test set that produced it, so that set is recorded.
+
+    `idp_feature_sdk` was recorded at 99.94% over 461 tests on a machine with the AWS SAM
+    CLI installed. The runner has none, so an autouse fixture in that tree's
+    `tests/conftest.py` skips 24 tests and the same commit measures 97.15% — and the gate
+    reported three files falling by up to 7.80 points when not one had lost a line. The
+    floor was simply unreachable where the gate lives, and nothing in the baseline said
+    under what conditions it had been taken. Issue #1377.
+
+    What is asserted here is both halves of the remedy: the conditions are **recorded**,
+    and they are **quoted beside a finding without ever becoming one**. The second half
+    is the one worth guarding — a count difference that failed on its own would red-line
+    a branch for a condition nobody caused, and coverage is explicitly allowed to rise.
+    """
+
+    def test_the_skip_count_is_read_off_the_run_record(self, tmp_path):
+        tree = _fake_tree(tmp_path)
+        report = _write_tree_report(tree, {"mod.py": 90.0}, tests=461, skipped=24)
+        trust = ccd.run_trust(report)
+        assert (trust.collected, trust.skipped) == (461, 24)
+
+    def test_a_skipped_test_does_not_make_a_report_untrustworthy(self, tmp_path):
+        """A skip is a test declining to run, not a run that did not finish.
+
+        Only `errors` and `failures` mean the numbers are artefacts. Refusing a report
+        for carrying skips would refuse `scripts` (49), `idp_common` (15+) and
+        `idp_feature_sdk` on every runner — i.e. almost everything.
+        """
+        tree = _fake_tree(tmp_path)
+        report = _write_tree_report(tree, {"mod.py": 90.0}, tests=461, skipped=24)
+        assert ccd.run_trust(report).state == "clean"
+        assert "24 skipped" in ccd.run_trust(report).detail
+
+    def test_write_records_the_conditions_each_figure_was_measured_under(
+        self, monkeypatch, tmp_path
+    ):
+        tree = _fake_tree(tmp_path, "measured")
+        _install(monkeypatch, tmp_path, [tree], {"trees": {}})
+        _write_tree_report(tree, {"mod.py": 90.0}, tests=461, skipped=24)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        assert ccd.write_baseline() == 0
+        written = json.loads(ccd.BASELINE.read_text())["trees"]["measured"]
+        assert written["conditions"] == {"collected": 461, "skipped": 24}, (
+            "a baseline whose conditions are unrecorded is indistinguishable from one "
+            "the gate's own environment can reach, which is how #1377 arose"
+        )
+
+    def test_a_fall_is_reported_with_the_skip_drift_that_may_explain_it(
+        self, monkeypatch, tmp_path
+    ):
+        """The diagnosis that cost a day: did it lose lines, or did its tests not run?"""
+        tree = _fake_tree(tmp_path)
+        _write_tree_report(tree, {"mod.py": 92.20}, tests=437, skipped=24)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        problems, _ = ccd.check_tree(
+            tree, {"pkg/mod.py": 100.0}, {"collected": 461, "skipped": 0}
+        )
+        assert any("fell from 100.00% to 92.20%" in p for p in problems)
+        diagnosis = [p for p in problems if "declined to run here" in p]
+        assert diagnosis, f"no conditions diagnosis beside the fall: {problems}"
+        assert "skipped 24 test(s)" in diagnosis[0]
+        assert "that skipped 0" in diagnosis[0]
+        assert "capability gate" in diagnosis[0]
+
+    def test_a_recorded_file_the_report_omits_gets_the_same_diagnosis(
+        self, monkeypatch, tmp_path
+    ):
+        """A skipped test can stop a module being imported at all, not just lose lines."""
+        tree = _fake_tree(tmp_path)
+        _write_tree_report(tree, {"other.py": 90.0}, tests=437, skipped=24)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/other.py"])
+        problems, _ = ccd.check_tree(
+            tree, {"pkg/gone.py": 100.0}, {"collected": 461, "skipped": 0}
+        )
+        assert any("does not mention it" in p for p in problems)
+        assert any("declined to run here" in p for p in problems)
+
+    def test_drifted_skips_alone_are_NOT_a_finding(self, monkeypatch, tmp_path):
+        """The guard on the whole feature: no new way for this gate to go red.
+
+        Coverage is allowed to rise and a run with fewer skips measures more, so a count
+        difference on its own says nothing is wrong. A gate that failed on it would be
+        red on every machine whose tool set differs from the recording one — which is
+        every developer machine — and a gate that is routinely red for reasons nobody
+        caused gets switched off.
+        """
+        tree = _fake_tree(tmp_path)
+        _write_tree_report(tree, {"mod.py": 100.0}, tests=437, skipped=240)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        problems, _ = ccd.check_tree(
+            tree, {"pkg/mod.py": 100.0}, {"collected": 461, "skipped": 0}
+        )
+        assert problems == [], (
+            "a skip-count difference with no fall must stay silent; it is context for a "
+            f"finding, not a finding: {problems}"
+        )
+
+    def test_a_handful_of_drifted_skips_is_not_worth_a_sentence(
+        self, monkeypatch, tmp_path
+    ):
+        """Below the threshold the line is noise beside the finding, so it is omitted."""
+        tree = _fake_tree(tmp_path)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        _write_tree_report(
+            tree,
+            {"mod.py": 80.0},
+            tests=461,
+            skipped=ccd.SKIP_DRIFT_WORTH_MENTIONING - 1,
+        )
+        problems, _ = ccd.check_tree(
+            tree, {"pkg/mod.py": 100.0}, {"collected": 461, "skipped": 0}
+        )
+        assert any("fell from" in p for p in problems)
+        assert not any("declined to run here" in p for p in problems)
+
+    def test_a_baseline_with_no_conditions_says_so_beside_a_fall(
+        self, monkeypatch, tmp_path
+    ):
+        """Every tree recorded before this existed is in that state, so it is named.
+
+        Silence would be the wrong answer: the reader cannot tell "the conditions match"
+        from "nobody recorded them", and those are opposite verdicts on whether the fall
+        is real.
+        """
+        tree = _fake_tree(tmp_path)
+        _write_tree_report(tree, {"mod.py": 80.0}, tests=437, skipped=24)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        problems, _ = ccd.check_tree(tree, {"pkg/mod.py": 100.0}, None)
+        assert any("records no measurement conditions" in p for p in problems)
+
+    def test_every_recorded_tree_that_has_conditions_has_them_well_formed(self):
+        """Guards the real baseline rather than a synthetic one.
+
+        Trees recorded before this feature carry none, which is allowed; a tree that
+        carries the key must carry both counts, as integers, with `skipped` no greater
+        than `tests`.
+        """
+        trees = json.loads(ccd.BASELINE.read_text())["trees"]
+        with_conditions = {
+            name: data["conditions"]
+            for name, data in trees.items()
+            if "conditions" in data
+        }
+        assert with_conditions, (
+            "no tree records its measurement conditions. At least idp_feature_sdk "
+            "should: its baseline is the one that was unreachable in CI (#1377)."
+        )
+        for name, conditions in with_conditions.items():
+            assert set(conditions) == {"collected", "skipped"}, f"{name}: {conditions}"
+            assert isinstance(conditions["collected"], int), name
+            assert isinstance(conditions["skipped"], int), name
+            assert 0 <= conditions["skipped"] <= conditions["collected"], (
+                f"{name}: skipped {conditions['skipped']} of {conditions['collected']}"
+            )

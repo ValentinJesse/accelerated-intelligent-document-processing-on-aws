@@ -906,14 +906,42 @@ reading the resolved client configurations rather than the source, so botocore's
 attempt count is inside the bound, along with the ladder's stop behaviour and the Map's
 `Retry`, `Catch` and zero tolerance.
 
-⚠️ **One exposure the arithmetic above does not close.** The `BedrockClient` used for
-the non-streamed call has its own retry ladder (7 attempts, backing off 2 s doubling to
-300 s) which does not consult the invocation deadline, so on the separate-confidence
-shard path it can overrun an invocation by itself regardless of the table above. The
-budget bounds one stalled call per client, not that ladder. Making it deadline-aware
-changes behaviour for every non-agentic step — classification, simple extraction,
-summarization, assessment — so it is tracked separately; the test above pins its
-numbers so the exposure cannot drift unnoticed.
+**The `BedrockClient` ladder is bounded the same way, not by the table.** The client
+used for the non-streamed call makes 7 retries backing off 2 s doubling to 300 s, with
+no cumulative allowance, so its own worst case is far outside one invocation whatever
+the table says — eight attempts at a 300 s read timeout is 2,400 s, and three fill a
+900 s function exactly. It consults the invocation deadline at every retry decision and
+clamps every backoff to what remains
+([#1362](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1362)),
+which is what makes a request too slow for one read timeout fail in one attempt's time
+as a retryable error, rather than consuming the invocation and being reported as
+deterministic.
+
+⚠️ **The bound is "no attempt begins that the remaining invocation cannot hold, given
+what the ladder has already measured".** It is not "no attempt overruns". The check
+compares what remains against the **costliest** attempt the ladder has measured so far
+plus the backoff about to be slept, so what it cannot refuse is an attempt more
+expensive than anything it has seen: a ladder's first attempt is unmeasured, and a
+ladder whose attempts have all been cheap will begin one expensive attempt before the
+figure reflects it. On the LambdaHook path, where one attempt may occupy 840 s of a
+900 s caller, seven quick throttles followed by one real stall still ends past the wall.
+
+Taking the cost from the configured `read_timeout` instead would close that and would
+refuse requests that were going to complete — a read timeout is an upper bound on an
+attempt, not its expected cost, so a hook that normally returns in 20 s would be refused
+in all but the first 60 s of every invocation. What the gate does remove is the ladder
+repeating an expense it has already proved, which is the shape both #1310 and #1362
+reported. The residual that follows is that one full stall on each of the two clients can
+still together exceed the invocation (600 + 300 + 90 is over 900), which is why the
+arithmetic above is stated as what it is rather than as a guarantee.
+
+⚠️ **Returning early is not the same as being retried.** Where the error that surfaces
+is a read timeout the handlers wrap it as `TransientError` and the state machine retries
+it; on two of the refusal paths — the OpenAI Responses HTTP-status branch and the
+LambdaHook function-error branch — the ladder's own exhausted path raises a
+`RuntimeError` that classification does not read as transient, and the gate raises the
+same thing rather than inventing a different name. At those two the gain is the freed
+invocation and the released concurrency slot, not a retry.
 
 ### Concurrency Control
 
