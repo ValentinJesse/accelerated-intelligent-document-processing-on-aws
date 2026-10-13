@@ -73,6 +73,15 @@ rather than a pass:
   further for a caller that knows which tree it just measured: it fails **by name** if
   that tree was not checked, which is stronger than "something was checked" once more
   than one tree can have a report. Issue #1190.
+
+  ⚠️ **"Something was checked" is what both CI configurations settled for, and it is
+  how eight of the nine trees stayed unratcheted.** The only report either CI produced
+  was `lib/idp_common_pkg`'s, so this gate compared one tree, named the other eight as
+  unchecked, and exited 0 — a job log in which a complete run and a one-ninth run look
+  the same. `--require-all-trees` is the CI spelling: it requires **every** tree in
+  :data:`TREES`, and the list is derived from the registry here rather than enumerated
+  by a caller, so a tree added to `TREES` is required without any Makefile or CI config
+  being edited. Issue #1256.
 * **A report whose run did not finish cleanly.** A partially failed pytest still writes
   a `coverage.xml`, and a run where some xdist workers errored writes one showing large,
   uniform-looking falls across unrelated files — the tests that would have covered them
@@ -475,7 +484,26 @@ def run_trust(report: Path) -> RunTrust:
     both CI configurations invoke this gate as a **separate step** from the run — which is
     the gap issue #1190 is about — and the coverage report's own internal consistency
     cannot tell a genuinely low figure from a fabricated one.
+
+    ⚠️ It also answers the cruder question of whether the **report** can be read at all,
+    and that belongs here rather than at the two call sites because both of them already
+    handle ``unverified`` correctly and neither handled an exception: `check` put the
+    traceback in front of a reader instead of a named refusal, and `--write` died partway
+    through regenerating the baseline. A zero-byte `coverage.xml` is the live shape — what
+    a producer leaves behind when it is killed mid-write, or when the disk filled — and it
+    is the more misleading one than an absent file, because a reader who sees the report
+    sitting there concludes the gate compared it. Treated as unmeasured, exactly like a
+    record that cannot be read, so `--require-all-trees` names the tree and the run
+    reaches no verdict for it.
     """
+    try:
+        ET.parse(report)
+    except (ET.ParseError, OSError) as exc:
+        return RunTrust(
+            "unverified",
+            f"{report.name} cannot be read as a coverage report ({exc}), so it measures "
+            f"nothing — a producer killed mid-write leaves exactly this",
+        )
     record = run_record_path(report)
     if not record.is_file():
         return RunTrust(
@@ -769,7 +797,7 @@ def check(required: tuple[str, ...] = ()) -> CheckResult:
     return CheckResult(code, problems + refusals, unchecked, checked)
 
 
-def write_baseline() -> int:
+def write_baseline(missing_only: bool = False) -> int:
     """Re-record baselines from the reports that a finished run produced.
 
     Refuses outright — writing nothing — if any report came from a run that did not
@@ -779,6 +807,23 @@ def write_baseline() -> int:
     failure message offers this command as one of two remedies. Skipping the bad tree and
     recording the rest would still leave the operator believing the baseline was
     refreshed; the remedy for an unfinished run is to run it again.
+
+    ⚠️ **``missing_only`` exists because the remedy this gate prints is otherwise wider
+    than the finding it reports.** Of the problems `check_tree` raises, one — a tracked
+    file the report measures and the baseline does not record — is fixed by adding a
+    single entry. The remedy printed for it is `--write`, which re-records the file set
+    of **every** measured tree wholesale, so the narrowest available response to one new
+    module is to accept this machine's figure for every other file in its tree. That is
+    the wrong direction on a gate whose figures are host-sensitive: a baseline recorded
+    on a more capable machine is a floor the gate's own environment cannot reach, which
+    is what `conditions` was added for. Measured on the `scripts` tree while closing
+    #1256: one file needed recording, and `--write` would have raised ten existing floors
+    with it, six past the tolerance and the largest by 18.75 points.
+
+    So ``missing_only`` adds only entries the baseline **lacks**, and by construction
+    cannot raise or lower an existing floor — asserted below rather than left to the
+    reader, because "it only adds" is exactly the kind of claim that is true of the code
+    as written and false after one edit.
     """
     trees: dict[str, dict] = {}
     measured_trees: list[str] = []
@@ -805,6 +850,27 @@ def write_baseline() -> int:
             for path, rate in sorted(measured.items())
             if path in tracked and not any(path.startswith(k) for k in NOT_MEASURED)
         }
+        if missing_only:
+            existing = recorded_now.get(tree.name)
+            if existing:
+                kept = dict(existing.get("files", {}))
+                added = {p: r for p, r in files.items() if p not in kept}
+                # The whole claim of this mode, checked rather than asserted in prose.
+                assert all(kept[p] == existing["files"][p] for p in kept), tree.name
+                merged = {**kept, **added}
+                trees[tree.name] = {**existing, "files": dict(sorted(merged.items()))}
+                if added:
+                    print(
+                        f"  + {tree.name}: {len(added)} new entr(y/ies) "
+                        + ", ".join(
+                            f"{p} at {r:.2f}%" for p, r in sorted(added.items())
+                        )
+                    )
+                else:
+                    print(f"  = {tree.name}: nothing missing, left exactly as recorded")
+                continue
+            # A tree with no baseline at all has nothing to preserve, so the ordinary
+            # full record is both correct and the only thing available.
         trees[tree.name] = {
             "total": report_total(report),
             # The conditions this figure was measured under, so a later comparison can
@@ -913,6 +979,15 @@ def main() -> int:
         help="Re-record baselines from whatever reports exist, instead of checking",
     )
     parser.add_argument(
+        "--write-missing",
+        action="store_true",
+        help=(
+            "Like --write, but ONLY adds entries the baseline lacks: it cannot raise or "
+            "lower an existing floor. The bounded remedy for the one finding that needs "
+            "one new entry, where --write would re-record the whole tree"
+        ),
+    )
+    parser.add_argument(
         "--summary", action="store_true", help="Print each tree's recorded figure"
     )
     parser.add_argument(
@@ -926,7 +1001,26 @@ def main() -> int:
             "saying only that nothing was checked."
         ),
     )
+    parser.add_argument(
+        "--require-all-trees",
+        action="store_true",
+        help=(
+            "Fail unless EVERY tree in the registry was checked. What both CI "
+            "configurations pass, now that they produce a report per tree"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.require_all_trees:
+        # Derived from the registry, never enumerated by the caller. A Makefile or CI
+        # config listing the nine names would be a second copy of TREES, and the copy
+        # that goes stale is the one deciding what this gate is allowed to skip -- so a
+        # tree added to the registry and forgotten there would be unratcheted while the
+        # gate reported that every tree was required. Issue #1256.
+        args.require_tree = [
+            *args.require_tree,
+            *(t.name for t in TREES if t.name not in set(args.require_tree)),
+        ]
 
     unknown = [n for n in args.require_tree if n not in TREES_BY_NAME]
     if unknown:
@@ -937,12 +1031,16 @@ def main() -> int:
             f"{', '.join(unknown)}. Known trees: {', '.join(t.name for t in TREES)}"
         )
         return 2
-    if args.require_tree and (args.summary or args.write):
+    if args.require_tree and (args.summary or args.write or args.write_missing):
         # Refused rather than ignored. Neither of those modes compares anything, so a
         # caller passing both has asserted a precondition that nothing will evaluate --
         # and an ignored assertion is the exact shape of the defect this flag exists for.
+        # Named by the spelling the caller actually used: `--require-all-trees` expands
+        # into `require_tree` above, so a message naming only the latter would cite a
+        # flag that is not on the command line.
+        flag = "--require-all-trees" if args.require_all_trees else "--require-tree"
         print(
-            "🚫 --require-tree asserts that a tree was CHECKED, which neither --summary "
+            f"🚫 {flag} asserts that a tree was CHECKED, which neither --summary "
             "nor --write does. Drop one of them."
         )
         return 2
@@ -961,8 +1059,17 @@ def main() -> int:
             )
         return 0
 
-    if args.write:
-        return write_baseline()
+    if args.write and args.write_missing:
+        # Refused rather than resolved in either direction: one re-records every file of
+        # every measured tree and the other cannot change a single existing figure, so
+        # there is no reading of both that is a narrowing of one of them.
+        print(
+            "🚫 --write re-records every measured tree wholesale and --write-missing "
+            "adds only what is absent. Pick one."
+        )
+        return 2
+    if args.write or args.write_missing:
+        return write_baseline(missing_only=args.write_missing)
 
     result = check(tuple(args.require_tree))
     code, problems, unchecked = result.code, result.problems, result.unchecked

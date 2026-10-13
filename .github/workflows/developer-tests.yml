@@ -164,16 +164,39 @@ jobs:
       - name: Set up Git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      # No Node: nothing in this job needs it.
+      # ⚠️ Node and the pinned cfn-lint are load-bearing here, and neither is visible
+      # from any `run:` line below. This job used to need neither; the coverage
+      # producer two steps down re-runs the `scripts` and `idp_sdk` suites to measure
+      # them, which drags their toolchain requirements into this job wholesale —
+      # `scripts/tests/test_ux_recorder.py` runs the recorder's cursor-overlay
+      # JavaScript under node and FAILS rather than skipping without it, and
+      # `scripts/tests/test_pyright_config.py` runs basedpyright live. cfn-lint is
+      # about PINNING rather than availability, for the cfn-lint-gated assertions
+      # in `lib/idp_sdk/tests/unit/` — see `package_tests` below, which carries the
+      # same two inputs for the same two reasons. Read the suites, not the steps.
       - name: Set up the Python environment
         uses: ./.github/actions/python-env
+        with:
+          node: "true"
+          cfn-lint: "true"
 
       - name: Run tests
         id: run-tests
         run: make test-cicd -C lib/idp_common_pkg
 
-      - name: Coverage ratchet (per-file, reads the report the step above writes)
-        run: make check-coverage-debt
+      # The step above writes ONE of the ratchet's nine trees. Without this step the
+      # other eight resolve to no report at all, so the ratchet named them as
+      # "not checked" and exited 0 — advisory-but-passing over exactly the trees
+      # where coverage had actually been lost, including this repository's own hook
+      # guards (issue #1256). Trees are measured concurrently and `idp_common` is
+      # skipped because the step above already produced its report; the ratchet below
+      # still requires it by name.
+      - name: Coverage reports for every other measurable tree (concurrent)
+        run: make coverage-all-cicd
+        continue-on-error: false
+
+      - name: Coverage ratchet (per-file, every registry tree required by name)
+        run: make check-coverage-debt-cicd
         continue-on-error: false
 
       - name: Upload coverage reports
