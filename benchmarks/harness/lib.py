@@ -17,6 +17,7 @@ import yaml
 # PYTHONPATH for every harness entry point (benchmarks/matrices/METHODOLOGY.md),
 # and this module is stdlib-only, so importing it costs nothing.
 from idp_common.metering_units import (
+    CACHE_UNITS,
     NOT_CHARGEABLE,
     classify_absent_unit,
     pricing_key_service,
@@ -450,17 +451,26 @@ def price_metering(metering) -> Priced:
                 # Free, or unpriced? One rule, imported rather than restated, so
                 # this and production cannot answer it differently:
                 # idp_common.metering_units.classify_absent_unit. A zero count is
-                # free arithmetically; a unit declared non-chargeable for the
-                # service on AWS price-list evidence is free by declaration;
-                # anything else is a price this harness does not have, and
-                # dropping it made a new Bedrock usage field cost 0.00 (#1212).
+                # free arithmetically; a unit declared non-chargeable is free by
+                # declaration -- at SERVICE scope for the units that are not a
+                # billing dimension of the service at all, and per PRICING KEY
+                # for the two prompt-cache units, since whether a cache read
+                # costs anything is a property of the model (#1206). Anything
+                # else is a price this harness does not have, and dropping it
+                # made a new Bedrock usage field cost 0.00 (#1212).
                 if classify_absent_unit(matched, unit, count) == NOT_CHARGEABLE:
                     continue
+                declaration = (
+                    "EXPECTED_CACHE_UNIT_OMISSIONS (per pricing key and unit)"
+                    if unit in CACHE_UNITS
+                    else f"NON_CHARGEABLE_METERING_UNITS for "
+                    f"{pricing_key_service(matched)!r}"
+                )
                 unpriced.append(
                     f"{meter_key!r} unit {unit!r}: pricing entry {matched!r} "
-                    f"lists no rate for it and it is not declared "
-                    f"non-chargeable for "
-                    f"{pricing_key_service(matched)!r} (count={count!r}) — add "
+                    f"lists no rate for it and nothing declares it "
+                    f"non-chargeable in idp_common.metering_units."
+                    f"{declaration} (count={count!r}) — add "
                     f"the rate, or this run's cost is below truth by whatever "
                     f"it spent on it"
                 )
