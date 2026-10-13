@@ -213,8 +213,11 @@ OWNERSHIP_PATTERNS = ("owner", "user_id", "userId", "sub", "session", "caller")
 OWNERSHIP_REFUSAL_PATTERNS = (
     "ResourceAccessDenied",
     "PermissionError",
-    "raise Unauthorized",
-    'errorType": "Unauthorized"',
+    # `raise Unauthorized` and `errorType": "Unauthorized"` were here and are
+    # deleted: `test_ownership_refusal_vocabulary.py` measured that neither
+    # matches any ownership-declaring resolver in the tree. An unmatched pattern
+    # is not inert — it silently admits the next file that happens to contain the
+    # string — so this list holds only spellings that do work today.
     "Unauthorized:",
     # The scope mechanism is a refusal too, and spells itself differently. The
     # document-chat processor denies a turn by raising `ScopeLookupError` or by
