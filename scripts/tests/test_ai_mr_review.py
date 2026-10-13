@@ -1841,8 +1841,36 @@ GIT_TARGET_CHECKER = "_assert_git_target_is"
 # here today.
 
 
-def _calls_by_name(node: ast.AST, name: str) -> bool:
-    """Whether ``node`` contains a real call to ``name``, read as a call.
+# The statement fields that hold a *block*: a run of statements that may or may not
+# execute. `_runs_every_time` descends into the ones that always begin executing and
+# these are what it refuses to look inside.
+_BLOCK_FIELDS = frozenset({"body", "orelse", "finalbody", "handlers"})
+
+
+def _runs_every_time(body: list[ast.stmt]) -> list[ast.stmt]:
+    """The statements in ``body`` that execute on every entry to it.
+
+    Descends into a ``with`` and into a ``try``'s own body and ``finally``, because
+    all three always begin executing; refuses to descend into a conditional, a loop,
+    an exception handler, an ``else`` or a nested ``def``, because a statement in one
+    of those is a statement that may not happen. Stops at the first statement that
+    leaves the body, so a call written after a ``return`` does not count either.
+    """
+    reached: list[ast.stmt] = []
+    for statement in body:
+        reached.append(statement)
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            break
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            reached.extend(_runs_every_time(statement.body))
+        elif isinstance(statement, ast.Try):
+            reached.extend(_runs_every_time(statement.body))
+            reached.extend(_runs_every_time(statement.finalbody))
+    return reached
+
+
+def _calls_by_name(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Whether ``node`` calls ``name`` unconditionally, read as a call.
 
     Not as text. The text form was what this module shipped, and measured, it is
     satisfied by a commented-out call, by a call replaced with a bare string
@@ -1852,19 +1880,44 @@ def _calls_by_name(node: ast.AST, name: str) -> bool:
     misbehaves locally. A ``#`` leaves no :class:`ast.Call` node behind, which is
     what this sees and a substring search cannot.
 
+    Unconditionally, and not merely somewhere in the function, because an
+    ``ast.Call`` node is just as easy to leave in place as a name: ``if False:``
+    around the call, a nested ``def`` that is never invoked, an ``except`` branch,
+    or a line after a ``return`` all keep the node and turn the control off. So the
+    search runs over :func:`_runs_every_time` rather than over the whole subtree,
+    and does not look inside any block those statements own. That is the rule this
+    gate wants anyway: call the check straight after ``git init``, before the first
+    write, not under a condition.
+
     An attribute callee (``helpers._assert_git_target_is(...)``) counts, because
     refusing one would fail on an ordinary refactor rather than on a missing check.
+
+    Two bounds, both deliberate. A decorator that replaces the function wholesale is
+    invisible to any reading of the function's own syntax. And a call nested inside a
+    ``lambda`` or a comprehension that is itself an unconditional statement's
+    expression is counted, although it runs only when that lambda is called -- the
+    three real call sites each *pass* a lambda to the check, so excluding lambda
+    bodies would mean tracking which lambda is the argument and which is the callee.
     """
-    return any(
-        (
-            child.func.id
-            if isinstance(child.func, ast.Name)
-            else getattr(child.func, "attr", None)
-        )
-        == name
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call)
-    )
+    for statement in _runs_every_time(node.body):
+        for field, value in ast.iter_fields(statement):
+            if field in _BLOCK_FIELDS:
+                continue
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, ast.AST):
+                    continue
+                for child in ast.walk(item):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    callee = child.func
+                    spelled = (
+                        callee.id
+                        if isinstance(callee, ast.Name)
+                        else getattr(callee, "attr", None)
+                    )
+                    if spelled == name:
+                        return True
+    return False
 
 
 def _module_source() -> str:
@@ -2327,10 +2380,11 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
 
 
 # (case id, a synthetic writer's source, whether the check must count it as calling)
-# `{c}` is the checker's name. The three negatives are the three mutations the
-# previous substring form passed, each measured against this module before this
-# probe existed; the positives are the spellings a real caller uses here or would
-# use after an ordinary refactor.
+# `{c}` is the checker's name. Three of the negatives are the mutations the previous
+# substring form passed, measured against this module before this probe existed; the
+# rest are ways to leave a genuine `ast.Call` node in place while the call never
+# runs, which is the attack a presence-only reading invites. The positives are the
+# spellings a real caller uses here or would use after an ordinary refactor.
 _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
     ("a-direct-call", "def writer():\n    {c}(thunk, repo)\n", True),
     (
@@ -2339,10 +2393,21 @@ _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
         True,
     ),
     (
-        "a-call-inside-a-nested-function",
-        "def writer():\n    def inner():\n        {c}(thunk, repo)\n    inner()\n",
+        "a-call-whose-result-is-bound",
+        "def writer():\n    outcome = {c}(thunk, repo)\n    return outcome\n",
         True,
     ),
+    (
+        "a-call-inside-a-with-block",
+        "def writer():\n    with ctx() as c:\n        {c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-try-body",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    finally:\n        pass\n",
+        True,
+    ),
+    # --- the text form's measured survivors ---
     (
         "a-commented-out-call",
         "def writer():\n    # {c}(thunk, repo)\n    pass\n",
@@ -2364,6 +2429,47 @@ _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
         False,
     ),
     ("no-mention-at-all", "def writer():\n    pass\n", False),
+    # --- a real `ast.Call` node that never executes ---
+    (
+        "a-call-switched-off-by-a-constant-condition",
+        "def writer():\n    if False:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-behind-any-condition-at-all",
+        "def writer():\n    if confirm:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-in-a-nested-function-that-is-invoked",
+        "def writer():\n    def inner():\n        {c}(thunk, repo)\n\n    inner()\n",
+        False,
+    ),
+    (
+        "a-call-in-an-except-branch",
+        "def writer():\n    try:\n        pass\n    except Exception:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-in-a-try-else-branch",
+        "def writer():\n    try:\n        pass\n    except Exception:\n        pass\n    else:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-after-a-return",
+        "def writer():\n    return None\n    {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-only-when-a-loop-has-an-iteration",
+        "def writer():\n    for _ in targets:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-short-circuited-away",
+        "def writer():\n    _ = False and {c}(thunk, repo)\n",
+        True,  # the `and` is an expression of an unconditional statement; see below
+    ),
 ]
 
 
@@ -2376,13 +2482,22 @@ _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
 def test_the_call_check_reads_a_call_and_not_the_text(
     source: str, counts: bool
 ) -> None:
-    """The assertion above is only worth having if these four negatives are red.
+    """The assertion above is only worth having if these negatives are red.
 
     Three of them are the measured survivors of the substring form this replaced:
     a commented-out call, a call replaced by a bare string spelling the name, and
-    the name in prose. Driven over synthetic sources rather than by mutating this
-    file, because the mutation is the thing being defended against and a test
-    cannot leave it installed.
+    the name in prose. The rest are the next attack along -- a real ``ast.Call``
+    node that never executes, which a presence-only reading would accept and which
+    is no harder to write than a comment. Driven over synthetic sources rather than
+    by mutating this file, because the mutation is the thing being defended against
+    and a test cannot leave it installed.
+
+    One case is a known positive that *should* arguably be a negative and is
+    recorded as what the check really does rather than as what would be ideal:
+    ``False and <call>`` never runs, but it is an expression of a statement that
+    does, and a short-circuit analysis is more machinery than the risk justifies --
+    nobody silences a setup call by writing that. It is listed so the behaviour is
+    pinned rather than discovered later.
     """
     body = source.format(c=GIT_TARGET_CHECKER)
     node = ast.parse(body).body[0]
