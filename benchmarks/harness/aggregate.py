@@ -2083,6 +2083,30 @@ REFERENCE_TABLE_COLUMNS = (
     ("wall", "wall_s"),
 )
 
+# Metrics of this table that are probabilities, so a value above 1.0 is not a figure
+# at all. Four releases' grids carry such a mean_confidence (#1395: one grader leaf
+# answered on a 0-100 scale, which the row mean then carries), and this renderer used
+# to print it to three decimal places like any other number -- which is how four of
+# them reached docs/benchmarking/config-guidance.md as published confidences above 1.0
+# (#1411). The harness now refuses an out-of-range leaf at the point of measurement,
+# so this only arises on an already-committed grid; printing a word rather than a
+# number is what keeps re-rendering one from re-publishing an impossible figure.
+PROBABILITY_SCALE_METRICS = frozenset(
+    {"weighted_accuracy", "class_accuracy", "mean_confidence"}
+)
+
+# Floating-point slack on the upper bound, so a mean that lands a few ULPs above 1.0
+# reads as the 1.000 it is rather than as a defect.
+PROBABILITY_SCALE_SLACK = 1e-6
+
+# The two named non-values, both deliberately words. `not scored` is the older of the
+# two and means no value was produced -- an arm with the confidence pass off, for
+# instance. `not measurable` means values were produced and at least one was off scale,
+# so their mean is not a quantity: a corrected figure would need a re-score, and the
+# distinction between the two states is the information a reader needs.
+UNSCORED_LABEL = "not scored"
+OUT_OF_RANGE_LABEL = "not measurable"
+
 
 def reference_tables(summary_path):
     """The per-corpus × per-cell accuracy table, rendered from a scored summary.
@@ -2144,13 +2168,18 @@ def reference_tables(summary_path):
                 if mean is None:
                     # Named, never blank: a blank cell here is what the whole issue
                     # was about.
-                    vals.append("not scored")
+                    vals.append(UNSCORED_LABEL)
+                elif (
+                    metric in PROBABILITY_SCALE_METRICS
+                    and mean > 1.0 + PROBABILITY_SCALE_SLACK
+                ):
+                    vals.append(OUT_OF_RANGE_LABEL)
                 elif metric == "cost":
                     vals.append(f"${mean:.4f}")
                 elif metric == "wall_s":
                     vals.append(f"{mean:.0f} s")
                 elif metric == "parse_failures":
-                    vals.append(f"{mean:.0f}" if n else "not scored")
+                    vals.append(f"{mean:.0f}" if n else UNSCORED_LABEL)
                 else:
                     vals.append(f"{mean:.3f}")
             print("| `" + cell + "` | " + " | ".join(vals) + " |")

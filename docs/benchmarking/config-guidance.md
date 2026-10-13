@@ -363,7 +363,7 @@ python3 benchmarks/harness/aggregate.py \
 |---|---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.805 | 1.000 | 0 | 0.908 | $0.1434 | 42 s |
 | `core-tt-simple-int` | 20 | 20 | 0.805 | 1.000 | 0 | 0.879 | $0.1433 | 40 s |
-| `core-tt-simple-off` | 20 | 20 | 0.805 | 1.000 | 0 | 0.000 | $0.1401 | 29 s |
+| `core-tt-simple-off` | 20 | 20 | 0.805 | 1.000 | 0 | not scored | $0.1401 | 29 s |
 | `core-tt-adv-sep` | 20 | 20 | 0.783 | 1.000 | 0 | 0.860 | $0.3796 | 69 s |
 | `core-tt-adv-int` | 20 | 20 | 0.770 | 1.000 | 0 | 0.966 | $0.4480 | 68 s |
 | `core-tl-simple-sep` | 20 | 20 | 0.788 | 1.000 | 0 | 0.903 | $0.0883 | 36 s |
@@ -386,23 +386,23 @@ python3 benchmarks/harness/aggregate.py \
 |---|---|---|---|---|---|---|---|---|
 | `core-tt-simple-sep` | 20 | 20 | 0.997 | 1.000 | 0 | 0.960 | $0.0334 | 24 s |
 | `core-tt-simple-int` | 20 | 20 | 0.997 | 1.000 | 0 | 0.961 | $0.0334 | 24 s |
-| `core-tt-simple-off` | 20 | 20 | 0.997 | 1.000 | 0 | 0.000 | $0.0328 | 19 s |
+| `core-tt-simple-off` | 20 | 20 | 0.997 | 1.000 | 0 | not scored | $0.0328 | 19 s |
 | `core-tt-adv-sep` | 20 | 20 | 0.997 | 1.000 | 0 | 0.964 | $0.0575 | 34 s |
 | `core-tt-adv-int` | 20 | 20 | 0.998 | 1.000 | 0 | 0.980 | $0.1016 | 38 s |
-| `core-tl-simple-sep` | 20 | 20 | 0.998 | 1.000 | 0 | 1.625 | $0.0223 | 24 s |
+| `core-tl-simple-sep` | 20 | 20 | 0.998 | 1.000 | 0 | not measurable | $0.0223 | 24 s |
 | `core-tl-adv-sep` | 20 | 20 | 0.997 | 1.000 | 0 | 0.963 | $0.0494 | 34 s |
-| `core-bda-simple-sep` | 20 | 20 | 0.998 | 1.000 | 0 | 1.293 | $0.0223 | 24 s |
+| `core-bda-simple-sep` | 20 | 20 | 0.998 | 1.000 | 0 | not measurable | $0.0223 | 24 s |
 | `core-bda-adv-sep` | 20 | 20 | 0.998 | 1.000 | 0 | 0.966 | $0.0409 | 34 s |
 | `core-llm-simple-sep` | 20 | 20 | 0.973 | 1.000 | 0 | 0.972 | $0.0190 | 24 s |
 | `enforce-off` | 20 | 20 | 0.997 | 1.000 | 0 | 0.961 | $0.0338 | 24 s |
 | `enforce-warn` | 20 | 20 | 0.997 | 1.000 | 0 | 0.959 | $0.0334 | 24 s |
-| `enforce-escalate` | 20 | 20 | 0.997 | 1.000 | 0 | 1.622 | $0.0334 | 24 s |
+| `enforce-escalate` | 20 | 20 | 0.997 | 1.000 | 0 | not measurable | $0.0334 | 24 s |
 | `force-off` | 20 | 20 | 0.997 | 1.000 | 0 | 0.963 | $0.0335 | 24 s |
 | `force-on` | 20 | 20 | 0.998 | 1.000 | 0 | 0.959 | $0.0350 | 24 s |
 | `restate-on` | 20 | 20 | 0.997 | 1.000 | 0 | 0.963 | $0.0756 | 34 s |
 | `restate-off` | 20 | 20 | 0.995 | 1.000 | 0 | 0.961 | $0.0797 | 37 s |
 | `split-llm` | 20 | 20 | 0.997 | 1.000 | 0 | 0.963 | $0.0334 | 24 s |
-| `split-disabled` | 20 | 20 | 0.997 | 1.000 | 0 | 1.626 | $0.0334 | 24 s |
+| `split-disabled` | 20 | 20 | 0.997 | 1.000 | 0 | not measurable | $0.0334 | 24 s |
 
 **Findings**
 
@@ -433,9 +433,47 @@ python3 benchmarks/harness/aggregate.py \
    as suggestive; it is consistent with the v0.6.7 real-corpus A/B, which found forcing
    accuracy-neutral-to-positive on 322 paired documents.
 
-> The `class accuracy` column reads 1.000 everywhere because both corpora are single-class
-> per document as configured here; the `mean conf` values above 1.0 in a few OCR-benchmark
-> cells are a scorer artefact (confidence leaves summed across classes) and are not reported.
+**Two columns above read as words rather than as numbers.**
+
+The `class accuracy` column reads 1.000 everywhere because both corpora are single-class
+per document as configured here.
+
+`mean conf` reads **`not scored`** for `core-tt-simple-off` in both control tables, and that
+is the whole of what happened: that arm turns the confidence pass off, so no confidence was
+produced to average. It is not a confidence of zero, and the distinction matters — a zero
+there would say the grader was certain of nothing.
+
+`mean conf` reads **`not measurable`** in four OCR-benchmark cells —
+`core-tl-simple-sep`, `core-bda-simple-sep`, `enforce-escalate` and `split-disabled` — and
+that needs the cause spelled out, because a confidence is a probability and these cells
+previously published values above 1.0.
+
+- **The arithmetic is correct; one input was off scale.** A single grader leaf answered on
+  a 0–100 scale where the scale is 0.0–1.0, and the row mean is taken over all fifteen
+  leaves of the document, so one `100` drags the row far above 1.0 and the per-cell mean
+  with it. Every affected row records `n_conf_leaves: 15` and `pct_conf_below_0.9: 0.0`, and
+  the multiset `[0.9839] × 12 + [0.9841] × 2 + [100.0]` reproduces the committed
+  `7.585 / 15 / 0.0` triple exactly
+  ([#1395](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1395),
+  whose fix makes the harness refuse an out-of-range leaf rather than average it).
+- **It is 21 rows of the 11,080 committed rows that carry a confidence at all** (0.19%),
+  two documents — both bank checks — in four of the 121 committed grids. Rendering those four
+  grids reproduces **19** such cells in total, of which the four above are the ones this
+  page publishes. Values at or below 1.0 are unaffected: the defect can only push a mean
+  up, never down.
+- **No corrected number is published for these four**, because a correct one would need the
+  grids re-scored against the extracted values, and the rows do not carry them. Naming the
+  cells is the honest alternative to quietly re-rendering the table with the affected rows
+  dropped, which would move a published figure with nothing saying so.
+
+Both spellings are what `aggregate.py --reference-tables` prints, so the `mean conf`
+column above remains a transcription of the committed artifact rather than an editorial
+reading of it. Render the control grid for yourself with
+
+```bash
+python3 benchmarks/harness/aggregate.py \
+    --reference-tables benchmarks/results/v0.6.8/core/summary.json
+```
 
 
 ---

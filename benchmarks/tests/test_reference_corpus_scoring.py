@@ -496,6 +496,99 @@ class TestTheReferenceTableRenderer:
         assert "not scored" in out
         assert "0.000" not in out
 
+    def test_a_probability_above_one_is_named_rather_than_printed(
+        self, capsys, tmp_path
+    ):
+        """A confidence is a probability, so 7.585 is not a figure to print.
+
+        Four committed grids carry such a ``mean_confidence`` — one grader leaf
+        answered on a 0-100 scale and the row mean carries it (#1395) — and this
+        renderer used to format it to three decimals like any other number, which is
+        how four of them reached the published guidance as confidences above 1.0
+        (#1411). The harness now refuses an out-of-range leaf where it is measured, so
+        the only way to meet one is to re-render an already-committed grid; a word
+        there is what stops that re-publishing an impossible number.
+        """
+        row = {
+            **_reference(),
+            "class_accuracy": 1.0,
+            "parse_failures": 0,
+            "mean_confidence": 7.585,
+            "cost": 0.0223,
+            "wall_s": 24.0,
+        }
+        path = tmp_path / "summary.json"
+        path.write_text(
+            json.dumps(
+                {"meta": {"suite": "core", "stack_version": "0.6.8"}, "rows": [row]}
+            )
+        )
+        aggregate.reference_tables(str(path))
+        out = capsys.readouterr().out
+        assert "7.585" not in out
+        # The whole row, so the word lands in the confidence column and nowhere else —
+        # and so it is distinguishable from the no-observations case above, which is a
+        # different state that a reader acts on differently.
+        assert (
+            "| `c` | 1 | 1 | 1 | 0.800 | 1.000 | 0 | not measurable | $0.0223 | 24 s |"
+            in out
+        )
+        assert "not scored" not in out
+
+    @pytest.mark.parametrize("mean_confidence", [1.293, 1.622, 1.625, 1.626, 7.585])
+    def test_the_bound_is_one_rather_than_some_larger_number(
+        self, capsys, tmp_path, mean_confidence
+    ):
+        """Pinned on the five roll-ups the committed grids actually produce.
+
+        The four smallest are the ones `config-guidance.md` published, and they are
+        barely above the bound, so a guard written against the largest alone would
+        print all four. Parametrised over the real values rather than one convenient
+        one for that reason.
+        """
+        row = {**_reference(), "mean_confidence": mean_confidence}
+        path = tmp_path / "summary.json"
+        path.write_text(json.dumps({"meta": {}, "rows": [row]}))
+        aggregate.reference_tables(str(path))
+        out = capsys.readouterr().out
+        assert "not measurable" in out
+        assert f"{mean_confidence:.3f}" not in out
+
+    def test_a_probability_of_exactly_one_is_still_a_figure(self, capsys, tmp_path):
+        """1.000 is the commonest value in the `class accuracy` column and the bound is
+        inclusive, so the guard must not reach it — including when a float mean lands a
+        few ULPs above it."""
+        rows = [
+            {**_reference(sub="a.pdf"), "mean_confidence": 1.0, "class_accuracy": 1.0},
+            {**_reference(sub="b.pdf"), "mean_confidence": 0.1 * 3 / 0.3},
+        ]
+        path = tmp_path / "summary.json"
+        path.write_text(json.dumps({"meta": {}, "rows": rows}))
+        aggregate.reference_tables(str(path))
+        out = capsys.readouterr().out
+        assert "not measurable" not in out
+        assert "1.000" in out
+
+    def test_an_unbounded_column_above_one_is_still_a_figure(self, capsys, tmp_path):
+        """Cost and wall-time are not probabilities. The guard is over the three
+        columns that are, named in ``PROBABILITY_SCALE_METRICS``, rather than over
+        every number in the table."""
+        rows = [{**_reference(), "cost": 1.5, "wall_s": 42.0}]
+        path = tmp_path / "summary.json"
+        path.write_text(json.dumps({"meta": {}, "rows": rows}))
+        aggregate.reference_tables(str(path))
+        out = capsys.readouterr().out
+        assert "$1.5000" in out
+        assert "42 s" in out
+        assert "not measurable" not in out
+
+    def test_every_guarded_column_is_one_this_table_renders(self):
+        """The guard names metrics; the table names columns. A metric that is not a
+        column of this table would be a guard over nothing."""
+        rendered = {m for _h, m in aggregate.REFERENCE_TABLE_COLUMNS if m}
+        assert aggregate.PROBABILITY_SCALE_METRICS <= rendered
+        assert "mean_confidence" in aggregate.PROBABILITY_SCALE_METRICS
+
     def test_a_synthetic_only_grid_says_why_it_has_no_table(self, capsys, tmp_path):
         path = tmp_path / "summary.json"
         path.write_text(
