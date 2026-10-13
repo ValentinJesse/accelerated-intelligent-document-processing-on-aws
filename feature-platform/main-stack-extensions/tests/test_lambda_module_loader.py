@@ -28,6 +28,7 @@ import re
 import sys
 from pathlib import Path
 
+import boto3
 import pytest
 from conftest import PER_LAMBDA_HELPERS
 
@@ -85,11 +86,29 @@ IMPORT_TIME_ENV = {
 
 @pytest.fixture(autouse=True)
 def _import_time_env(monkeypatch):
-    """Satisfy every module-level `os.environ[...]` before any lambda is imported."""
+    """Satisfy every module-level `os.environ[...]` before any lambda is imported.
+
+    ⚠️ **`boto3.DEFAULT_SESSION` has to be cleared, not just the environment set.**
+    These indexes build clients at module level through a bare `boto3.client(...)`,
+    which creates a process-global default session on first use and **caches the region
+    and credentials it resolved**. Under the hermetic environment the coverage producer
+    runs (`AWS_CONFIG_FILE=/dev/null`, every `AWS_*` unset) there is nothing to resolve,
+    so whichever test touched boto3 first in this worker pinned a session with no
+    region, and a later `monkeypatch.setenv` is ignored by every client built
+    afterwards. The symptom is a `NoRegionError` that depends on test order and on the
+    worker count — the same class of defect this module exists to fix, and the reason it
+    is worth spelling out twice.
+    """
     for name, value in IMPORT_TIME_ENV.items():
         monkeypatch.setenv(name, value)
-    # A real region, since botocore validates this one even for a client never called.
+    # A real region and inert credentials: botocore validates the region even for a
+    # client that is never called, and resolves credentials eagerly for some of them.
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None, raising=False)
 
 
 @pytest.mark.unit
