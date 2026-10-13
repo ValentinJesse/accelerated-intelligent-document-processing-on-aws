@@ -1161,6 +1161,47 @@ def score_reference(bucket, doc_prefix):
     }
 
 
+# Which of the two scorers produced a row's accuracy, recorded ON the row (#1364).
+#
+# `score_doc` dispatches on whether a local truth file exists, and the two scorers emit
+# DISJOINT accuracy families: `score_synthetic` writes `cells_compared`,
+# `cell_accuracy`, `scalar_accuracy` and `completeness_recall`; `score_reference` writes
+# `weighted_accuracy` and `class_accuracy` from the stack's own evaluation against the
+# corpus labels. Which one ran was recorded nowhere, so a reference row was shaped
+# exactly like a synthetic row whose scorer had produced nothing — the exact-key columns
+# absent, their CSV cells blank, `cells_compared` read as 0 by any reader defaulting it,
+# and a mean over no observations read as `nan`. That reading was published as "the
+# reference corpora produced cost but no scored accuracy" for a grid in which all 2,280
+# reference rows carried a `weighted_accuracy`, and it left a documentation section
+# unrefreshed whose numbers were sitting in the artifact.
+#
+# So the row says which scorer ran (always, both paths) and, when the exact-key family
+# does not apply, why and which column carries this row's accuracy instead. The absent
+# keys stay absent rather than becoming present-and-null: presence-and-null is already
+# this harness's signal for "measured, nothing to join" (see `calibration_curve`), and
+# borrowing it here would trade one ambiguity for another.
+SCORED_EXACT_TRUTH = "exact_truth"
+SCORED_STACK_EVALUATION = "stack_evaluation"
+
+EXACT_TRUTH_UNAVAILABLE_REFERENCE = (
+    "no local per-cell truth: a reference corpus is a labelled test set on the stack, "
+    "so cells_compared / cell_accuracy / scalar_accuracy / completeness_recall do not "
+    "apply to this row and are absent, not zero. This row's accuracy against the "
+    "corpus labels is weighted_accuracy (with class_accuracy for classification), "
+    "scored by the stack's own evaluation."
+)
+
+
+def scored_against_keys(truth):
+    """The provenance pair every scored row carries, for a given truth file (#1364)."""
+    return {
+        "scored_against": SCORED_EXACT_TRUTH if truth else SCORED_STACK_EVALUATION,
+        "exact_truth_unavailable": (
+            None if truth else EXACT_TRUTH_UNAVAILABLE_REFERENCE
+        ),
+    }
+
+
 def score_doc(bucket, tracking, run_id, doc_name, truth=None):
     doc_prefix = f"{run_id}/{doc_name}/"
     row = lib.doc_row(tracking, run_id, run_id and doc_name)
@@ -1237,6 +1278,10 @@ def score_doc(bucket, tracking, run_id, doc_name, truth=None):
         ),
         "tokens": tok,
         "tokens_by_phase": tok_by_phase,
+        # Set here rather than inside either scorer so it survives the unread-sections
+        # path too: `unread_sections_row` deliberately returns ONLY its two bookkeeping
+        # keys, and a row that could not be read still has a knowable scorer (#1364).
+        **scored_against_keys(truth),
     }
     if truth:
         out.update(score_synthetic(bucket, doc_prefix, truth))
