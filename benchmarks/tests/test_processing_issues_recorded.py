@@ -1193,6 +1193,58 @@ def test_the_metric_is_registered_as_late_added_so_skipped_is_not_unchanged():
     assert aggregate._missing_metric_notes({}, {}) == []
 
 
+def test_a_grid_that_measured_none_of_the_metric_is_not_reported_as_carrying_it():
+    """The direction ``_missing_metric_notes`` was added to catch, and the one a
+    present-key test cannot see.
+
+    ``cell_issues`` returns a populated dict for every cell, so plain truthiness
+    reads "collected" even when no row in the cell carries the figure — which is the
+    state of a grid whose section objects would not read (its own docstring's
+    KMS-pending-deletion case, 83 of 96 committed summaries for the sibling metric).
+    The presence test is therefore keyed on ``n_runs_scored``. Measured: keying it on
+    truthiness survived a suite that tested only key-present against key-absent.
+    """
+    label = aggregate.LATE_ADDED_METRICS["processing_issues"]
+    # A cell whose three runs were all unread: the block exists, and nothing in it
+    # was measured.
+    unread_rows = [
+        {
+            "cell": "c",
+            "doc": f"d{i}.pdf",
+            "sub_doc": None,
+            "repeat": 0,
+            "resolved": {},
+            "run_id": "r",
+            "status": "COMPLETED",
+            "success": True,
+            "sections_unreadable": 2,
+            "sections_unread": "kms: denied",
+        }
+        for i in range(3)
+    ]
+    unread = aggregate.cell_issues(unread_rows)
+    assert unread["n_runs"] == 3 and unread["n_runs_scored"] == 0
+    measured = aggregate.cell_issues([_row("c", "d.pdf", [_section()])])
+    assert measured["n_runs_scored"] == 1
+
+    # Unread current grid against a baseline that measured it: reported as a gap on
+    # the CURRENT side, which is the half that used to print like a clean run.
+    assert aggregate._missing_metric_notes(
+        {"processing_issues": unread}, {"processing_issues": measured}
+    ) == [(label, "current")]
+    # ...and the mirror.
+    assert aggregate._missing_metric_notes(
+        {"processing_issues": measured}, {"processing_issues": unread}
+    ) == [(label, "baseline")]
+    # Both unread says nothing about either grid.
+    assert (
+        aggregate._missing_metric_notes(
+            {"processing_issues": unread}, {"processing_issues": unread}
+        )
+        == []
+    )
+
+
 def test_the_cell_block_is_present_even_when_a_cell_recorded_nothing(tmp_path):
     """What makes the registration above work: a scored-and-clean cell must be
     distinguishable from a cell scored before the figure existed, so the block is
