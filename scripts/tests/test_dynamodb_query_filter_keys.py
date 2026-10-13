@@ -424,9 +424,7 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
             "and the one a matcher keyed on call.func misses entirely",
         ),
         (
-            "kw = {}\n"
-            'kw["FilterExpression"] = "contains(SK, :i)"\n'
-            "table.query(**kw)",
+            'kw = {}\nkw["FilterExpression"] = "contains(SK, :i)"\ntable.query(**kw)',
             True,
             "the SUBSCRIPT assignment — the spelling every filtered query in this "
             "repository actually uses, and one a dict-literal-only reading misses",
@@ -439,9 +437,7 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
             "and the .update form of the same thing",
         ),
         (
-            "kw = {}\n"
-            'kw["ProjectionExpression"] = "PK, SK"\n'
-            "table.query(**kw)",
+            'kw = {}\nkw["ProjectionExpression"] = "PK, SK"\ntable.query(**kw)',
             False,
             "a subscript assignment of a different key is not a filter",
         ),

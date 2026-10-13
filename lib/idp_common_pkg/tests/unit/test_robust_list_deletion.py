@@ -216,15 +216,11 @@ class TestTheCascade:
         table.query.return_value = {"Items": [_row("fallback")]}
 
         assert (
-            rld.delete_list_entries_robust(
-                table, KEY, {"InitialEventTime": QUEUED}
-            )
+            rld.delete_list_entries_robust(table, KEY, {"InitialEventTime": QUEUED})
             is True
         )
         assert table.query.called, "no shard was queried, so no timestamp was resolved"
-        assert (
-            table.query.call_args.kwargs["KeyConditionExpression"] is not None
-        )
+        assert table.query.call_args.kwargs["KeyConditionExpression"] is not None
 
     def test_no_metadata_means_no_strategy_runs(self, rld):
         table = _table()

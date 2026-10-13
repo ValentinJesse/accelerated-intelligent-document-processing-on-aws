@@ -189,9 +189,7 @@ class TestTheReportedOutcome:
                 "errors": [denial],
             }
         ]
-        with patch.object(
-            resolver, "delete_single_document", side_effect=failing
-        ):
+        with patch.object(resolver, "delete_single_document", side_effect=failing):
             with pytest.raises(RuntimeError) as caught:
                 resolver.handler(_event(["a"]), MagicMock())
 
