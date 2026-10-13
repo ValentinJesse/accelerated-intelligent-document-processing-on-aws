@@ -672,10 +672,20 @@ typecheck-pr: ## Fast local type check of only the files changed vs TARGET_BRANC
 # a pull request until it is named in one of those two. That is what
 # scripts/tests/test_src_lambda_tests_in_ci.py enforces, over the whole tree.
 
-# Distribute the LARGE suites in `test-packages-cicd` across cores. Same variable
-# name and same default as lib/idp_common_pkg/Makefile, for the same reason —
+# Distribute the LARGE suites in `test-packages-cicd` across cores. Same default
+# as lib/idp_common_pkg/Makefile's `PYTEST_PARALLEL`, and for the same reason —
 # `pytest-xdist` is a declared `[test]` dependency and nothing here passed `-n`,
 # so every invocation below ran serial on a 16-vCPU runner.
+#
+# ⚠️ The variable NAME differs, and only the default is shared: this file reads
+# `PYTEST_XDIST` and lib/idp_common_pkg/Makefile reads `PYTEST_PARALLEL`. So one
+# override does not cap both, and `PYTEST_PARALLEL=-n 4` on a root target is
+# silently ignored — the target keeps `-n auto` and takes every core, which is the
+# failure you get precisely when you were trying to bound it. Capping a whole run
+# means passing both:
+#
+#     make test-packages-cicd PYTEST_XDIST="-n 4"
+#     make test-cicd -C lib/idp_common_pkg PYTEST_PARALLEL="-n 4"
 #
 # Measured in GitLab CI (size:2xlarge arm64), the two suites that dominate the
 # target:
