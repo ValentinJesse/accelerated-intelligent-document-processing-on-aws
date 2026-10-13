@@ -1107,15 +1107,25 @@ def test_a_non_403_outcome_is_untouched(idx, monkeypatch):
         idx, monkeypatch, "listUsers", "ValueError", "testSetId is required"
     )
     bad = idx.handler(_http_event("listUsers", groups=["Admin"]))
+    # KeyError is the other half of the 400 mapping and was asserted nowhere: an
+    # unbiased mutation sample dropped it from the tuple and every suite stayed
+    # green, which would have turned a missing argument into a 500 — a deliberate
+    # client error counted in the fault rate the 5xx alarms watch.
+    _resolver_raising(idx, monkeypatch, "listUsers", "KeyError", "'objectKeys'")
+    missing_arg = idx.handler(_http_event("listUsers", groups=["Admin"]))
     _resolver_raising(
         idx, monkeypatch, "listUsers", "ResourceNotFound", "no such test set"
     )
     gone = idx.handler(_http_event("listUsers", groups=["Admin"]))
 
     assert (bad["statusCode"], _error(bad)["errorType"]) == (400, "BadRequest")
+    assert (missing_arg["statusCode"], _error(missing_arg)["errorType"]) == (
+        400,
+        "BadRequest",
+    )
     assert (gone["statusCode"], _error(gone)["errorType"]) == (404, "ResourceNotFound")
-    assert idx.AUTHZ_CONTROL_FIELD not in _error(bad)
-    assert idx.AUTHZ_CONTROL_FIELD not in _error(gone)
+    for resp in (bad, missing_arg, gone):
+        assert idx.AUTHZ_CONTROL_FIELD not in _error(resp)
 
 
 def test_the_resource_class_is_a_permission_error_so_old_mappings_still_apply():
