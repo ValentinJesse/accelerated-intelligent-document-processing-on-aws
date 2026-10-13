@@ -290,6 +290,7 @@
         "scripts/generate_standard_classes.py": 0.0,
         "scripts/hooks/check_commit_text.py": 98.48,
         "scripts/hooks/check_shared_branch.py": 95.46,
+        "scripts/malware_gate_burst.py": 97.71,
         "scripts/migrate_metering_hour_partition.py": 0.0,
         "scripts/migrate_multi_instance_baselines.py": 0.0,
         "scripts/rbac_common.py": 48.53,
@@ -307,6 +308,7 @@
         "scripts/sdlc/scan_api_rbac.py": 88.55,
         "scripts/sdlc/transform_deploy_test.py": 70.31,
         "scripts/sdlc/typecheck_pr_changes.py": 70.55,
+        "scripts/sdlc/validate_buildspec.py": 78.12,
         "scripts/sdlc/validate_service_role_permissions.py": 83.63,
         "scripts/security/curate_results.py": 34.42,
         "scripts/security/dep_audit.py": 99.06,
@@ -319,8 +321,7 @@
         "scripts/ux_recorder.py": 54.11,
         "scripts/ux_recorder_cdp.py": 74.6,
         "scripts/ux_recorder_render.py": 66.44,
-        "scripts/ux_test_session.py": 0.0,
-        "scripts/sdlc/validate_buildspec.py": 78.12
+        "scripts/ux_test_session.py": 0.0
       }
     },
     "idp_sdk": {
@@ -384,20 +385,30 @@
       }
     },
     "main_stack_extensions": {
-      "total": 95.64,
+      "total": 93.86,
+      "conditions": {
+        "collected": 246,
+        "skipped": 0
+      },
       "files": {
-        "lambdas/apply_feature_config_preset/index.py": 88.54,
+        "lambdas/apply_feature_config_preset/index.py": 88.61,
         "lambdas/check_feature_entitlement/index.py": 89.57,
-        "lambdas/check_feature_entitlement/log_sanitizer.py": 74.0,
-        "lambdas/get_feature_launch_url/index.py": 85.33,
+        "lambdas/check_feature_entitlement/log_sanitizer.py": 70.0,
+        "lambdas/get_feature_launch_url/index.py": 86.63,
+        "lambdas/get_feature_launch_url/log_sanitizer.py": 70.0,
         "lambdas/list_catalog_features/index.py": 95.71,
+        "lambdas/list_catalog_features/log_sanitizer.py": 70.0,
         "lambdas/list_installed_features/index.py": 95.36,
+        "lambdas/list_installed_features/log_sanitizer.py": 70.0,
         "lambdas/register_feature/index.py": 96.43,
+        "lambdas/register_feature/log_sanitizer.py": 70.0,
         "lambdas/register_feature_hooks/hook_point_reachability.py": 100.0,
         "lambdas/register_feature_hooks/index.py": 91.19,
-        "lambdas/subscribe_feature/index.py": 84.87,
-        "lambdas/unsubscribe_feature/index.py": 88.79,
-        "lambdas/get_feature_launch_url/log_sanitizer.py": 74.0
+        "lambdas/register_feature_hooks/log_sanitizer.py": 74.0,
+        "lambdas/subscribe_feature/index.py": 92.37,
+        "lambdas/subscribe_feature/log_sanitizer.py": 70.0,
+        "lambdas/unsubscribe_feature/index.py": 91.67,
+        "lambdas/unsubscribe_feature/log_sanitizer.py": 70.0
       }
     },
     "idp_cli": {
@@ -407,8 +418,8 @@
         "idp_cli/chat.py": 100.0,
         "idp_cli/cli.py": 98.76,
         "idp_cli/display.py": 100.0,
-        "idp_cli/search_tracking_table.py": 100.0,
-        "idp_cli/parameters.py": 100.0
+        "idp_cli/parameters.py": 100.0,
+        "idp_cli/search_tracking_table.py": 100.0
       }
     },
     "idp_feature_sdk": {

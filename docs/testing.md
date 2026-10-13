@@ -336,10 +336,10 @@ path-filtered, and `Test Results` is a check run an action creates behind an `if
 so none of them reports on every PR and requiring one would leave a check pending
 forever and block every merge.
 
-Three details are worth knowing about what it reads. Eight of the ten shared gates
+Three details are worth knowing about what it reads. Ten of the twelve shared gates
 live in `developer-tests.yml` and the other two — the SRT scan and the dependency
 audit — in `security-checks.yml`; because a context is a *job*, and those two
-workflows hold four and two jobs respectively, the ten gates produce six
+workflows hold four and two jobs respectively, the twelve gates produce six
 requireable contexts. ⚠️ **Requiring only the lint context is therefore weaker than
 it looks**: the test suites are their own contexts, so all six have to be required
 for a red test run to block a merge. It reads **both** enforcement mechanisms,
