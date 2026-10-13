@@ -58,7 +58,11 @@ from idp_common.metering_units import (
     classify_absent_unit,
 )
 
-from .bedrock_cache_dimension_digest import load_digest, published_cache_rates
+from .bedrock_cache_dimension_digest import (
+    digest_offer_files,
+    load_digest,
+    published_cache_rates,
+)
 
 #: The two units this register is about. Not every token unit: a Bedrock entry
 #: omitting ``inputTokens`` is a different and simpler failure, already refused by
@@ -258,6 +262,146 @@ def test_the_committed_digest_describes_a_populated_price_list():
         f"({CACHE_DIMENSION_READING_DATE}) is not the date the committed digest "
         f"was retrieved ({digest['retrieved']}). A price is a dated fact and the "
         "two have to be the same reading"
+    )
+
+
+def _offer(offer_code: str, products: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """The smallest structure ``digest_offer_files`` reads, for the probe below."""
+    return {
+        "offerCode": offer_code,
+        "version": "1",
+        "publicationDate": "2026-10-13T00:00:00Z",
+        "products": {
+            sku: {"attributes": attributes} for sku, attributes in products.items()
+        },
+        "terms": {
+            "OnDemand": {
+                sku: {
+                    f"{sku}.term": {
+                        "priceDimensions": {
+                            f"{sku}.dim": {
+                                "unit": attributes.pop("_unit", "1K tokens"),
+                                "pricePerUnit": {"USD": attributes.pop("_usd")},
+                            }
+                        }
+                    }
+                }
+                for sku, attributes in products.items()
+            }
+        },
+    }
+
+
+@pytest.mark.unit
+def test_the_digest_extraction_reads_both_dimension_spellings():
+    """The derivation itself, probed offline against a synthetic offer file.
+
+    ``--refresh`` is the only thing that normally runs ``digest_offer_files``, so
+    without this the extraction rules are committed data whose producer nothing
+    exercises — and the rules are where the mistakes are. Four of them matter and
+    each is asserted here:
+
+    * **the two spellings.** The same dimension is
+      ``NovaLite-cache-read-input-token-count`` in the ``AmazonBedrock`` file and
+      ``MP:UGW1_CacheReadInputTokenCount-Units`` in the Anthropic one, so matching
+      is done on a ``-``/``_``/``:``-stripped lowercase form. A rule that read only
+      one spelling would report "no cache dimension" for every Claude model.
+    * **the tier exclusion.** Nova Premier publishes a cache-write dimension at
+      flex and priority only. Folding those in would record a rate for a tier this
+      project cannot invoke.
+    * **the per-token conversion.** One file prices in ``1K tokens`` and the other
+      in ``1M tokens``, a factor of a thousand apart, and a dimension priced in
+      anything else (an image, a model-hour) must be dropped rather than read as a
+      token rate.
+    * **the union across files**, since a model can appear in both.
+    """
+    bedrock = _offer(
+        "AmazonBedrock",
+        {
+            "nova": {
+                "model": "Toy Nova",
+                "usagetype": "USE1-ToyNova-cache-read-input-token-count",
+                "_usd": "0.0000150000",
+            },
+            "nova_write": {
+                "model": "Toy Nova",
+                "usagetype": "USE1-ToyNova-cache-write-input-token-count",
+                "_usd": "0.0000000000",
+            },
+            "nova_flex": {
+                "model": "Toy Nova",
+                "usagetype": "USE1-ToyNova-cache-read-input-token-count-flex",
+                "_usd": "0.0009990000",
+            },
+            "nova_image": {
+                "model": "Toy Nova",
+                "usagetype": "USE1-ToyNova-cache-read-input-token-count-image",
+                "_unit": "image",
+                "_usd": "0.0400000000",
+            },
+            "plain": {
+                "model": "Toy Plain",
+                "usagetype": "USE1-ToyPlain-input-tokens",
+                "_usd": "0.0001000000",
+            },
+        },
+    )
+    anthropic = _offer(
+        "AmazonBedrockFoundationModels",
+        {
+            "claude": {
+                "model": "Toy Claude",
+                "usagetype": "MP:UGW1_CacheReadInputTokenCount-Units",
+                "_unit": "1M tokens",
+                "_usd": "0.3600000000",
+            },
+            "claude_1h": {
+                "model": "Toy Claude",
+                "usagetype": "MP:UGW1_CacheWrite1hInputTokenCount-Units",
+                "_unit": "1M tokens",
+                "_usd": "7.2000000000",
+            },
+            # Same model as the other file carries, so the union is exercised.
+            "nova_eu": {
+                "model": "Toy Nova",
+                "usagetype": "EUW1-ToyNova-cache-read-input-token-count",
+                "_usd": "0.0000172500",
+            },
+        },
+    )
+
+    digest = digest_offer_files([bedrock, anthropic])
+
+    assert digest["model_count"] == 3
+    assert [source["offer_code"] for source in digest["sources"]] == [
+        "AmazonBedrock",
+        "AmazonBedrockFoundationModels",
+    ]
+
+    nova = digest["models"]["Toy Nova"]
+    # 1.5e-08 from us-east-1 and 1.725e-08 from the second file, unioned; the flex
+    # tier excluded; the image dimension dropped for not being priced in tokens.
+    assert nova["cacheReadInputTokens"] == ["1.5e-08", "1.725e-08"]
+    assert nova["cacheWriteInputTokens"] == ["0"], (
+        "a dimension AWS publishes at exactly zero must be recorded as '0' and not "
+        "dropped: that is what tells a reader the unit is free rather than unread"
+    )
+
+    claude = digest["models"]["Toy Claude"]
+    assert claude["cacheReadInputTokens"] == ["3.6e-07"], (
+        "the CamelCase spelling was not matched, or the 1M-tokens divisor was not "
+        "applied"
+    )
+    assert claude["cacheWriteInputTokens"] == [], (
+        "the one-hour-TTL cache write was counted; IDP writes five-minute cache "
+        "points only"
+    )
+
+    plain = digest["models"]["Toy Plain"]
+    assert plain["cacheReadInputTokens"] == []
+    assert plain["token_dimension_count"] == 1, (
+        "token_dimension_count is what makes an empty cache list readable as a "
+        "measured absence rather than as a failed read"
     )
 
 
