@@ -441,7 +441,33 @@ def cell_stats(rows):
 # them would delete lines carrying values — and "every deleted line is punctuation"
 # is exactly the property that makes a backfill of this size checkable as additive.
 # Compacting them is a reformat of untouched data and belongs in its own change.
-COMPACT_PAYLOAD_KEYS = ("calibration_curve", "calibration", "conf_coverage")
+#
+# `processing_issue_detail` and the cell-level `processing_issues` block join them for
+# a different reason, and the numbers are why rather than the shape (#1378). The
+# detail list carries issues VERBATIM, and nothing bounds how many a document has:
+# `message` has no size ceiling at all, and `MAX_DETAIL_STRING_BYTES` is per string
+# LEAF rather than per payload. Measured by running `write_summary`: a 39-row grid
+# with 5 sections × 1 realistic issue is 708 KB, the same grid at 20 sections × 3
+# issues is 7.8 MB (today's largest committed summary is 8.8 MB), a 130-run grid of
+# that is 24.8 MB, and 20 × 3 maximal issues is 60.3 MB. Emptying the detail list
+# takes the busy grid to 60 KB, so essentially all of it is the detail. Expanded, ten
+# issues per document renders 409,533 lines — three times the 130k figure the comment
+# above calls "a diff nobody reads by eye". Compact, the same data is −72% lines and
+# −23% bytes, at one line per issue.
+#
+# The list branch of `_reserve_compact_payloads` propagates the key to each element,
+# so a list of issue dicts compacts per issue. That is a deliberate exception to the
+# "no key a reader scans for" rule above — `message` is very much read — and the
+# trade is taken because one long line per issue is still readable where a 400k-line
+# artifact is not, and because the alternative (capping the list) would break the
+# property the change exists for: every emitted issue reaches the summary.
+COMPACT_PAYLOAD_KEYS = (
+    "calibration_curve",
+    "calibration",
+    "conf_coverage",
+    "processing_issue_detail",
+    "processing_issues",
+)
 
 # Named *PLACEHOLDER* rather than *TOKEN*: Bandit's B105 matches on the identifier, so a
 # module-level constant whose name contains "token" and whose value is a string literal is
@@ -947,6 +973,17 @@ def _missing_metric_notes(cur, base):
             # A `_stats` block, so "collected" means it saw at least one observation.
             cur_present = bool(cur_value) and bool(cur_value.get("n"))
             base_present = bool(base.get(metric)) and bool(base[metric].get("n"))
+        elif metric == "processing_issues":
+            # `cell_issues` returns a populated dict for every cell, so plain
+            # truthiness would read as "collected" on a grid that measured none of
+            # it — the KMS-pending-deletion case this function's docstring names,
+            # and the one direction it was added to catch. `n_runs_scored` is the
+            # count of rows that actually carry the figure, so it is zero exactly
+            # when nothing here was measured.
+            cur_present = bool(cur_value) and bool(cur_value.get("n_runs_scored"))
+            base_present = bool(base.get(metric)) and bool(
+                base[metric].get("n_runs_scored")
+            )
         else:
             cur_present, base_present = bool(cur_value), bool(base.get(metric))
         if cur_present and not base_present:

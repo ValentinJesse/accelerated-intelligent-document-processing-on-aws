@@ -73,10 +73,12 @@ it — no effect, or no opportunity? `forced_tool_honored_rate` (a forced tool t
 answered in prose has measured nothing), `coercions` / `coercion_refusals`, and
 `validation_valid_rate` are reported per run and rolled up per cell.
 
-**Did the pipeline warn about anything?** Extraction, classification and assessment
-emit structured `ProcessingIssue`s — `extraction_rows_below_ocr_estimate`,
-`assessment_coverage_incomplete`, `extraction_validation_failed` and the rest — and
-`analyze.py` records them per run as `processing_issues` (the count, `0` on a clean
+**Did the pipeline warn about anything?** Five stages emit structured
+`ProcessingIssue`s — extraction, classification and assessment from inside the
+services, plus rule validation and postprocessing from the pipeline handlers —
+covering 28 codes including `extraction_rows_below_ocr_estimate`,
+`assessment_coverage_incomplete` and `extraction_validation_failed`. `analyze.py`
+records them per run as `processing_issues` (the count, `0` on a clean
 run and never null), `processing_issues_by_severity` / `_by_code` / `_by_stage`
 (tallies), and `processing_issue_detail` (every issue verbatim, which is where the
 message a reader needs lives). `cell_stats` merges the tallies per cell over **all**
@@ -92,16 +94,31 @@ as a silent one. Nothing in the recorder enumerates issue codes: the tallies are
 keyed on each issue's own values, so a code added to any service is recorded without
 a harness change.
 
-⚠️ **Two stages are outside this, and a zero does not cover them.** The figures come
-from the section's `result.json`, which holds the issues of every stage up to and
-including assessment. `rule_validation` and `postprocessing` record onto the section
-*after* that, and nothing rewrites the object afterwards — so their issues reach the
-DynamoDB tracking row only, and a `processing_issues: 0` is silent about them rather
-than evidence they did not fire. The tracking row is not read instead because it
-would need de-duplicating against the S3 copy of everything earlier, and it is
-deleted with its stack while the S3 artifacts outlive it. The boundary is pinned by
-a universe-closure test over the stage constants, so a third such stage fails that
-test rather than going quietly unread.
+⚠️ **A zero here does not cover everything, and this is the part to know before
+trusting one.** The figures come from the section's `result.json`. Three things
+record onto the section's DynamoDB record *after* that file is written, and nothing
+rewrites it afterwards, so a `processing_issues: 0` is silent about them rather than
+evidence they did not fire:
+
+- **The assessment degrade and skip pair** — `assessment_failed_confidence_unavailable`
+  and `assessment_skipped_confidence_unavailable`. These are the ones that matter.
+  They are **error** severity on a document that **completes**, because not failing
+  it is the whole purpose of that path, so a section that came back with *no
+  confidence scores at all* reads here as `processing_issues: 0, success: true` with
+  no `status` to fall back on. And they are live in what you measure: across
+  `results/v0.6.11/`, `resolved.assessment` is `separate` on 4,192 rows against 516
+  `integrated` and 257 `off`, and the skip path is the standalone one.
+- **`rule_validation` and `postprocessing`** — smaller, because these accompany a
+  document the harness already records as failed, so what is lost is the reason
+  rather than the event.
+
+The tracking record is not read instead because it would need de-duplicating against
+the S3 copy of everything earlier, it is another large attribute fetched per run, and
+it is deleted with its stack while the S3 artifacts outlive it. So the boundary is
+declared and closed: universe-closure tests over the declared stage constants and
+over the codes `assessment/degradation.py` declares, plus a computed check that that
+module still performs no S3 write, so a third such stage or code — or the boundary
+ceasing to be true — fails a test rather than going quietly unread.
 
 Scoring is **resolver-free** — it reads S3 output and DynamoDB metering directly, so it
 works on any stack version (useful for cross-release comparisons).

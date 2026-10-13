@@ -786,24 +786,43 @@ def score_processing_issues(sections):
     every lossy count it reported.
 
     Read off the same place :func:`score_audit_metadata` reads its audit block: the
-    section's ``result.json`` ``metadata``. That key holds the issues of every stage
-    that runs up to and including assessment, not just extraction's own, because
-    extraction preserves the issues of stages it does not own (``owned_stages`` in
-    ``extraction/service.py``) and assessment merges into the same key rather than
-    replacing it.
+    section's ``result.json`` ``metadata``. More than extraction's own issues reach
+    that key — extraction preserves the issues of stages it does not own
+    (``owned_stages`` in ``extraction/service.py``) and assessment merges into it
+    rather than replacing it — but it is **not** the complete per-section set, and
+    the difference matters more than the mechanisms do.
 
-    ⚠️ **Two stages are outside that, and reading S3 cannot see them.**
-    ``rule_validation`` and ``postprocessing`` record onto the section through
-    ``document_failure.record_section_failure`` (from the handlers in
-    ``patterns/unified/src/``), and both run *after* assessment with nothing
-    rewriting the section's ``result.json`` afterwards — so their issues reach the
-    DynamoDB tracking row and never the object this reads. The tracking row is not
-    used instead, for three reasons that all point the same way: it would need
-    de-duplication against the S3 copy of every earlier stage's issues, it means a
-    second large attribute fetched per run on a path that already scans, and it is
-    gone as soon as the stack is (three release stacks already are), where the S3
-    artifacts outlive it. ``test_processing_issues_recorded.py`` closes the
-    ``*_STAGE`` universe against this boundary, so a *third* such stage fails there
+    ⚠️ **What this cannot see, and why a ``0`` here is not a clean bill of health.**
+    Everything below records onto the section's DynamoDB record and never into the
+    S3 object this reads, because nothing rewrites ``result.json`` afterwards:
+
+    * ``assessment``'s **degrade and skip** pair —
+      ``assessment_failed_confidence_unavailable`` and
+      ``assessment_skipped_confidence_unavailable``, declared in
+      ``assessment/degradation.py``, whose own docstring says that path
+      "deliberately does not rewrite that file", and whose five
+      ``skip_section_no_confidence`` call sites in ``assessment/service.py`` each
+      ``return document`` before the write. These are the ones to worry about: they
+      are **error** severity on a document that **completes** — not failing it is
+      the whole point of the path — so a section that came back with no confidence
+      scores at all reads here as ``processing_issues: 0, success: true``, with no
+      ``status`` to fall back on. And it is live where it counts: over the committed
+      ``results/v0.6.11/*/summary.json`` rows, ``resolved.assessment`` is
+      ``separate`` on 4,192 rows against 516 ``integrated`` and 257 ``off``, and the
+      skip sites are on the standalone path.
+    * ``rule_validation`` and ``postprocessing``, recorded through
+      ``document_failure.record_section_failure`` from the handlers in
+      ``patterns/unified/src/``. Smaller, because these accompany a document the
+      harness already records as failed: what is lost is the reason, not the event.
+
+    The DynamoDB record is not read instead, for three reasons that point the same
+    way: it would need de-duplicating against the S3 copy of every earlier stage's
+    issues, it is another large attribute fetched per run on a path that already
+    scans, and it is deleted with its stack (three release stacks already are) where
+    the S3 artifacts outlive it. So the boundary is **declared and closed** instead:
+    ``test_processing_issues_recorded.py`` partitions every declared stage and every
+    code declared in ``degradation.py`` across what reaches ``result.json`` and a
+    named boundary list, so a *third* such stage or a *third* such code fails there
     rather than going quietly unread.
 
     Nothing here enumerates issue types. The tallies are keyed on each issue's own
@@ -851,6 +870,17 @@ def score_processing_issues(sections):
             if not isinstance(entry, dict):
                 malformed += 1
                 why.append(f"issue entry is {type(entry).__name__}, not a dict")
+                continue
+            # An entry with no `code` is not an issue type, it is malformed output.
+            # `{}` would otherwise become a real issue tallied under `""` for all
+            # three axes, which reads as a warned run with an unnameable cause. The
+            # test is STRUCTURAL — the identifying field is absent — not a check
+            # against any list of known codes, so a code nobody has written yet is
+            # still recorded, and an emitter that stopped setting `code` would show
+            # up here as malformed rather than vanish.
+            if not str(entry.get("code") or "").strip():
+                malformed += 1
+                why.append("issue entry carries no code")
                 continue
             # `isinstance(entry, dict)` is not enough to admit it to the model.
             # `ProcessingIssue.__post_init__` byte-truncates `root_cause`, so an

@@ -85,10 +85,15 @@ ISSUE_CODE_PASS_THROUGH_SITES = {
     ("document_failure.py", "record_section_failure"),
 }
 
-# Discovery must find at least one code from each stage that emits them. A rule that
-# silently stopped resolving one service's sites would otherwise leave the
-# parametrised coverage below looking complete.
-STAGES_THAT_EMIT = ("extraction", "classification", "assessment")
+# Modules that DECLARE processing-issue codes or stages as module constants rather
+# than spelling them at the construction site. `document_failure.py` is the one that
+# matters: it declares `rule_validation_failed`, `rule_validation_not_consolidated`,
+# `section_processing_failed` and both of the stage names, and its own
+# `ProcessingIssue(...)` call is a pass-through taking a caller's diagnosis — so an
+# AST walk of the construction sites alone finds 24 codes and 3 stages where the tree
+# declares 28 and 5, and looks complete. `scripts/tests/test_failure_code_ui_parity.py`
+# already treats these two modules as the authority for the same reason.
+DECLARING_MODULES = ("document_failure.py", "extraction/failure.py")
 
 # Stages whose issues this reader CANNOT see, and why — one entry, one stage's worth
 # of reason. Both record onto the section through
@@ -102,7 +107,7 @@ STAGES_THAT_EMIT = ("extraction", "classification", "assessment")
 # test below partitions every `*_STAGE` constant in `document_failure.py` across the
 # covered set and this one, so a THIRD such stage fails rather than being silently
 # unread — which is the failure mode the whole issue is about.
-STAGES_NOT_IN_RESULT_JSON = {
+STAGES_EXCLUDED_FROM_RESULT_JSON = {
     "rule_validation": (
         "patterns/unified/src/rule-validation-function and "
         "rule-validation-orchestration-function record onto the section after "
@@ -113,6 +118,28 @@ STAGES_NOT_IN_RESULT_JSON = {
         "after assessment; nothing rewrites result.json"
     ),
 }
+
+# The same boundary one level finer, and the half that actually costs something.
+# These two are `assessment`-stage codes, so the stage list above does not reach
+# them: `assessment/degradation.py` states in its own docstring that the degrade path
+# "deliberately does not rewrite that file", and every one of
+# `skip_section_no_confidence`'s call sites in `assessment/service.py` returns before
+# the result.json write. They are ERROR severity on a document that COMPLETES, so
+# unlike the failure-path codes above there is no `status` to fall back on — a
+# section with no confidence scores at all reads as clean here.
+#
+# Derived-and-equality-checked rather than listed as a judgement: the closure test
+# below compares this against the codes `degradation.py` declares AND computes the
+# premise the boundary rests on (that module performs no S3 write), so a third code
+# there fails, and the entry becoming wrong because degradation started writing
+# result.json fails too.
+CODES_EXCLUDED_FROM_RESULT_JSON = {
+    "assessment_failed_confidence_unavailable",
+    "assessment_skipped_confidence_unavailable",
+}
+
+#: Call-shaped source fragments that count as writing to S3, for the premise above.
+S3_WRITE_MARKERS = ("write_content(", "put_object(", "upload_file(", "upload_fileobj(")
 
 
 def _string_constants(tree):
@@ -258,10 +285,34 @@ def processing_issue_universe():
                 codes |= got["code"]
                 severities |= got["severity"] or set()
                 stages |= got["stage"] or set()
-    return codes, severities, stages, unresolved
+    # ...plus the codes and stages DECLARED as module constants in the modules whose
+    # construction site is a pass-through. Without this the walk returns 24 codes and
+    # 3 stages where the tree declares 28 and 5 — and the four it misses are the ones
+    # whose issues this reader cannot see, so the omission hid the finding as well as
+    # narrowing the coverage.
+    #
+    # Kept as a SEPARATE set from the walk's, because the difference is the finding:
+    # a stage with a construction site inside a service is one whose issues travel
+    # with that service's own writes, while a stage that exists only as a declared
+    # constant handed to the `document_failure` pass-through is one this reader has
+    # to reason about. The closure test below is that difference, as an equality.
+    declared_stages: set[str] = set()
+    for rel in DECLARING_MODULES:
+        constants = _string_constants(ast.parse((IDP_COMMON / rel).read_text("utf-8")))
+        codes |= {v for k, v in constants.items() if k.endswith("_CODE")}
+        declared_stages |= {v for k, v in constants.items() if k.endswith("_STAGE")}
+    return codes, severities, stages, declared_stages, unresolved
 
 
-CODES, SEVERITIES, STAGES, UNRESOLVED = processing_issue_universe()
+#: ``SITE_STAGES`` are the stages with a ``ProcessingIssue(...)`` construction site
+#: inside a service, so their issues travel with that service's own writes.
+#: ``DECLARED_STAGES`` are the stage names declared as constants and handed to the
+#: ``document_failure`` pass-through. ``STAGES`` is every stage either way, and is what
+#: the recorder must be agnostic to.
+CODES, SEVERITIES, SITE_STAGES, DECLARED_STAGES, UNRESOLVED = (
+    processing_issue_universe()
+)
+STAGES = SITE_STAGES | DECLARED_STAGES
 
 
 def test_the_discovered_issue_universe_is_not_empty():
@@ -276,7 +327,8 @@ def test_the_discovered_issue_universe_is_not_empty():
     # A floor, not an equality: a new issue type raises the count and costs nothing,
     # while a resolution rule that stopped reading one service's sites would drop it
     # and is the direction that hides.
-    assert len(CODES) >= 24, sorted(CODES)
+    assert len(CODES) >= 28, sorted(CODES)
+    assert len(STAGES) >= 5, sorted(STAGES)
 
 
 def test_discovery_reaches_the_code_this_issue_is_about():
@@ -289,9 +341,117 @@ def test_discovery_reaches_the_code_this_issue_is_about():
     assert "classification_failed" in CODES
 
 
-@pytest.mark.parametrize("stage", STAGES_THAT_EMIT)
-def test_discovery_reaches_every_emitting_stage(stage):
-    assert any(code.startswith(stage) for code in CODES), sorted(CODES)
+@pytest.mark.parametrize("stage", sorted(SITE_STAGES))
+def test_discovery_reaches_every_stage_with_a_construction_site(stage):
+    """Parametrised over the stages DISCOVERED, not over a list here.
+
+    The inventory was hand-written (`extraction`, `classification`, `assessment`) and
+    that was the file's one authored universe: had it been derived it would have held
+    `rule_validation` and `postprocessing` too and gone red, which is how a
+    hand-written inventory hides exactly the thing it is meant to cover.
+
+    The ``<stage>_`` code-naming convention holds for these three and not for the
+    pass-through stages (``postprocessing``'s code is ``section_processing_failed``),
+    which is itself the difference the closure below is about.
+    """
+    assert any(code.startswith(stage) for code in CODES), (stage, sorted(CODES))
+
+
+@pytest.mark.parametrize("stage", sorted(STAGES))
+def test_an_issue_from_any_stage_is_recorded(stage, tmp_path):
+    """The axis a stage-keyed filter would exploit.
+
+    There was no parametrisation over stages at all, so
+    ``if entry.get("stage") == "ocr": continue`` — or any other stage rule — passed
+    the suite. Codes and severities each had one; this is the third.
+    """
+    summary, _ = _written(
+        tmp_path,
+        [
+            _row(
+                "c",
+                "d.pdf",
+                [_section(_issue(f"{stage}_something_went_wrong", stage=stage))],
+            )
+        ],
+    )
+    (out,) = summary["rows"]
+    assert out["processing_issues"] == 1
+    assert out["processing_issues_by_stage"] == {stage: 1}
+
+
+def test_the_codes_outside_result_json_are_exactly_the_degradation_pair():
+    """Closure one level finer than the stage list, on the half that costs something.
+
+    ``assessment_failed_confidence_unavailable`` and
+    ``assessment_skipped_confidence_unavailable`` are ``assessment``-stage codes, so
+    the stage boundary does not reach them, and they are **error** severity on a
+    document that **completes** — there is no ``status`` to fall back on. Both are in
+    the discovered 24 and both are recorded correctly by the parametrised test above
+    *when injected*, which is precisely why this is needed: that green parametrisation
+    says nothing about whether the pipeline can put them where the reader looks.
+
+    Equality, so a third code declared in ``degradation.py`` fails here.
+    """
+    constants = _string_constants(
+        ast.parse((IDP_COMMON / "assessment" / "degradation.py").read_text("utf-8"))
+    )
+    declared = {v for k, v in constants.items() if k.endswith("_CODE")}
+    assert declared, "no *_CODE constants in assessment/degradation.py"
+    assert declared == CODES_EXCLUDED_FROM_RESULT_JSON, sorted(
+        declared ^ CODES_EXCLUDED_FROM_RESULT_JSON
+    )
+    # Non-vacuity: these have to be codes the discovery really finds, or the boundary
+    # is describing something that does not exist.
+    assert CODES_EXCLUDED_FROM_RESULT_JSON <= CODES
+
+
+def test_the_premise_behind_that_boundary_is_computed_not_asserted():
+    """The boundary holds *because* ``degradation.py`` writes no S3 object. That is
+    computable, so it is computed: if the module ever gains a write, this entry is
+    wrong in the direction that under-reports, and the failure says to re-check it
+    rather than leaving a stale reason in place.
+
+    Its own docstring says the same thing in prose — "this degrade path deliberately
+    does not rewrite that file" — and prose is what goes stale.
+    """
+    source = (IDP_COMMON / "assessment" / "degradation.py").read_text("utf-8")
+    writes = [m for m in S3_WRITE_MARKERS if m in source]
+    assert not writes, (
+        f"assessment/degradation.py now contains {writes}. If it writes the section's "
+        "result.json, CODES_EXCLUDED_FROM_RESULT_JSON is wrong and the recorder's docstring "
+        "and docs/benchmarking/index.md overstate the boundary."
+    )
+    # And the marker list is live rather than decorative: the same probe must find a
+    # write in a module that definitely has one.
+    assert any(
+        m in (IDP_COMMON / "extraction" / "service.py").read_text("utf-8")
+        for m in S3_WRITE_MARKERS
+    ), (
+        "S3_WRITE_MARKERS matches nothing even where a write exists, so the check above is vacuous"
+    )
+
+
+def test_every_skip_site_returns_before_the_result_json_write():
+    """The other half of the same premise, for the skip path rather than the degrade
+    path. ``skip_section_no_confidence``'s callers reach the result.json write only if
+    one of them fails to return, and that is what would silently turn these codes from
+    invisible into visible — or, worse, leave them half visible."""
+    source = (IDP_COMMON / "assessment" / "service.py").read_text("utf-8")
+    lines = source.splitlines()
+    sites = [
+        i
+        for i, line in enumerate(lines)
+        if "skip_section_no_confidence(" in line and "import" not in line
+    ]
+    assert len(sites) >= 5, f"expected the five known skip sites, found {len(sites)}"
+    for i in sites:
+        window = lines[i : i + 25]
+        assert any(line.strip().startswith("return ") for line in window), (
+            f"assessment/service.py:{i + 1} calls skip_section_no_confidence and the "
+            "next 25 lines contain no return. If execution now continues to the "
+            "result.json write, CODES_EXCLUDED_FROM_RESULT_JSON is wrong."
+        )
 
 
 def test_every_declared_stage_is_either_covered_or_a_named_boundary():
@@ -305,32 +465,23 @@ def test_every_declared_stage_is_either_covered_or_a_named_boundary():
     reader cannot see them. The stage NAMES are declared in ``document_failure.py``,
     so that is the authority to close against: every ``*_STAGE = "..."`` constant
     must be either a stage whose issues reach the section's ``result.json`` or a
-    named entry in :data:`STAGES_NOT_IN_RESULT_JSON`. A third such stage added later
+    named entry in :data:`STAGES_EXCLUDED_FROM_RESULT_JSON`. A third such stage added later
     lands in neither and fails here.
     """
-    source = IDP_COMMON / "document_failure.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    declared = {
-        value
-        for name, value in _string_constants(tree).items()
-        if name.endswith("_STAGE")
-    }
-    assert declared, f"no *_STAGE constants found in {source}"
-    unaccounted = declared - STAGES - set(STAGES_NOT_IN_RESULT_JSON)
-    assert not unaccounted, (
-        f"{sorted(unaccounted)} is a processing-issue stage that is neither "
-        "discovered as emitting into a section's result.json nor declared in "
-        "STAGES_NOT_IN_RESULT_JSON. Decide which it is: if its issues reach "
-        "metadata.processing_issues the reader already covers it and discovery "
-        "should find it; if they do not, say so there with the reason, because "
-        "otherwise this harness reports those runs as clean."
-    )
-    # Non-vacuity in the other direction: the boundary list must name stages that
-    # really are outside the covered set, or it is pre-declaring whatever next
-    # takes those names.
-    assert not (set(STAGES_NOT_IN_RESULT_JSON) & STAGES)
-    assert set(STAGES_NOT_IN_RESULT_JSON) <= declared, sorted(
-        set(STAGES_NOT_IN_RESULT_JSON) - declared
+    assert STAGES, "no stages discovered at all"
+    assert SITE_STAGES, "no stage has a construction site inside a service"
+    assert DECLARED_STAGES, "the declaring-module route found nothing"
+    # An EQUALITY with no authored inventory on either side: the left is every stage
+    # whose only construction is the pass-through, the right is the boundary this
+    # reader declares. A sixth stage lands in the left and not the right and fails
+    # here; a boundary entry that stops being outside the sites fails here too.
+    outside = STAGES - SITE_STAGES
+    assert outside == set(STAGES_EXCLUDED_FROM_RESULT_JSON), (
+        f"{sorted(outside ^ set(STAGES_EXCLUDED_FROM_RESULT_JSON))}: a processing-issue "
+        "stage is either discovered emitting from inside a service, whose writes "
+        "carry its issues into the section's result.json, or declared in "
+        "STAGES_EXCLUDED_FROM_RESULT_JSON with the reason it is not. Neither is where this "
+        "stage is, and a stage in neither is one this harness reports as clean."
     )
 
 
@@ -713,6 +864,46 @@ def test_malformed_issue_entries_are_counted_not_dropped():
     assert out["processing_issues"] == 1
     assert out["processing_issues_malformed"] == 3
     assert out["processing_issues_by_code"] == {"extraction_sparse": 1}
+    # The reason names the shape that was wrong, not just that something was. A count
+    # with no reason cannot be acted on, and the reason text is unasserted unless it
+    # is read — measured: dropping the word "not" from each reason survived.
+    why = out["processing_issues_malformed_why"]
+    assert why == [
+        "issue entry is str, not a dict",
+        "issue entry is int, not a dict",
+        "processing_issues is str, not a list",
+    ]
+
+
+def test_an_entry_with_no_code_is_malformed_not_an_issue_with_an_empty_name():
+    """``{}`` in the list would otherwise become a real issue tallied under ``""`` on
+    all three axes — a warned run with an unnameable cause, which is worse than
+    either a clean reading or a malformed one.
+
+    The test is STRUCTURAL: the identifying field is absent. It is not a check
+    against any list of known codes, so an invented code still records — asserted
+    here beside the empty one so the guard cannot be widened into a recognition rule
+    without this failing.
+    """
+    out = analyze.score_processing_issues(
+        [
+            {
+                "metadata": {
+                    "processing_issues": [
+                        {},
+                        {"severity": "error", "message": "no code"},
+                        {"code": "   ", "message": "blank code"},
+                        _issue("a_code_no_service_emits_yet").to_dict(),
+                    ]
+                }
+            }
+        ]
+    )
+    assert out["processing_issues"] == 1
+    assert out["processing_issues_by_code"] == {"a_code_no_service_emits_yet": 1}
+    assert out["processing_issues_by_severity"] == {"warning": 1}
+    assert out["processing_issues_malformed"] == 3
+    assert out["processing_issues_malformed_why"] == ["issue entry carries no code"] * 3
 
 
 def test_each_issue_is_normalised_through_the_shipped_model_not_a_lookalike():
@@ -787,6 +978,10 @@ def test_an_issue_entry_the_model_refuses_is_counted_not_raised():
     assert out["processing_issues_malformed"] == 1
     (why,) = out["processing_issues_malformed_why"]
     assert "extraction_incomplete" in why and "AttributeError" in why
+    assert "would not read" in why
+    # The code is quoted so it can be grepped for, and elided so a pathological one
+    # cannot put the document's content in the reason.
+    assert why.startswith("issue entry 'extraction_incomplete' would not read: ")
 
 
 def test_a_document_whose_every_issue_is_unparseable_does_not_read_as_clean():
@@ -1048,6 +1243,23 @@ def test_the_recorder_reads_the_same_place_the_audit_block_does():
 def test_render_tally_is_stable_and_blank_when_empty():
     assert analyze.render_tally({"b": 2, "a": 1}) == "a=1 b=2"
     assert analyze.render_tally({}) is None
+
+
+def test_render_tally_does_not_truncate_a_tally_that_is_long():
+    """A cell tally merges across every run in the cell, so it can hold every code in
+    the tree at once — and the printed notice renders a *cell* tally, not a row's. A
+    length cap there would corrupt the one line a reader of the console sees.
+    Measured: ``render_tally(...)[:200]`` survived the suite until this existed.
+    """
+    tally = {code: 7 for code in sorted(CODES)}
+    rendered = analyze.render_tally(tally)
+    assert len(rendered) > 400, len(rendered)
+    for code in CODES:
+        assert f"{code}=7" in rendered, code
+    # Every entry, and nothing but: the rendering is exactly the tally.
+    assert dict(part.rsplit("=", 1) for part in rendered.split(" ")) == {
+        code: "7" for code in CODES
+    }
 
 
 def test_the_fixtures_are_reachable_at_all():
