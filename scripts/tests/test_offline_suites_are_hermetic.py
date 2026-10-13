@@ -77,6 +77,11 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import make_recipes  # noqa: E402
+
+sys.path.pop(0)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = REPO_ROOT / "Makefile"
 RECIPE_TARGET = "test-packages-cicd"
@@ -749,6 +754,55 @@ def test_library_integration_target_keeps_the_real_aws_environment():
         + "\n  ".join(wrapped)
         + "\n\nIntegration tests need the machine's real credentials and region; "
         "the wrapper removes both."
+    )
+
+
+def test_the_integration_recipe_really_resolves_the_machine_s_region():
+    """The same inverse assertion, measured rather than read.
+
+    The check above reads one spelling: it fails if the recipe names
+    ``$(PYTEST_HERMETIC)``. Anything else that strips the environment satisfies it
+    — ``$(HERMETIC_AWS) $(PYTHON) -m pytest``, an inlined ``env -u AWS_PROFILE``,
+    or a future wrapper that merges the two — and the suite then fails to
+    authenticate for a reason no test names.
+
+    So this runs the command ``make test-integration`` would actually run, with a
+    region supplied through the environment, and requires that a boto3 client
+    built under it resolves that region. It is the mirror image of
+    :func:`test_wrapper_really_leaves_no_resolvable_region`: the same measurement,
+    the opposite expected answer, on the one target that must keep what the others
+    must lose.
+
+    This is not an argument against pinning that target's ``PYTHONPATH``, which is
+    a separate wrapper and is asserted in
+    ``test_first_party_pythonpath.test_the_integration_recipe_pins_this_checkout_too``.
+    """
+    command = make_recipes.dry_run_command(
+        LIBRARY_NON_HERMETIC_TARGET, LIBRARY_MAKEFILE.parent
+    )
+    probe = (
+        "import boto3\n"
+        "try:\n"
+        f"    client = boto3.client({PROBE_SERVICE!r})\n"
+        "except Exception as exc:\n"
+        "    print(type(exc).__name__)\n"
+        "else:\n"
+        "    print('RESOLVED', client.meta.region_name)\n"
+    )
+    result = make_recipes.run_probe(
+        command, probe, cwd=LIBRARY_MAKEFILE.parent, env=_polluted_env()
+    )
+    assert result.returncode == 0, (
+        f"the region probe failed to run under `{command}`: {result.stderr[-2000:]}"
+    )
+    assert result.stdout.strip() == f"RESOLVED {SENTINEL_REGION}", (
+        f"`make {LIBRARY_NON_HERMETIC_TARGET}` runs `{command}`, and under it a "
+        f"boto3 client answered {result.stdout.strip()!r} rather than the region "
+        f"the environment supplied. Integration tests call real AWS: something in "
+        f"that command is removing the region or the profile. See "
+        f"$({PYTEST_VAR}) — which this target must not use — and "
+        f"$(PYTEST_FIRST_PARTY), which pins PYTHONPATH and leaves the AWS "
+        f"environment alone."
     )
 
 
