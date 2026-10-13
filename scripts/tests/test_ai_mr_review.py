@@ -25,6 +25,7 @@ assert that the mocks are wired up, not that a review is any good.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -1799,6 +1800,72 @@ _COMMIT_TOKEN = re.compile(r"""['"]commit['"]""")
 GIT_COMMAND = "git"
 GIT_WRITE_SUBCOMMANDS = frozenset({"commit", "add", "config"})
 
+# The check every throwaway-repository writer has to call, held as a constant so
+# `test_every_throwaway_repository_runner_confirms_its_target` can compare an
+# `ast.Call`'s callee against it instead of searching the source text for it. A text
+# reading is satisfied by a commented-out call, by a call replaced with a bare string
+# spelling the name, and by this comment.
+GIT_TARGET_CHECKER = "_assert_git_target_is"
+
+# What the `writers` derivation in that test cannot see. It is a *text* reading of
+# one function at a time -- a function qualifies by spelling `GIT_COMMAND`'s value
+# and one of `GIT_WRITE_SUBCOMMANDS` as whole string literals in its own body -- so
+# it has the same class of slack as the `_committing_tests` selection above, written
+# down here in the same style rather than claimed closed. Each shape below was
+# measured by adding a fourth throwaway-repository writer in that shape and checking
+# whether this module went red:
+#
+#   * the command name taken from `GIT_COMMAND` rather than spelled `"git"` -- this
+#     PR introduced that constant, to stop the test matching its own source, so the
+#     repository's own constant is now the cheapest way to add an unseen writer;
+#   * the subcommand taken from a constant, or assembled (`"com" + "mit"`);
+#   * a whole command passed as one shell string (`"git commit -qm base"`), which
+#     spells no `"git"` token of its own;
+#   * a write through a subcommand outside the trio -- `stash`, `update-ref`,
+#     `reset`, `tag`. (`update-ref` is used here, in a function that also spells
+#     `add` and `commit`, so it is covered incidentally rather than by the rule.)
+#   * a writer split across two functions, the `"git"` literal in a runner and the
+#     subcommand in its caller: this derivation is per-function with no reachability
+#     walk, unlike `_committing_tests`, so neither half qualifies alone;
+#   * a runner bound to a `lambda` rather than a `def`;
+#   * a helper in `conftest.py` or another module, which this module's source does
+#     not contain.
+#
+# `len(writers) >= audited` cannot notice any of them: an unseen writer is simply
+# absent from the set, and that assertion only fails when writers are *lost*. The
+# cost of a miss is what #1309 already cost plus what a misdirected fixture cost
+# while this was being measured -- a junk commit, a placeholder author in the shared
+# configuration, and a repository-wide `core.hooksPath` redirect -- so the bound is
+# worth writing down rather than leaving to be inferred from a green run. Closing it
+# would need the call graph rather than the text, and none of these shapes occurs
+# here today.
+
+
+def _calls_by_name(node: ast.AST, name: str) -> bool:
+    """Whether ``node`` contains a real call to ``name``, read as a call.
+
+    Not as text. The text form was what this module shipped, and measured, it is
+    satisfied by a commented-out call, by a call replaced with a bare string
+    spelling the name, and by a docstring mentioning it -- three of the four ways a
+    control like this dies. Only whole-line deletion was caught, and commenting a
+    line out is the commoner way: someone bisecting, or silencing a fixture that
+    misbehaves locally. A ``#`` leaves no :class:`ast.Call` node behind, which is
+    what this sees and a substring search cannot.
+
+    An attribute callee (``helpers._assert_git_target_is(...)``) counts, because
+    refusing one would fail on an ordinary refactor rather than on a missing check.
+    """
+    return any(
+        (
+            child.func.id
+            if isinstance(child.func, ast.Name)
+            else getattr(child.func, "attr", None)
+        )
+        == name
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call)
+    )
+
 
 def _module_source() -> str:
     return Path(__file__).read_text(encoding="utf-8")
@@ -1821,8 +1888,6 @@ def _committing_tests(source: str | None = None) -> list[str]:
     through a class or through two helper levels today, so nothing else would
     measure either.
     """
-    import ast
-
     source = _module_source() if source is None else source
     tree = ast.parse(source)
 
@@ -1993,8 +2058,16 @@ def _assert_git_target_is(show_toplevel, repo: Path) -> None:
     runner, so the target is resolved exactly the way the caller's writes will
     resolve it -- a check that re-derived the path itself would pass while the
     caller wrote somewhere else.
+
+    Both sides of the first comparison are resolved. ``repo.parents`` on the
+    *unresolved* path does not see a symlink into this checkout -- measured, a
+    target under a symlink to the checkout root passed both halves where every
+    other hostile target was refused -- and a symlink is what a developer's own
+    scratch directory, or a container bind mount, ordinarily is.
     """
-    assert REPO_ROOT not in repo.parents and repo.resolve() != REPO_ROOT.resolve(), (
+    checkout = REPO_ROOT.resolve()
+    target = repo.resolve()
+    assert checkout not in target.parents and target != checkout, (
         f"{repo} is inside this checkout, so a correctly-passed target is still the "
         "wrong target. Everything after this line writes -- config, index, a commit "
         "-- so this has to be a throwaway directory, normally pytest's tmp_path."
@@ -2064,17 +2137,35 @@ def _nested_environment(policy_root: Path) -> dict[str, str]:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("case", "target_is_repo", "git_succeeds", "expected"),
+    ("case", "target", "resolved_to", "git_succeeds", "expected"),
     [
-        ("the-target-is-the-throwaway-repo", True, True, None),
-        ("git-resolved-this-checkout", False, True, "not the throwaway repository"),
-        ("git-answered-nothing", True, False, "failed (exit"),
+        ("the-target-is-the-throwaway-repo", "throwaway", "throwaway", True, None),
+        (
+            "git-resolved-this-checkout",
+            "throwaway",
+            "checkout-root",
+            True,
+            "not the throwaway repository",
+        ),
+        ("git-answered-nothing", "throwaway", "throwaway", False, "failed (exit"),
+        (
+            "the-target-is-the-checkout-root",
+            "checkout-root",
+            "checkout-root",
+            True,
+            "inside this checkout",
+        ),
     ],
 )
 def test_the_containment_refuses_a_target_it_cannot_confirm(
-    tmp_path: Path, case: str, target_is_repo: bool, git_succeeds: bool, expected
+    tmp_path: Path,
+    case: str,
+    target: str,
+    resolved_to: str,
+    git_succeeds: bool,
+    expected,
 ) -> None:
-    """The containment, driven directly in all three of its outcomes.
+    """The containment, driven directly in all four of its outcomes.
 
     It is the control that stands between a dropped target and a write into this
     checkout, and the write in question is not only a junk commit: ``git config``
@@ -2083,10 +2174,28 @@ def test_the_containment_refuses_a_target_it_cannot_confirm(
     directory that is then deleted -- and git commits happily through a hooks path
     naming a directory that does not exist. On a managed machine that silently
     turns the commit scanner off for every worktree until someone notices.
+
+    The fourth case passes the checkout root **itself**, and it is the likeliest
+    input rather than an edge: a dropped ``-C`` makes git fall back to the process
+    working directory, which under pytest is the checkout root and not a
+    subdirectory of it. Every other case here passes a child.
+
+    It is also what separates the two halves of the first assertion.
+    ``checkout not in checkout.parents`` is trivially true, so the parents half does
+    not refuse the root at all, and with only that half installed the checkout root
+    is an accepted target -- measured. The halves are not shown to be load-bearing
+    by a paired mutation, and it is worth being precise about why: a mutation
+    showing one matters once the other is gone shows it is *sufficient in the
+    other's absence*, which is the definition of redundancy. They are load-bearing
+    because each is the only half that refuses an input driven here -- the root
+    itself for the equality half, and a symlinked child, in
+    :func:`test_the_containment_refuses_a_target_symlinked_into_this_checkout`, for
+    the parents half.
     """
-    repo = tmp_path / "throwaway"
-    repo.mkdir()
-    reported = repo if target_is_repo else REPO_ROOT
+    places = {"throwaway": tmp_path / "throwaway", "checkout-root": REPO_ROOT}
+    places["throwaway"].mkdir()
+    repo = places[target]
+    reported = places[resolved_to]
 
     def show_toplevel():
         return subprocess.CompletedProcess(
@@ -2101,6 +2210,26 @@ def test_the_containment_refuses_a_target_it_cannot_confirm(
         return
     with pytest.raises(AssertionError, match=re.escape(expected)):
         _assert_git_target_is(show_toplevel, repo)
+
+
+@pytest.mark.unit
+def test_the_containment_refuses_a_target_symlinked_into_this_checkout(
+    tmp_path: Path,
+) -> None:
+    """A symlink is the one hostile target the unresolved form let through.
+
+    Measured: with ``repo.parents`` read on the unresolved path, a directory
+    *under* a symlink to the checkout root passed both halves, while the checkout
+    root, every child of it and an inconsistent resolution were all refused. The
+    equality half does not catch it either, because the path is a child rather than
+    the root. Symlinks are ordinary here -- a developer's scratch directory, a
+    container bind mount -- so this is the input that makes resolving both sides
+    load-bearing rather than tidy.
+    """
+    link = tmp_path / "link-to-the-checkout"
+    link.symlink_to(REPO_ROOT)
+    with pytest.raises(AssertionError, match="inside this checkout"):
+        _assert_git_target_is(lambda: None, link / "scratchjunk")
 
 
 @pytest.mark.unit
@@ -2134,10 +2263,15 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
 
     The set is derived rather than listed, and asserted non-empty and count-pinned,
     because a derivation that found nothing would make this pass over an empty
-    universe.
-    """
-    import ast
+    universe. What that derivation cannot see is written out above
+    :func:`_calls_by_name`; the count pin cannot notice any of it, because an unseen
+    writer is absent from the set rather than failing in it.
 
+    The call is read as a call, through :func:`_calls_by_name`, and not as a
+    substring of the function's source. That distinction is the whole of this
+    test's value: measured against the text form, commenting the three calls out
+    left this green.
+    """
     source = _module_source()
     tree = ast.parse(source)
 
@@ -2161,7 +2295,7 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
             if isinstance(child, ast.Constant) and isinstance(child.value, str)
         }
 
-    writers: dict[str, str] = {}
+    writers: dict[str, ast.AST] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -2170,7 +2304,7 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
             continue
         if not spelled & GIT_WRITE_SUBCOMMANDS:
             continue
-        writers[node.name] = ast.get_source_segment(source, node) or ""
+        writers[node.name] = node
 
     audited = 3
     assert len(writers) >= audited, (
@@ -2180,8 +2314,8 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
     )
     unchecked = sorted(
         name
-        for name, segment in writers.items()
-        if "_assert_git_target_is" not in segment
+        for name, node in writers.items()
+        if not _calls_by_name(node, GIT_TARGET_CHECKER)
     )
     assert not unchecked, (
         f"{unchecked} run a git write against a throwaway repository without calling "
@@ -2190,6 +2324,69 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
         "was invoked, which under pytest is this checkout. Call the check straight "
         "after `git init` and before the first write."
     )
+
+
+# (case id, a synthetic writer's source, whether the check must count it as calling)
+# `{c}` is the checker's name. The three negatives are the three mutations the
+# previous substring form passed, each measured against this module before this
+# probe existed; the positives are the spellings a real caller uses here or would
+# use after an ordinary refactor.
+_CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
+    ("a-direct-call", "def writer():\n    {c}(thunk, repo)\n", True),
+    (
+        "a-call-through-an-attribute",
+        "def writer():\n    helpers.{c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-nested-function",
+        "def writer():\n    def inner():\n        {c}(thunk, repo)\n    inner()\n",
+        True,
+    ),
+    (
+        "a-commented-out-call",
+        "def writer():\n    # {c}(thunk, repo)\n    pass\n",
+        False,
+    ),
+    (
+        "the-name-left-behind-as-a-bare-string",
+        'def writer():\n    "{c}: skipped"\n',
+        False,
+    ),
+    (
+        "the-name-left-behind-in-a-docstring",
+        'def writer():\n    """Calls {c} further down."""\n',
+        False,
+    ),
+    (
+        "the-name-referenced-but-never-called",
+        "def writer():\n    checker = {c}\n    del checker\n",
+        False,
+    ),
+    ("no-mention-at-all", "def writer():\n    pass\n", False),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source", "counts"),
+    [(source, counts) for _, source, counts in _CHECKER_CALL_SPELLINGS],
+    ids=[case for case, _, _ in _CHECKER_CALL_SPELLINGS],
+)
+def test_the_call_check_reads_a_call_and_not_the_text(
+    source: str, counts: bool
+) -> None:
+    """The assertion above is only worth having if these four negatives are red.
+
+    Three of them are the measured survivors of the substring form this replaced:
+    a commented-out call, a call replaced by a bare string spelling the name, and
+    the name in prose. Driven over synthetic sources rather than by mutating this
+    file, because the mutation is the thing being defended against and a test
+    cannot leave it installed.
+    """
+    body = source.format(c=GIT_TARGET_CHECKER)
+    node = ast.parse(body).body[0]
+    assert _calls_by_name(node, GIT_TARGET_CHECKER) is counts, body
 
 
 @pytest.mark.unit

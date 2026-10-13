@@ -317,6 +317,24 @@ def test_every_variable_the_loop_names_is_exported() -> None:
 _SENTINEL = "probe-sentinel-function"
 _HASHED_SENTINEL = "probe#sentinel-function"
 
+# One sentinel per splice position, and the prefixes are the point rather than
+# decoration: ``_unbuilt`` sorts before it compares, so a comparison that truncates
+# the **sorted** list is blind to every splice position unless the sentinel's name
+# sorts where it was spliced. ``probe-sentinel-function`` sorts to rank 9 of the 14
+# entries -- strictly interior, whatever line it sits on -- so measured,
+# ``set(sorted(set(expected))[:-1]) - built`` and ``set(sorted(set(expected))[1:]) -
+# built`` both passed all three positions, and a slice landing beside the
+# ``sorted(...)`` already in ``_unbuilt`` is a plausible edit. The alphabetically
+# last expected image today is ``summarization-function``, so ``zzz-`` sorts after
+# every real entry and ``aaa-`` before every one. The rank is asserted in the test
+# rather than assumed, so a rename that lands interior fails loudly instead of
+# quietly giving the property back.
+_POSITION_SENTINELS = {
+    "start-of-list": f"aaa-{_SENTINEL}",
+    "mid-list": _SENTINEL,
+    "end-of-list": f"zzz-{_SENTINEL}",
+}
+
 
 def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
     """Where the ``ExpectedImages`` block starts, and its lines verbatim.
@@ -515,7 +533,7 @@ def test_the_parse_sees_every_entry_whatever_its_spelling(
     )
 
 
-@pytest.mark.parametrize("position", ["start-of-list", "mid-list", "end-of-list"])
+@pytest.mark.parametrize("position", list(_POSITION_SENTINELS))
 def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
     position: str,
 ) -> None:
@@ -533,10 +551,33 @@ def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
     built`` both passed, and the first of those is the drop-the-tail shape this
     whole module exists to prevent. A single splice position cannot distinguish
     them; putting the sentinel first, in the middle and last does.
+
+    Document position alone is not enough, though, and that is why each position
+    brings its own sentinel from :data:`_POSITION_SENTINELS`: ``_unbuilt`` sorts
+    before it compares, so a comparison truncating the sorted list sees nothing of
+    where a line was spliced. Both orders are therefore asserted -- the document
+    position it landed in, and the sort rank it occupies -- so each case is a
+    measurement of the comparison in the order that comparison actually works in.
+
+    Two spellings remain uncovered and are left so deliberately, because closing
+    them needs an input nothing plausible writes: dropping a fixed interior index,
+    and dropping the element at ``len(expected) // 2``. Both survive. A comparison
+    that discards an interior element is not a shape a slice or a sort produces.
     """
+    sentinel = _POSITION_SENTINELS[position]
+    assert sentinel not in _built_images(), (
+        f"the {position} sentinel {sentinel} is a name {_buildspec_path().name} "
+        "really builds, so the subset check below could not flag it. Rename it."
+    )
+
     lines = _template_text().splitlines()
     start, block = _block_bounds()
     indent = _tail_indent(block)
+    assert len(block) >= 2, (
+        f"the {_PROPERTY} block is {len(block)} line(s) long, so the mid-list splice "
+        "index collapses onto the start-of-list one and two of these three cases "
+        "measure the same input. Splice at a named interior entry instead."
+    )
     index = {
         "start-of-list": 0,
         "mid-list": len(block) - 1,
@@ -545,21 +586,43 @@ def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
     mutated = (
         lines[: start + index]
         + [f"{indent}# a note about the entry below"]
-        + [f'{indent}- "{_SENTINEL}"']
+        + [f'{indent}- "{sentinel}"']
         + lines[start + index :]
     )
 
     parsed = _expected_images_in_text("\n".join(mutated) + "\n")
-    assert _SENTINEL in parsed, (
-        f"{_SENTINEL} was spliced in {position} after a comment and the parse did "
+    assert sentinel in parsed, (
+        f"{sentinel} was spliced in {position} after a comment and the parse did "
         "not return it"
     )
-    landed = {"start-of-list": parsed[0], "end-of-list": parsed[-1]}.get(position)
-    assert landed in (None, _SENTINEL), (
-        f"the {position} splice did not land where it was meant to, so a comparison "
-        f"discarding that end would still see it: {parsed}"
-    )
-    assert _unbuilt(parsed, _built_images()) == [_SENTINEL], (
+
+    by_sort = sorted(set(parsed))
+    if position == "mid-list":
+        assert sentinel not in (parsed[0], parsed[-1]), (
+            f"the mid-list splice landed at an end of the parse, so this case "
+            f"duplicates one of the other two and nothing measures the interior: "
+            f"{parsed}"
+        )
+        assert sentinel not in (by_sort[0], by_sort[-1]), (
+            f"the mid-list sentinel sorts to an end of {by_sort}, so under a "
+            "comparison that sorts before truncating this case duplicates one of "
+            "the other two"
+        )
+    else:
+        document_end = parsed[0] if position == "start-of-list" else parsed[-1]
+        assert document_end == sentinel, (
+            f"the {position} splice did not land where it was meant to, so a "
+            "comparison discarding that end of the document order would still see "
+            f"it: {parsed}"
+        )
+        sort_end = by_sort[0] if position == "start-of-list" else by_sort[-1]
+        assert sort_end == sentinel, (
+            f"{sentinel} does not sort to the {position} end of {by_sort}, so a "
+            "comparison that sorts before truncating would still see it. The "
+            "sentinel's name has to sort with the position it is spliced at."
+        )
+
+    assert _unbuilt(parsed, _built_images()) == [sentinel], (
         f"an unbuilt image spliced in {position} after a comment did not reach the "
         f"subset check: the parse returned {parsed}"
     )
