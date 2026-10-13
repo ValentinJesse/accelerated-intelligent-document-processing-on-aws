@@ -721,6 +721,9 @@ def test_the_cell_rollup_counts_the_runs_that_failed_too(tmp_path):
         "extraction_incomplete": 1,
         "extraction_rows_below_ocr_estimate": 1,
     }
+    # All three axes, not two: a mutation renaming this key survived a suite that
+    # asserted only the other two.
+    assert block["by_stage"] == {"extraction": 2}
 
 
 def test_a_cell_holding_a_row_that_was_never_scored_still_rolls_up(tmp_path):
@@ -792,6 +795,10 @@ def test_the_metric_is_registered_as_late_added_so_skipped_is_not_unchanged():
     rediscovering as a control that exists and is never consulted."""
     assert "processing_issues" in aggregate.LATE_ADDED_METRICS
     label = aggregate.LATE_ADDED_METRICS["processing_issues"]
+    # The label is what `compare_cells` prints, so it has to say where to look.
+    # Reading it out of the constant and comparing it to itself asserts nothing
+    # about its text — measured: a mutation changing the issue number survived.
+    assert "#1378" in label and "processing issues" in label
     cur = aggregate.cell_issues([_row("c", "d.pdf", [_section()])])
     assert aggregate._missing_metric_notes({"processing_issues": cur}, {}) == [
         (label, "baseline")
