@@ -428,7 +428,7 @@ _COVERAGE_EXEMPT = {
 # covered by nothing. The register's universe is pricing.yaml itself, which closes
 # that; ``test_cache_unit_omission_basis.py`` owns it and asserts both the
 # CACHEPOINT_SUPPORTED_MODELS and implicit-cacher conditions this module used to,
-# over all eleven entries rather than nine. See issue #1206.
+# over all eleven entries rather than eight. See issue #1206.
 _CACHE_OMISSION_REGISTERED = frozenset(
     entry.pricing_key.removeprefix("bedrock/")
     for entry in EXPECTED_CACHE_UNIT_OMISSIONS

@@ -75,18 +75,25 @@ DIGEST_PATH = os.path.join(
 #: well. That is not hypothetical: it is the error that put ``inputTokens`` at
 #: 5,580 published products instead of 4,909 in the sibling digest for #1212.
 #:
-#: ``inputTokens`` is here for a reason that is not pricing. It is what ties a
-#: recorded ``price_list_model`` to the pricing entry that cites it: the entry's
-#: own input rate has to be one AWS publishes for that model. Without it a basis
-#: could name a *different real model* with the same cache answer and nothing
-#: would notice — measured, naming ``NVIDIA Nemotron Nano 2`` (the 9B text model)
-#: where ``NVIDIA Nemotron Nano 2 VL`` (the 12B one this project prices) is meant
-#: left the suite green, because neither publishes a cache dimension and both
-#: carry 208 token-priced dimensions.
+#: ``inputTokens`` and ``outputTokens`` are here for a reason that is not
+#: pricing. They are what ties a recorded ``price_list_model`` to the pricing
+#: entry that cites it: the entry's own input **and** output rates have to be ones
+#: AWS publishes for that model. Without that a basis could name a *different real
+#: model* with the same cache answer and nothing would notice — measured, naming
+#: ``NVIDIA Nemotron Nano 2`` (the 9B text model) where ``NVIDIA Nemotron Nano 2
+#: VL`` (the 12B one this project prices) is meant left the suite green, because
+#: neither publishes a cache dimension and both carry 208 token-priced dimensions.
+#:
+#: Why **both** rates rather than the input one alone: on the input rate alone the
+#: eleven entries have 2 to 11 candidate models each, so the check was a rate
+#: collision away from meaningless. Requiring both pins 18 of the 21 members to
+#: exactly one model out of 141, and
+#: ``test_cache_unit_omission_basis.py`` pins what the remaining three leave open.
 DIMENSION_PATTERNS = {
     "cacheReadInputTokens": r"cacheread",
     "cacheWriteInputTokens": r"cachewrite",
     "inputTokens": r"inputtoken",
+    "outputTokens": r"outputtoken",
 }
 
 #: Dimension variants excluded from the per-model rate sets, each because this

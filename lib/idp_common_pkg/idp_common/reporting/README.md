@@ -151,8 +151,9 @@ reporter = SaveReportingData(
    `tests/unit/reporting/test_non_chargeable_units.py`: every entry must currently
    shield a unit that some metering writer really produces and some shipped pricing
    entry really omits (a dead entry would pre-declare whatever next arrived under
-   that name), and the entry count is pinned. The three Bedrock entries are asserted
-   against a committed digest of the price list, re-derivable with
+   that name), and the entry count is pinned. The two `bedrock` entries, plus the
+   `lambda_hook` `totalTokens` entry that cites the same Bedrock price list, are asserted
+   against a committed digest of it, re-derivable with
    `python3 lib/idp_common_pkg/tests/unit/reporting/bedrock_price_list_digest.py --refresh`
    and re-checkable live with `CHECK_AWS_PRICE_LIST=1`.
 

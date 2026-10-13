@@ -8,6 +8,10 @@
         "2.204e-05",
         "8e-06"
       ],
+      "outputTokens": [
+        "2.4e-05",
+        "6.536e-05"
+      ],
       "token_dimension_count": 16
     },
     "Claude 2.1": {
@@ -16,6 +20,7 @@
       "inputTokens": [
         "8e-06"
       ],
+      "outputTokens": [],
       "token_dimension_count": 2
     },
     "Claude 3 Haiku": {
@@ -25,6 +30,10 @@
         "2.5e-07",
         "3e-07"
       ],
+      "outputTokens": [
+        "1.25e-06",
+        "1.5e-06"
+      ],
       "token_dimension_count": 70
     },
     "Claude 3 Opus": {
@@ -33,6 +42,9 @@
       "inputTokens": [
         "1.5e-05"
       ],
+      "outputTokens": [
+        "7.5e-05"
+      ],
       "token_dimension_count": 12
     },
     "Claude 3 Sonnet": {
@@ -40,6 +52,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.5e-05"
       ],
       "token_dimension_count": 78
     },
@@ -56,6 +71,10 @@
         "1e-06",
         "8e-07"
       ],
+      "outputTokens": [
+        "4e-06",
+        "5e-06"
+      ],
       "token_dimension_count": 28
     },
     "Claude 3.5 Sonnet": {
@@ -64,6 +83,10 @@
       "inputTokens": [
         "3.6e-06",
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.5e-05",
+        "1.8e-05"
       ],
       "token_dimension_count": 62
     },
@@ -76,6 +99,9 @@
       ],
       "inputTokens": [
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.5e-05"
       ],
       "token_dimension_count": 66
     },
@@ -92,6 +118,10 @@
         "3.6e-06",
         "3e-06"
       ],
+      "outputTokens": [
+        "1.5e-05",
+        "1.8e-05"
+      ],
       "token_dimension_count": 96
     },
     "Claude Fable 5": {
@@ -106,6 +136,10 @@
       "inputTokens": [
         "1.1e-05",
         "1e-05"
+      ],
+      "outputTokens": [
+        "5.5e-05",
+        "5e-05"
       ],
       "token_dimension_count": 245
     },
@@ -125,6 +159,11 @@
         "1.2e-05",
         "1e-05"
       ],
+      "outputTokens": [
+        "5.5e-05",
+        "5e-05",
+        "6e-05"
+      ],
       "token_dimension_count": 205
     },
     "Claude Haiku 4.5": {
@@ -139,6 +178,10 @@
       "inputTokens": [
         "1.1e-06",
         "1e-06"
+      ],
+      "outputTokens": [
+        "5.5e-06",
+        "5e-06"
       ],
       "token_dimension_count": 385
     },
@@ -158,6 +201,11 @@
         "1.2e-07",
         "1e-07"
       ],
+      "outputTokens": [
+        "5.5e-07",
+        "5e-07",
+        "6e-07"
+      ],
       "token_dimension_count": 530
     },
     "Claude Instant": {
@@ -166,6 +214,10 @@
       "inputTokens": [
         "3.26e-06",
         "8e-07"
+      ],
+      "outputTokens": [
+        "1.102e-05",
+        "2.4e-06"
       ],
       "token_dimension_count": 16
     },
@@ -178,6 +230,9 @@
       ],
       "inputTokens": [
         "1.1e-05"
+      ],
+      "outputTokens": [
+        "5.5e-05"
       ],
       "token_dimension_count": 5
     },
@@ -194,6 +249,10 @@
         "1.1e-05",
         "1e-05"
       ],
+      "outputTokens": [
+        "5.5e-05",
+        "5e-05"
+      ],
       "token_dimension_count": 195
     },
     "Claude Mythos Preview": {
@@ -205,6 +264,9 @@
       ],
       "inputTokens": [
         "2.75e-05"
+      ],
+      "outputTokens": [
+        "0.0001375"
       ],
       "token_dimension_count": 10
     },
@@ -218,6 +280,9 @@
       "inputTokens": [
         "1.5e-05"
       ],
+      "outputTokens": [
+        "7.5e-05"
+      ],
       "token_dimension_count": 18
     },
     "Claude Opus 4.1": {
@@ -229,6 +294,9 @@
       ],
       "inputTokens": [
         "1.5e-05"
+      ],
+      "outputTokens": [
+        "7.5e-05"
       ],
       "token_dimension_count": 12
     },
@@ -245,6 +313,10 @@
         "5.5e-06",
         "5e-06"
       ],
+      "outputTokens": [
+        "2.5e-05",
+        "2.75e-05"
+      ],
       "token_dimension_count": 262
     },
     "Claude Opus 4.6": {
@@ -260,6 +332,10 @@
         "5.5e-06",
         "5e-06"
       ],
+      "outputTokens": [
+        "2.5e-05",
+        "2.75e-05"
+      ],
       "token_dimension_count": 350
     },
     "Claude Opus 4.7": {
@@ -274,6 +350,10 @@
       "inputTokens": [
         "5.5e-06",
         "5e-06"
+      ],
+      "outputTokens": [
+        "2.5e-05",
+        "2.75e-05"
       ],
       "token_dimension_count": 255
     },
@@ -293,6 +373,11 @@
         "5e-06",
         "6e-06"
       ],
+      "outputTokens": [
+        "2.5e-05",
+        "2.75e-05",
+        "3e-05"
+      ],
       "token_dimension_count": 265
     },
     "Claude Opus 5": {
@@ -310,6 +395,11 @@
         "5.5e-06",
         "5e-06",
         "6e-06"
+      ],
+      "outputTokens": [
+        "2.5e-05",
+        "2.75e-05",
+        "3e-05"
       ],
       "token_dimension_count": 392
     },
@@ -329,6 +419,11 @@
         "4.8e-06",
         "4e-06"
       ],
+      "outputTokens": [
+        "2.2e-05",
+        "2.4e-05",
+        "2e-05"
+      ],
       "token_dimension_count": 265
     },
     "Claude Sonnet 4": {
@@ -340,6 +435,9 @@
       ],
       "inputTokens": [
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.5e-05"
       ],
       "token_dimension_count": 138
     },
@@ -359,6 +457,11 @@
         "3.6e-06",
         "3e-06"
       ],
+      "outputTokens": [
+        "1.5e-05",
+        "1.65e-05",
+        "1.8e-05"
+      ],
       "token_dimension_count": 365
     },
     "Claude Sonnet 4.6": {
@@ -373,6 +476,10 @@
       "inputTokens": [
         "3.3e-06",
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.5e-05",
+        "1.65e-05"
       ],
       "token_dimension_count": 364
     },
@@ -392,6 +499,11 @@
         "2.4e-06",
         "2e-06"
       ],
+      "outputTokens": [
+        "1.1e-05",
+        "1.2e-05",
+        "1e-05"
+      ],
       "token_dimension_count": 285
     },
     "Claude Sonnet 5.5": {
@@ -410,6 +522,11 @@
         "2.4e-06",
         "2e-06"
       ],
+      "outputTokens": [
+        "1.1e-05",
+        "1.2e-05",
+        "1e-05"
+      ],
       "token_dimension_count": 245
     },
     "Command": {
@@ -417,6 +534,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "1e-06"
+      ],
+      "outputTokens": [
+        "2e-06"
       ],
       "token_dimension_count": 4
     },
@@ -426,6 +546,9 @@
       "inputTokens": [
         "5e-07"
       ],
+      "outputTokens": [
+        "1.5e-06"
+      ],
       "token_dimension_count": 4
     },
     "Command R+": {
@@ -434,6 +557,9 @@
       "inputTokens": [
         "3e-06"
       ],
+      "outputTokens": [
+        "1.5e-05"
+      ],
       "token_dimension_count": 4
     },
     "Command-Light": {
@@ -441,6 +567,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "3e-07"
+      ],
+      "outputTokens": [
+        "6e-07"
       ],
       "token_dimension_count": 4
     },
@@ -456,6 +585,15 @@
         "7.01666e-07",
         "8.99985e-07"
       ],
+      "outputTokens": [
+        "1.68e-06",
+        "1.7304e-06",
+        "1.74e-06",
+        "1.97668e-06",
+        "2.016e-06",
+        "2.03241e-06",
+        "2.60685e-06"
+      ],
       "token_dimension_count": 160
     },
     "DeepSeek v3.2": {
@@ -466,6 +604,12 @@
         "6.4e-07",
         "7.4e-07",
         "9.61e-07"
+      ],
+      "outputTokens": [
+        "1.85e-06",
+        "1.91e-06",
+        "2.22e-06",
+        "2.8675e-06"
       ],
       "token_dimension_count": 208
     },
@@ -478,6 +622,12 @@
         "4e-07",
         "6.2e-07"
       ],
+      "outputTokens": [
+        "2.06e-06",
+        "2.4e-06",
+        "2e-06",
+        "3.1e-06"
+      ],
       "token_dimension_count": 208
     },
     "Embed English": {
@@ -486,6 +636,7 @@
       "inputTokens": [
         "1e-07"
       ],
+      "outputTokens": [],
       "token_dimension_count": 17
     },
     "Embed Multilingual": {
@@ -494,6 +645,7 @@
       "inputTokens": [
         "1e-07"
       ],
+      "outputTokens": [],
       "token_dimension_count": 17
     },
     "Embed v4": {
@@ -502,6 +654,7 @@
       "inputTokens": [
         "1.2e-07"
       ],
+      "outputTokens": [],
       "token_dimension_count": 23
     },
     "GLM 4.7": {
@@ -513,6 +666,12 @@
         "7.2e-07",
         "9.3e-07"
       ],
+      "outputTokens": [
+        "2.27e-06",
+        "2.2e-06",
+        "2.64e-06",
+        "3.41e-06"
+      ],
       "token_dimension_count": 208
     },
     "GLM 4.7 Flash": {
@@ -522,6 +681,12 @@
         "1.1e-07",
         "7e-08",
         "8e-08"
+      ],
+      "outputTokens": [
+        "4.1e-07",
+        "4.8e-07",
+        "4e-07",
+        "6.2e-07"
       ],
       "token_dimension_count": 208
     },
@@ -534,6 +699,12 @@
         "1.55e-06",
         "1e-06"
       ],
+      "outputTokens": [
+        "3.2e-06",
+        "3.3e-06",
+        "3.84e-06",
+        "4.96e-06"
+      ],
       "token_dimension_count": 208
     },
     "GPT OSS Safeguard 120B": {
@@ -544,6 +715,15 @@
         "1.5e-07",
         "1.8e-07",
         "2.3e-07"
+      ],
+      "outputTokens": [
+        "6.18e-07",
+        "6e-07",
+        "7.1e-07",
+        "7.2e-07",
+        "7.3e-07",
+        "7e-07",
+        "9.3e-07"
       ],
       "token_dimension_count": 176
     },
@@ -557,6 +737,13 @@
         "8.4e-08",
         "8e-08"
       ],
+      "outputTokens": [
+        "2.06e-07",
+        "2.3e-07",
+        "2.4e-07",
+        "2e-07",
+        "3.1e-07"
+      ],
       "token_dimension_count": 176
     },
     "Gemma 3 12B": {
@@ -568,6 +755,14 @@
         "1.4e-07",
         "9.27e-08",
         "9e-08"
+      ],
+      "outputTokens": [
+        "2.987e-07",
+        "2.9e-07",
+        "3.48e-07",
+        "3.4e-07",
+        "3.5e-07",
+        "4.5e-07"
       ],
       "token_dimension_count": 176
     },
@@ -582,6 +777,14 @@
         "2.8e-07",
         "3.6e-07"
       ],
+      "outputTokens": [
+        "3.8e-07",
+        "3.914e-07",
+        "4.56e-07",
+        "4.5e-07",
+        "4.6e-07",
+        "5.9e-07"
+      ],
       "token_dimension_count": 176
     },
     "Gemma 3 4B": {
@@ -593,6 +796,14 @@
         "4e-08",
         "5e-08",
         "6e-08"
+      ],
+      "outputTokens": [
+        "1.2e-07",
+        "1e-07",
+        "8.24e-08",
+        "8e-08",
+        "9.6e-08",
+        "9e-08"
       ],
       "token_dimension_count": 176
     },
@@ -610,6 +821,12 @@
         "2.64e-06",
         "2e-06"
       ],
+      "outputTokens": [
+        "6.6e-06",
+        "6e-06",
+        "7.2e-06",
+        "7.92e-06"
+      ],
       "token_dimension_count": 700
     },
     "Jamba 1.5 Large": {
@@ -617,6 +834,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2e-06"
+      ],
+      "outputTokens": [
+        "8e-06"
       ],
       "token_dimension_count": 4
     },
@@ -626,6 +846,9 @@
       "inputTokens": [
         "2e-07"
       ],
+      "outputTokens": [
+        "4e-07"
+      ],
       "token_dimension_count": 4
     },
     "Jamba-Instruct": {
@@ -633,6 +856,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "5e-07"
+      ],
+      "outputTokens": [
+        "7e-07"
       ],
       "token_dimension_count": 2
     },
@@ -642,12 +868,18 @@
       "inputTokens": [
         "1.25e-05"
       ],
+      "outputTokens": [
+        "1.25e-05"
+      ],
       "token_dimension_count": 4
     },
     "Jurassic Ultra": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "1.88e-05"
+      ],
+      "outputTokens": [
         "1.88e-05"
       ],
       "token_dimension_count": 4
@@ -663,6 +895,14 @@
         "7.3e-07",
         "9.3e-07"
       ],
+      "outputTokens": [
+        "2.575e-06",
+        "2.5e-06",
+        "2.94e-06",
+        "3.03e-06",
+        "3.875e-06",
+        "3e-06"
+      ],
       "token_dimension_count": 152
     },
     "Kimi K2.5": {
@@ -673,6 +913,12 @@
         "6e-07",
         "7.2e-07",
         "9.3e-07"
+      ],
+      "outputTokens": [
+        "3.09e-06",
+        "3.6e-06",
+        "3e-06",
+        "4.65e-06"
       ],
       "token_dimension_count": 208
     },
@@ -695,6 +941,12 @@
         "3.96e-06",
         "3e-06"
       ],
+      "outputTokens": [
+        "1.5e-05",
+        "1.65e-05",
+        "1.8e-05",
+        "1.98e-05"
+      ],
       "token_dimension_count": 930
     },
     "Llama 3 70B": {
@@ -706,6 +958,13 @@
         "3.18e-06",
         "3.45e-06",
         "4.45e-06"
+      ],
+      "outputTokens": [
+        "3.5e-06",
+        "4.03e-06",
+        "4.2e-06",
+        "4.55e-06",
+        "5.88e-06"
       ],
       "token_dimension_count": 14
     },
@@ -719,12 +978,22 @@
         "3e-07",
         "5e-07"
       ],
+      "outputTokens": [
+        "1.01e-06",
+        "6.9e-07",
+        "6e-07",
+        "7.2e-07",
+        "7.8e-07"
+      ],
       "token_dimension_count": 14
     },
     "Llama 3.1 405B": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "2.4e-06"
+      ],
+      "outputTokens": [
         "2.4e-06"
       ],
       "token_dimension_count": 10
@@ -735,12 +1004,18 @@
       "inputTokens": [
         "3e-06"
       ],
+      "outputTokens": [
+        "3e-06"
+      ],
       "token_dimension_count": 2
     },
     "Llama 3.1 70B": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "7.2e-07"
+      ],
+      "outputTokens": [
         "7.2e-07"
       ],
       "token_dimension_count": 13
@@ -751,12 +1026,18 @@
       "inputTokens": [
         "9e-07"
       ],
+      "outputTokens": [
+        "9e-07"
+      ],
       "token_dimension_count": 6
     },
     "Llama 3.1 8B": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "2.2e-07"
+      ],
+      "outputTokens": [
         "2.2e-07"
       ],
       "token_dimension_count": 13
@@ -767,12 +1048,20 @@
       "inputTokens": [
         "1.6e-07"
       ],
+      "outputTokens": [
+        "1.6e-07"
+      ],
       "token_dimension_count": 9
     },
     "Llama 3.2 1B": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "1.1e-07",
+        "1.3e-07",
+        "1e-07"
+      ],
+      "outputTokens": [
         "1.1e-07",
         "1.3e-07",
         "1e-07"
@@ -788,12 +1077,21 @@
         "1.9e-07",
         "2e-07"
       ],
+      "outputTokens": [
+        "1.5e-07",
+        "1.7e-07",
+        "1.9e-07",
+        "2e-07"
+      ],
       "token_dimension_count": 17
     },
     "Llama 3.2 90B": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "7.2e-07"
+      ],
+      "outputTokens": [
         "7.2e-07"
       ],
       "token_dimension_count": 9
@@ -804,12 +1102,16 @@
       "inputTokens": [
         "7.2e-07"
       ],
+      "outputTokens": [
+        "7.2e-07"
+      ],
       "token_dimension_count": 13
     },
     "Llama 3.3 70B Custom": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 2
     },
     "Llama 4 Maverick 17B": {
@@ -817,6 +1119,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2.4e-07"
+      ],
+      "outputTokens": [
+        "9.7e-07"
       ],
       "token_dimension_count": 16
     },
@@ -826,6 +1131,9 @@
       "inputTokens": [
         "1.7e-07"
       ],
+      "outputTokens": [
+        "6.6e-07"
+      ],
       "token_dimension_count": 16
     },
     "Llama2-13B": {
@@ -834,6 +1142,9 @@
       "inputTokens": [
         "7.5e-07"
       ],
+      "outputTokens": [
+        "1e-06"
+      ],
       "token_dimension_count": 4
     },
     "Llama2-70B": {
@@ -841,6 +1152,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "1.95e-06"
+      ],
+      "outputTokens": [
+        "2.56e-06"
       ],
       "token_dimension_count": 4
     },
@@ -855,18 +1169,28 @@
         "6e-07",
         "7.8e-07"
       ],
+      "outputTokens": [
+        "1.545e-06",
+        "1.5e-06",
+        "1.76e-06",
+        "1.82e-06",
+        "1.8e-06",
+        "2.33e-06"
+      ],
       "token_dimension_count": 176
     },
     "Marengo Embed 2.7": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "Marengo Embed 3.0": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "MiniMax M2.5": {
@@ -877,6 +1201,12 @@
         "3.6e-07",
         "3e-07",
         "4.7e-07"
+      ],
+      "outputTokens": [
+        "1.24e-06",
+        "1.2e-06",
+        "1.44e-06",
+        "1.86e-06"
       ],
       "token_dimension_count": 208
     },
@@ -890,6 +1220,14 @@
         "3e-07",
         "4.7e-07"
       ],
+      "outputTokens": [
+        "1.236e-06",
+        "1.2e-06",
+        "1.41e-06",
+        "1.44e-06",
+        "1.45e-06",
+        "1.86e-06"
+      ],
       "token_dimension_count": 176
     },
     "Minimax M2.1": {
@@ -901,12 +1239,25 @@
         "3e-07",
         "4.7e-07"
       ],
+      "outputTokens": [
+        "1.24e-06",
+        "1.2e-06",
+        "1.44e-06",
+        "1.86e-06"
+      ],
       "token_dimension_count": 208
     },
     "Ministral 14B 3.0": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "2.06e-07",
+        "2.3e-07",
+        "2.4e-07",
+        "2e-07",
+        "3.1e-07"
+      ],
+      "outputTokens": [
         "2.06e-07",
         "2.3e-07",
         "2.4e-07",
@@ -924,12 +1275,24 @@
         "1.6e-07",
         "1e-07"
       ],
+      "outputTokens": [
+        "1.03e-07",
+        "1.2e-07",
+        "1.6e-07",
+        "1e-07"
+      ],
       "token_dimension_count": 176
     },
     "Ministral 8B 3.0": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "1.545e-07",
+        "1.5e-07",
+        "1.8e-07",
+        "2.3e-07"
+      ],
+      "outputTokens": [
         "1.545e-07",
         "1.5e-07",
         "1.8e-07",
@@ -948,6 +1311,14 @@
         "2.5e-07",
         "2e-07"
       ],
+      "outputTokens": [
+        "2.2e-07",
+        "2.3e-07",
+        "2.4e-07",
+        "2.6e-07",
+        "2e-07",
+        "3.4e-07"
+      ],
       "token_dimension_count": 18
     },
     "Mistral Large": {
@@ -961,6 +1332,14 @@
         "5.2e-06",
         "6.7e-06"
       ],
+      "outputTokens": [
+        "1.2e-05",
+        "1.38e-05",
+        "1.3e-05",
+        "1.44e-05",
+        "1.56e-05",
+        "2.02e-05"
+      ],
       "token_dimension_count": 18
     },
     "Mistral Large 2407": {
@@ -968,6 +1347,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2e-06"
+      ],
+      "outputTokens": [
+        "6e-06"
       ],
       "token_dimension_count": 4
     },
@@ -982,6 +1364,14 @@
         "6e-07",
         "7.75e-07"
       ],
+      "outputTokens": [
+        "1.545e-06",
+        "1.5e-06",
+        "1.76e-06",
+        "1.82e-06",
+        "1.8e-06",
+        "2.325e-06"
+      ],
       "token_dimension_count": 152
     },
     "Mistral Small": {
@@ -989,6 +1379,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "1e-06"
+      ],
+      "outputTokens": [
+        "3e-06"
       ],
       "token_dimension_count": 4
     },
@@ -1003,6 +1396,14 @@
         "5.9e-07",
         "7.6e-07"
       ],
+      "outputTokens": [
+        "1.18e-06",
+        "7.6e-07",
+        "7e-07",
+        "8.1e-07",
+        "8.4e-07",
+        "9.1e-07"
+      ],
       "token_dimension_count": 18
     },
     "NVIDIA Nemotron 3 Super 120B A12B": {
@@ -1012,6 +1413,12 @@
         "1.5e-07",
         "1.8e-07",
         "2.3e-07"
+      ],
+      "outputTokens": [
+        "1.01e-06",
+        "6.5e-07",
+        "6.7e-07",
+        "7.8e-07"
       ],
       "token_dimension_count": 240
     },
@@ -1025,6 +1432,14 @@
         "7e-08",
         "9e-08"
       ],
+      "outputTokens": [
+        "2.369e-07",
+        "2.3e-07",
+        "2.76e-07",
+        "2.7e-07",
+        "2.8e-07",
+        "3.6e-07"
+      ],
       "token_dimension_count": 208
     },
     "NVIDIA Nemotron Nano 2 VL": {
@@ -1037,6 +1452,15 @@
         "2e-07",
         "3.1e-07"
       ],
+      "outputTokens": [
+        "6.18e-07",
+        "6e-07",
+        "7.1e-07",
+        "7.2e-07",
+        "7.3e-07",
+        "7e-07",
+        "9.3e-07"
+      ],
       "token_dimension_count": 208
     },
     "Nemotron Nano 3 30B": {
@@ -1048,6 +1472,14 @@
         "7.2e-08",
         "7e-08",
         "9e-08"
+      ],
+      "outputTokens": [
+        "2.472e-07",
+        "2.4e-07",
+        "2.88e-07",
+        "2.8e-07",
+        "2.9e-07",
+        "3.7e-07"
       ],
       "token_dimension_count": 208
     },
@@ -1097,6 +1529,37 @@
         "4.84e-07",
         "5.28e-07"
       ],
+      "outputTokens": [
+        "2.5e-06",
+        "2.63e-06",
+        "2.64e-06",
+        "2.67e-06",
+        "2.71e-06",
+        "2.72e-06",
+        "2.75e-06",
+        "2.81e-06",
+        "2.87e-06",
+        "2.95e-06",
+        "2.96e-06",
+        "2.97e-06",
+        "2.992e-06",
+        "3.01e-06",
+        "3.091e-06",
+        "3.13e-06",
+        "3.157e-06",
+        "3.205e-06",
+        "3.21e-06",
+        "3.27e-06",
+        "3.311e-06",
+        "3.351e-06",
+        "3.39e-06",
+        "3.52e-06",
+        "3.597e-06",
+        "3.69e-06",
+        "4.059e-06",
+        "4.1e-06",
+        "4.411e-06"
+      ],
       "token_dimension_count": 547
     },
     "Nova 2.0 Omni": {
@@ -1106,6 +1569,21 @@
         "3e-07",
         "4e-07",
         "5e-07"
+      ],
+      "outputTokens": [
+        "2.5e-06",
+        "2.6e-06",
+        "2.7e-06",
+        "2.8e-06",
+        "2.9e-06",
+        "3.1e-06",
+        "3.2e-06",
+        "3.3e-06",
+        "3.4e-06",
+        "3.5e-06",
+        "3.7e-06",
+        "3e-06",
+        "4e-06"
       ],
       "token_dimension_count": 785
     },
@@ -1135,18 +1613,46 @@
         "1.84e-06",
         "2.01e-06"
       ],
+      "outputTokens": [
+        "1.002e-05",
+        "1.051e-05",
+        "1.056e-05",
+        "1.066e-05",
+        "1.084e-05",
+        "1.087e-05",
+        "1.102e-05",
+        "1.126e-05",
+        "1.147e-05",
+        "1.1726e-05",
+        "1.184e-05",
+        "1.18e-05",
+        "1.1e-05",
+        "1.2386e-05",
+        "1.251e-05",
+        "1.25e-05",
+        "1.284e-05",
+        "1.308e-05",
+        "1.356e-05",
+        "1.407e-05",
+        "1.4124e-05",
+        "1.474e-05",
+        "1.605e-05",
+        "1e-05"
+      ],
       "token_dimension_count": 620
     },
     "Nova 2.5 Sonic": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "Nova Canvas": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "Nova Lite": {
@@ -1185,6 +1691,23 @@
         "8.8e-08",
         "9.6e-08"
       ],
+      "outputTokens": [
+        "2.4e-07",
+        "2.52e-07",
+        "2.56e-07",
+        "2.64e-07",
+        "2.6e-07",
+        "2.76e-07",
+        "2.84e-07",
+        "2.88e-07",
+        "3.08e-07",
+        "3.12e-07",
+        "3.24e-07",
+        "3.36e-07",
+        "3.52e-07",
+        "3.84e-07",
+        "3e-07"
+      ],
       "token_dimension_count": 118
     },
     "Nova MME": {
@@ -1193,6 +1716,7 @@
       "inputTokens": [
         "1.35e-07"
       ],
+      "outputTokens": [],
       "token_dimension_count": 2
     },
     "Nova Micro": {
@@ -1228,6 +1752,21 @@
         "5.2e-08",
         "5.6e-08"
       ],
+      "outputTokens": [
+        "1.48e-07",
+        "1.4e-07",
+        "1.52e-07",
+        "1.56e-07",
+        "1.64e-07",
+        "1.68e-07",
+        "1.6e-07",
+        "1.76e-07",
+        "1.84e-07",
+        "1.88e-07",
+        "1.96e-07",
+        "2.08e-07",
+        "2.24e-07"
+      ],
       "token_dimension_count": 97
     },
     "Nova Premier": {
@@ -1237,6 +1776,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2.5e-06"
+      ],
+      "outputTokens": [
+        "1.25e-05"
       ],
       "token_dimension_count": 39
     },
@@ -1276,6 +1818,23 @@
         "9.5e-07",
         "9.6e-07"
       ],
+      "outputTokens": [
+        "3.2e-06",
+        "3.36e-06",
+        "3.48e-06",
+        "3.52e-06",
+        "3.68e-06",
+        "3.76e-06",
+        "3.84e-06",
+        "3.8e-06",
+        "4.12e-06",
+        "4.2e-06",
+        "4.32e-06",
+        "4.52e-06",
+        "4.72e-06",
+        "4e-06",
+        "5.21e-06"
+      ],
       "token_dimension_count": 298
     },
     "Nova Pro Latency Optimized": {
@@ -1284,12 +1843,16 @@
       "inputTokens": [
         "1e-06"
       ],
+      "outputTokens": [
+        "4e-06"
+      ],
       "token_dimension_count": 6
     },
     "Nova Reel": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "Nova Sonic": {
@@ -1302,6 +1865,14 @@
         "6.5e-08",
         "6e-08",
         "7.2e-08"
+      ],
+      "outputTokens": [
+        "1.36e-05",
+        "1.47e-05",
+        "1.63e-05",
+        "2.4e-07",
+        "2.6e-07",
+        "2.88e-07"
       ],
       "token_dimension_count": 12
     },
@@ -1316,6 +1887,15 @@
         "3.63e-07",
         "3.96e-07",
         "3e-06"
+      ],
+      "outputTokens": [
+        "1.165e-05",
+        "1.2e-05",
+        "1.452e-05",
+        "2.651e-06",
+        "2.75e-06",
+        "2.992e-06",
+        "3.311e-06"
       ],
       "token_dimension_count": 16
     },
@@ -1332,6 +1912,10 @@
         "1.1e-05",
         "1e-05"
       ],
+      "outputTokens": [
+        "5.5e-05",
+        "5e-05"
+      ],
       "token_dimension_count": 176
     },
     "Palmyra X4": {
@@ -1339,6 +1923,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2.5e-06"
+      ],
+      "outputTokens": [
+        "1e-05"
       ],
       "token_dimension_count": 8
     },
@@ -1348,12 +1935,18 @@
       "inputTokens": [
         "6e-07"
       ],
+      "outputTokens": [
+        "6e-06"
+      ],
       "token_dimension_count": 8
     },
     "Pegasus 1.2": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [
+        "7.5e-06"
+      ],
       "token_dimension_count": 41
     },
     "Pixtral Large 25.02": {
@@ -1361,6 +1954,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "2e-06"
+      ],
+      "outputTokens": [
+        "6e-06"
       ],
       "token_dimension_count": 14
     },
@@ -1377,6 +1973,16 @@
         "2.9e-07",
         "3.4e-07"
       ],
+      "outputTokens": [
+        "1.04e-06",
+        "1.056e-06",
+        "1.06e-06",
+        "1.16e-06",
+        "1.37e-06",
+        "8.8e-07",
+        "9.064e-07",
+        "9.1e-07"
+      ],
       "token_dimension_count": 176
     },
     "Qwen3 32B": {
@@ -1389,6 +1995,16 @@
         "1.8e-07",
         "2.3e-07",
         "2e-07"
+      ],
+      "outputTokens": [
+        "6.18e-07",
+        "6.2e-07",
+        "6e-07",
+        "7.1e-07",
+        "7.3e-07",
+        "7.9e-07",
+        "7e-07",
+        "9.3e-07"
       ],
       "token_dimension_count": 200
     },
@@ -1403,6 +2019,16 @@
         "2.3e-07",
         "2e-07"
       ],
+      "outputTokens": [
+        "6.18e-07",
+        "6.2e-07",
+        "6e-07",
+        "7.1e-07",
+        "7.3e-07",
+        "7.9e-07",
+        "7e-07",
+        "9.3e-07"
+      ],
       "token_dimension_count": 200
     },
     "Qwen3 Coder 480B A35B": {
@@ -1416,6 +2042,15 @@
         "5.4e-07",
         "7e-07"
       ],
+      "outputTokens": [
+        "1.854e-06",
+        "1.87e-06",
+        "1.8e-06",
+        "2.12e-06",
+        "2.16e-06",
+        "2.18e-06",
+        "2.79e-06"
+      ],
       "token_dimension_count": 160
     },
     "Qwen3 Coder Next": {
@@ -1427,6 +2062,12 @@
         "6e-07",
         "7.8e-07"
       ],
+      "outputTokens": [
+        "1.24e-06",
+        "1.2e-06",
+        "1.44e-06",
+        "1.86e-06"
+      ],
       "token_dimension_count": 208
     },
     "Qwen3 Next 80B A3B": {
@@ -1437,6 +2078,12 @@
         "1.4e-07",
         "1.68e-07",
         "2.17e-07"
+      ],
+      "outputTokens": [
+        "1.236e-06",
+        "1.2e-06",
+        "1.44e-06",
+        "1.86e-06"
       ],
       "token_dimension_count": 140
     },
@@ -1451,6 +2098,15 @@
         "6.4e-07",
         "8.2e-07"
       ],
+      "outputTokens": [
+        "2.66e-06",
+        "2.7398e-06",
+        "3.12e-06",
+        "3.13e-06",
+        "3.192e-06",
+        "3.22e-06",
+        "4.12e-06"
+      ],
       "token_dimension_count": 176
     },
     "R1": {
@@ -1459,54 +2115,73 @@
       "inputTokens": [
         "1.35e-06"
       ],
+      "outputTokens": [
+        "5.4e-06"
+      ],
       "token_dimension_count": 6
     },
     "Ray v2": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "Rerank 3.5": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "SD3.5LargeV1": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "SD3LargeV1": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "SI-Core-V1": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "SI-Ultra-V1": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [],
       "token_dimension_count": 0
     },
     "TwelveLabs Pegasus 1.5": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [],
+      "outputTokens": [
+        "7.5e-06"
+      ],
       "token_dimension_count": 36
     },
     "Voxtral Mini 1.0": {
       "cacheReadInputTokens": [],
       "cacheWriteInputTokens": [],
       "inputTokens": [
+        "4.12e-08",
+        "4.8e-08",
+        "4e-08",
+        "5e-08",
+        "6e-08"
+      ],
+      "outputTokens": [
         "4.12e-08",
         "4.8e-08",
         "4e-08",
@@ -1524,6 +2199,13 @@
         "1.6e-07",
         "1e-07"
       ],
+      "outputTokens": [
+        "3.09e-07",
+        "3.5e-07",
+        "3.6e-07",
+        "3e-07",
+        "4.7e-07"
+      ],
       "token_dimension_count": 176
     },
     "Writer Palmyra Vision 7B": {
@@ -1534,6 +2216,12 @@
         "1.8e-07",
         "2.3e-07"
       ],
+      "outputTokens": [
+        "6.2e-07",
+        "6e-07",
+        "7.2e-07",
+        "9.3e-07"
+      ],
       "token_dimension_count": 208
     },
     "google.gemma-4-26b-a4b": {
@@ -1542,6 +2230,10 @@
       "inputTokens": [
         "1.3e-07",
         "1.56e-07"
+      ],
+      "outputTokens": [
+        "4.8e-07",
+        "4e-07"
       ],
       "token_dimension_count": 40
     },
@@ -1552,6 +2244,10 @@
         "1.4e-07",
         "1.68e-07"
       ],
+      "outputTokens": [
+        "4.8e-07",
+        "4e-07"
+      ],
       "token_dimension_count": 40
     },
     "google.gemma-4-e2b": {
@@ -1560,6 +2256,10 @@
       "inputTokens": [
         "4.8e-08",
         "4e-08"
+      ],
+      "outputTokens": [
+        "8e-08",
+        "9.6e-08"
       ],
       "token_dimension_count": 39
     },
@@ -1574,6 +2274,17 @@
         "2.3e-07",
         "2e-07"
       ],
+      "outputTokens": [
+        "6.18e-07",
+        "6.2e-07",
+        "6e-07",
+        "7.1e-07",
+        "7.2e-07",
+        "7.3e-07",
+        "7.9e-07",
+        "7e-07",
+        "9.3e-07"
+      ],
       "token_dimension_count": 232
     },
     "gpt-oss-20b": {
@@ -1587,6 +2298,15 @@
         "8e-08",
         "9e-08"
       ],
+      "outputTokens": [
+        "3.09e-07",
+        "3.1e-07",
+        "3.5e-07",
+        "3.6e-07",
+        "3e-07",
+        "4.7e-07",
+        "4e-07"
+      ],
       "token_dimension_count": 232
     },
     "openai.gpt-5.4": {
@@ -1596,6 +2316,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "3.3e-06"
+      ],
+      "outputTokens": [
+        "1.98e-05"
       ],
       "token_dimension_count": 6
     },
@@ -1609,6 +2332,9 @@
       "inputTokens": [
         "2.64e-07"
       ],
+      "outputTokens": [
+        "1.584e-06"
+      ],
       "token_dimension_count": 24
     },
     "openai.gpt-5.6-terra": {
@@ -1621,6 +2347,9 @@
       "inputTokens": [
         "2.64e-06"
       ],
+      "outputTokens": [
+        "1.584e-05"
+      ],
       "token_dimension_count": 24
     },
     "qwen3-next-80b-a3b": {
@@ -1628,6 +2357,9 @@
       "cacheWriteInputTokens": [],
       "inputTokens": [
         "1.8e-07"
+      ],
+      "outputTokens": [
+        "1.41e-06"
       ],
       "token_dimension_count": 8
     },
@@ -1640,6 +2372,10 @@
       "inputTokens": [
         "1.25e-06",
         "1.5e-06"
+      ],
+      "outputTokens": [
+        "2.5e-06",
+        "3e-06"
       ],
       "token_dimension_count": 60
     },
@@ -1656,6 +2392,12 @@
         "2.4e-06",
         "2.64e-06",
         "2e-06"
+      ],
+      "outputTokens": [
+        "6.6e-06",
+        "6e-06",
+        "7.2e-06",
+        "7.92e-06"
       ],
       "token_dimension_count": 648
     }

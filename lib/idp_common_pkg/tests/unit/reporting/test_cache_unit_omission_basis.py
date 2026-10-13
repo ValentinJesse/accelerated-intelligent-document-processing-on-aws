@@ -43,6 +43,7 @@ The per-member premise is checked rather than read, on both of its halves:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -59,6 +60,7 @@ from idp_common.metering_units import (
 )
 
 from .bedrock_cache_dimension_digest import (
+    OFFER_URLS,
     digest_offer_files,
     load_digest,
     published_rates,
@@ -75,6 +77,11 @@ CACHE_UNITS = ("cacheReadInputTokens", "cacheWriteInputTokens")
 #: requiring a basis from them would be an exemption surface with nothing behind
 #: it.
 BEDROCK_PREFIX = "bedrock/"
+
+#: The units whose published rates pin a recorded ``price_list_model`` to the
+#: pricing entry citing it. Both, not one: on the input rate alone the eleven
+#: entries have 2 to 11 candidate models each.
+IDENTITY_UNITS = ("inputTokens", "outputTokens")
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
@@ -98,22 +105,44 @@ def _shipped_bedrock_units() -> dict[str, set[str]]:
     }
 
 
-def _shipped_input_rate(pricing_key: str) -> str:
-    """The entry's own per-input-token rate, formatted as the digest formats one.
+def _shipped_token_rates(pricing_key: str) -> dict[str, str]:
+    """The entry's own input and output rates, formatted as the digest formats one.
 
     Used to tie a recorded ``price_list_model`` to the entry citing it. Every one
-    of these entries prices ``inputTokens`` — an entry that did not would be a
-    different and simpler failure, refused by ``test_pricing_lookup.py`` — so
-    ``KeyError`` here is a real fault rather than a case to tolerate.
+    of these entries prices both — an entry that did not would be a different and
+    simpler failure, refused by ``test_pricing_lookup.py`` — so ``KeyError`` here
+    is a real fault rather than a case to tolerate.
     """
     with open(_PRICING_PATH) as handle:
         raw = yaml.safe_load(handle)
     for entry in raw["pricing"]:
-        if entry["name"] == pricing_key:
-            for unit in entry.get("units") or []:
-                if unit["name"] == "inputTokens":
-                    return f"{float(unit['price']):.6g}"
-    raise KeyError(f"{pricing_key} has no inputTokens rate in {_PRICING_PATH}")
+        if entry["name"] != pricing_key:
+            continue
+        rates = {
+            unit["name"]: f"{float(unit['price']):.6g}"
+            for unit in entry.get("units") or []
+            if unit["name"] in IDENTITY_UNITS
+        }
+        if set(rates) == set(IDENTITY_UNITS):
+            return rates
+        raise KeyError(f"{pricing_key} prices only {sorted(rates)} of {IDENTITY_UNITS}")
+    raise KeyError(f"{pricing_key} is not in {_PRICING_PATH}")
+
+
+def _identity_candidates(digest: dict[str, Any], pricing_key: str) -> list[str]:
+    """Every price-list model whose published rates are consistent with this entry.
+
+    A basis's ``price_list_model`` has to be one of these. The set is usually a
+    single model, and where it is not, what matters is whether the candidates
+    *agree* on the cache answer — see
+    :func:`test_a_rate_collision_cannot_change_a_recorded_verdict`.
+    """
+    rates = _shipped_token_rates(pricing_key)
+    return sorted(
+        model
+        for model, record in digest["models"].items()
+        if all(rate in record[unit] for unit, rate in rates.items())
+    )
 
 
 def _omissions() -> set[tuple[str, str]]:
@@ -185,9 +214,27 @@ def test_the_register_is_not_empty_and_is_keyed_per_entry_and_unit():
         "its basis is never read"
     )
     assert len(register) >= 10, f"the register holds only {len(register)} members"
-    nova_pro = "bedrock/amazon.nova-pro-v1:0"
-    assert register[(nova_pro, "cacheReadInputTokens")].priced_by_aws is True
-    assert register[(nova_pro, "cacheWriteInputTokens")].priced_by_aws is False
+
+    # Derived, not named: at least one pricing key must carry both units with
+    # OPPOSITE verdicts, which is what demonstrates the split is real rather than
+    # decorative. Naming a model here would make paying the debt down — adding
+    # the published rate and deleting the member, which is exactly what the
+    # failure messages above prescribe — fail this test, and that is the outcome
+    # this register's ratchet was chosen to avoid.
+    by_key: dict[str, set[bool]] = {}
+    for (key, _unit), member in register.items():
+        by_key.setdefault(key, set()).add(member.priced_by_aws)
+    split = sorted(key for key, verdicts in by_key.items() if len(verdicts) > 1)
+    assert split, (
+        "no pricing key in the register carries two units with opposite "
+        f"priced_by_aws verdicts (verdicts per key: "
+        f"{ {k: sorted(v) for k, v in sorted(by_key.items())} }). That split is "
+        "the whole reason this register is keyed per unit rather than per entry: "
+        "AWS publishes Nova cache WRITES at exactly $0.00 and Nova cache READS at "
+        "a real rate, so one reason for the pair is false for one of them. If "
+        "every remaining member agrees, check that the per-unit keying is still "
+        "earning its keep before relaxing this"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -471,16 +518,14 @@ def test_priced_by_aws_matches_the_published_price_list(entry: CacheUnitOmission
         f"the digest found no token-priced dimension at all for "
         f"{entry.price_list_model!r}, so it cannot support a claim either way"
     )
-    entry_input_rate = _shipped_input_rate(entry.pricing_key)
-    published_input_rates = published_rates(
-        digest, entry.price_list_model, "inputTokens"
-    )
-    assert entry_input_rate in published_input_rates, (
-        f"{entry.pricing_key} charges {entry_input_rate} per input token, which is "
-        f"not among the rates AWS publishes for {entry.price_list_model!r} "
-        f"({published_input_rates}). Either the basis names the wrong price-list "
-        "model, or this row's rates are no longer any band AWS publishes — both "
-        "make the cache claim beside it unreadable"
+    candidates = _identity_candidates(digest, entry.pricing_key)
+    assert entry.price_list_model in candidates, (
+        f"{entry.pricing_key} charges {_shipped_token_rates(entry.pricing_key)} per "
+        f"token, which is not a pair of rates AWS publishes for "
+        f"{entry.price_list_model!r}. The models whose published rates are "
+        f"consistent with this entry are {candidates}. Either the basis names the "
+        "wrong price-list model, or this row's rates are no longer any band AWS "
+        "publishes — both make the cache claim beside it unreadable"
     )
 
     rates = published_rates(digest, entry.price_list_model, entry.unit)
@@ -492,6 +537,152 @@ def test_priced_by_aws_matches_the_published_price_list(entry: CacheUnitOmission
         "A member whose dimension AWS prices must say so, because that is what "
         "makes the unit reported rather than zeroed"
     )
+
+
+#: The members whose identity the published rates do NOT pin well enough to
+#: settle the recorded verdict, with the candidate models that disagree with it.
+#:
+#: Registered in ``scripts/tests/gate_exemptions.json`` as
+#: ``EXPECTED_RATE_AMBIGUOUS_IDENTITIES``. It turns nothing off — it is the pin
+#: for the residual measured below, asserted for **equality** in both directions,
+#: so a rate change that makes a second member ambiguous fails here and is read
+#: rather than absorbed.
+EXPECTED_RATE_AMBIGUOUS_IDENTITIES = {
+    ("bedrock/amazon.nova-lite-v1:0", "cacheReadInputTokens"): (
+        "Nemotron Nano 3 30B",
+        "Nova Sonic",
+    ),
+}
+
+
+@pytest.mark.unit
+def test_a_rate_collision_cannot_change_a_recorded_verdict():
+    """How far the price-list half of a premise actually goes, measured.
+
+    The identity of a recorded ``price_list_model`` is established by its
+    published input and output rates matching the pricing entry's. That pins 18
+    of the 21 members to exactly one model out of 141, and leaves three with a
+    handful of candidates — different real models that happen to be priced
+    identically, which vendors do.
+
+    ⚠️ **An ambiguity only matters if the candidates disagree about the thing the
+    register decides.** For a member whose candidates all answer the same way on
+    this unit, naming the wrong one of them cannot change ``priced_by_aws``, so it
+    cannot change a cost. For a member where one disagrees, it can — and that is
+    the residual this pins, by name and in both directions.
+
+    What this test does **not** claim, and no test can: it cannot catch an author
+    who writes a basis that is simply false. A fabricated member naming a
+    rate-compatible model with the convenient cache answer passes every mechanical
+    check here. That is what the ``gate_exemptions.json`` discipline is for — one
+    member's worth of authored reason, reviewed — and the registry entry says so
+    rather than claiming the computation covers it.
+    """
+    digest = load_digest()
+    ambiguous = {}
+    for entry in EXPECTED_CACHE_UNIT_OMISSIONS:
+        candidates = _identity_candidates(digest, entry.pricing_key)
+        disagreeing = tuple(
+            model
+            for model in candidates
+            if any(float(rate) > 0 for rate in digest["models"][model][entry.unit])
+            != entry.priced_by_aws
+        )
+        if disagreeing:
+            ambiguous[(entry.pricing_key, entry.unit)] = disagreeing
+
+    assert ambiguous == EXPECTED_RATE_AMBIGUOUS_IDENTITIES, (
+        "the set of members whose recorded verdict a rate collision could change "
+        f"has moved. Measured now: {ambiguous}. Pinned: "
+        f"{EXPECTED_RATE_AMBIGUOUS_IDENTITIES}. A NEW member here means the "
+        "price-list half of its premise no longer distinguishes the model it "
+        "names from one that answers differently, so read the member before "
+        "moving the pin. A member LEAVING means the ambiguity is gone and the "
+        "entry should come off."
+    )
+    # Guard the guard: the candidate derivation has to be able to find anything at
+    # all, or the equality above holds over two empty dicts.
+    pinned_key = next(iter(EXPECTED_RATE_AMBIGUOUS_IDENTITIES))
+    assert len(_identity_candidates(digest, pinned_key[0])) >= 2, (
+        "the pinned member no longer has multiple candidate models, so this "
+        "assertion is about nothing"
+    )
+
+
+@pytest.mark.unit
+def test_most_member_identities_are_pinned_to_exactly_one_model():
+    """The other side of the residual: how much the rate match actually buys.
+
+    Reported as a floor rather than an exact count, because a model AWS adds at
+    identical rates legitimately lowers it and must not turn this red. The floor
+    is what stops the identity check quietly degrading to the rate-collision-prone
+    state it started in, where the input rate alone left 2 to 11 candidates per
+    entry.
+    """
+    digest = load_digest()
+    unique = [
+        entry.pricing_key
+        for entry in EXPECTED_CACHE_UNIT_OMISSIONS
+        if len(_identity_candidates(digest, entry.pricing_key)) == 1
+    ]
+    assert len(unique) >= 15, (
+        f"only {len(unique)} of {len(EXPECTED_CACHE_UNIT_OMISSIONS)} members have "
+        "their price-list model pinned to exactly one candidate by the entry's "
+        "own published rates; it was 18. Below that the identity check is close "
+        "to the state it replaced"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(
+    os.environ.get("CHECK_AWS_PRICE_LIST") != "1",
+    reason="needs network egress; set CHECK_AWS_PRICE_LIST=1 to re-derive live",
+)
+def test_the_live_price_list_still_matches_the_committed_digest():
+    """Re-derive from AWS today rather than from the committed digest.
+
+    Opt-in and not a gate, for the reason ``check_markdown_links.py`` never
+    fetches an ``http`` URL: a blocking check that needs egress red-lines the
+    branch on somebody else's outage. The same switch the sibling digest uses, so
+    one command re-checks both.
+
+    What it answers is the question nothing else here can: the committed digest is
+    a reading of two files on one day, and AWS republishes them. The *versions*
+    are expected to move and that is not a failure; what must not have changed
+    silently is a **rate**, because a cache dimension appearing on a model this
+    register calls unpriced is a live $0.00 under-report.
+    """
+    import urllib.request
+
+    offers = []
+    for url in OFFER_URLS:
+        with urllib.request.urlopen(url, timeout=600) as handle:  # noqa: S310
+            offers.append(json.load(handle))
+    live = digest_offer_files(offers)
+    committed = load_digest()
+
+    moved = {
+        source["offer_code"]: (source["offer_version"], live_source["offer_version"])
+        for source, live_source in zip(committed["sources"], live["sources"])
+        if source["offer_version"] != live_source["offer_version"]
+    }
+    if moved:
+        print(f"offer files republished since the digest was taken: {moved}")
+
+    for entry in EXPECTED_CACHE_UNIT_OMISSIONS:
+        assert entry.price_list_model in live["models"], (
+            f"{entry.price_list_model!r} has left AWS's price list; "
+            f"{entry.pricing_key}:{entry.unit}'s basis can no longer be read"
+        )
+        rates = live["models"][entry.price_list_model][entry.unit]
+        chargeable = any(float(rate) > 0 for rate in rates)
+        assert chargeable == entry.priced_by_aws, (
+            f"AWS's price list has changed under {entry.pricing_key}:{entry.unit}. "
+            f"It records priced_by_aws={entry.priced_by_aws}; the live file "
+            f"publishes {rates or 'no dimension'} for "
+            f"{entry.price_list_model!r}. Refresh the digest with "
+            "bedrock_cache_dimension_digest.py --refresh and re-read the member"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -595,7 +786,7 @@ def test_the_runtime_verdict_follows_the_recorded_basis(entry: CacheUnitOmission
 @pytest.mark.unit
 @pytest.mark.parametrize("unit", CACHE_UNITS)
 def test_an_unregistered_bedrock_entry_omitting_a_cache_unit_is_reported(unit: str):
-    """The tenth omission, at runtime rather than in a gate.
+    """The twelfth omission, at runtime rather than in a gate.
 
     The static test above fails a new ``pricing.yaml`` row that omits a rate, and
     that is the primary catch. This is the second one, and it covers the case the

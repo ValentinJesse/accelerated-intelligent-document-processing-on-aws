@@ -74,6 +74,17 @@ their own services' price lists, so nothing here says that list is complete.
 A hand-written list of free units would be exactly the defect #1212 is about, one
 level up; an inference from an absence is weaker than a statement of fact, and
 saying which one this is, is the point of this section.
+
+⚠️ **There is a third cost implementation and it does not consult this module.**
+``src/ui/src/components/document-panel/pricing.ts`` is a TypeScript port of
+``_get_unit_cost`` for the web UI's document cost table, and it still returns
+``0`` for every unit a matched entry omits, because the declarations here are
+Python data the browser has no copy of. So for a row this module reports as
+unpriced, the ``metering`` table records NULL with a warning and that panel shows
+$0.00 with no mark. The divergence predates #1206 — it opened with #1212, for the
+non-cache units — and it is recorded in that file's own header rather than fixed
+here, because closing it means getting these declarations in front of the browser.
+The reporting table is the authority meanwhile.
 """
 
 from __future__ import annotations
@@ -257,12 +268,13 @@ class CacheUnitOmission:
     (``tests/unit/reporting/bedrock_cache_dimension_digest.py``, refreshable from
     the public files with no credential), and the unreachability premise is
     asserted against the two code constants, for every member — which is what the
-    older allowlist in ``test_pricing_lookup.py`` does for the nine of these
+    older allowlist in ``test_pricing_lookup.py`` did for the eight of these
     eleven whose model ids a template enum or a shipped preset names. The other
-    two reach a deployment through ``pricing.yaml`` itself, which doubles as the
-    set of model ids configuration validation accepts
-    (``config.merge_utils._load_valid_bedrock_models``), so they were configurable
-    and covered by nothing.
+    three — ``us.amazon.nova-premier-v1:0`` and the two
+    ``claude-3-haiku-20240307`` profiles — reach a deployment through
+    ``pricing.yaml`` itself, which doubles as the set of model ids configuration
+    validation accepts (``config.merge_utils._load_valid_bedrock_models``), so
+    they were configurable and covered by nothing.
     """
 
     pricing_key: str
@@ -283,6 +295,12 @@ AWS_BEDROCK_PRICE_LISTS = (
     "AmazonBedrockFoundationModels/current/index.json",
 )
 
+#: The two units :data:`EXPECTED_CACHE_UNIT_OMISSIONS` governs. Exported because
+#: both cost implementations need it to name the right declaration in the warning
+#: they log for an unpriced unit — sending an operator to the service-wide list
+#: for a cache unit would tell them to re-create the construct #1206 removed.
+CACHE_UNITS = ("cacheReadInputTokens", "cacheWriteInputTokens")
+
 #: Read on **2026-10-13** from ``AmazonBedrock`` offer version ``20261010182242``
 #: (published 2026-10-10, 13,315 products) and ``AmazonBedrockFoundationModels``
 #: offer version ``20261012084008`` (published 2026-10-12, 7,026 products). A
@@ -295,7 +313,7 @@ CACHE_DIMENSION_READING_DATE = "2026-10-13"
 #: Registered in ``scripts/tests/gate_exemptions.json`` as
 #: ``EXPECTED_CACHE_UNIT_OMISSIONS``. Owned by
 #: ``tests/unit/reporting/test_cache_unit_omission_basis.py``, which derives the
-#: universe from ``config_library/pricing.yaml`` itself — so a tenth entry that
+#: universe from ``config_library/pricing.yaml`` itself — so a twelfth entry that
 #: omits a cache unit fails there rather than inheriting a reason written for
 #: somebody else's model.
 EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
@@ -341,8 +359,11 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             AWS_BEDROCK_PRICE_LISTS[0],
             "No cache dimension: 176 token-priced dimensions across 13 regions, "
             "all input or output, in four service tiers (standard, batch, flex, "
-            "priority). A Bedrock Marketplace model served through the mantle "
-            "path, where prompt caching is not offered.",
+            "priority). Note that this model reaches bedrock-runtime Converse "
+            "like every other model here, not the bedrock-mantle Responses path, "
+            "which carries the openai.gpt-5.x models only — the operative premise "
+            "is the one the test computes (absent from "
+            "CACHEPOINT_SUPPORTED_MODELS), not a routing claim.",
             ("cacheReadInputTokens", "cacheWriteInputTokens"),
         ),
         (
@@ -372,8 +393,8 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             False,
             AWS_BEDROCK_PRICE_LISTS[0],
             "No cache dimension: 176 token-priced dimensions across 13 regions, "
-            "all input or output. A mantle-served Marketplace model, as Qwen "
-            "above.",
+            "all input or output, in the same four service tiers as Qwen above "
+            "and read in the same pass over the same offer file version.",
             ("cacheReadInputTokens", "cacheWriteInputTokens"),
         ),
         (
@@ -411,8 +432,12 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             False,
             AWS_BEDROCK_PRICE_LISTS[0],
             "Cache-write is published at exactly $0.0000000000 for this model "
-            "(usagetype 'NovaPro-cache-write-input-token-count'), as for every "
-            "Nova model. Nothing is hidden by omitting a unit AWS prices at zero.",
+            "(usagetype 'NovaPro-cache-write-input-token-count'). Nothing is "
+            "hidden by omitting a unit AWS prices at zero. Scoped to this model "
+            "rather than to Nova as a family, which would be false three ways: "
+            "Nova Premier publishes no standard-tier cache-write dimension at "
+            "all, and Nova 2.0 Pro and Nova 2.0 Omni publish no cache dimension "
+            "of any kind.",
             ("cacheWriteInputTokens",),
         ),
         (
@@ -421,8 +446,9 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             False,
             AWS_BEDROCK_PRICE_LISTS[0],
             "Cache-write is published at exactly $0.0000000000 for this model "
-            "(usagetype 'NovaLite-cache-write-input-token-count'), as for every "
-            "Nova model. Nothing is hidden by omitting a unit AWS prices at zero.",
+            "(usagetype 'NovaLite-cache-write-input-token-count'), as for Nova "
+            "Pro above and read in the same pass. Nothing is hidden by omitting "
+            "a unit AWS prices at zero.",
             ("cacheWriteInputTokens",),
         ),
         # ---- AWS DOES price the dimension; the omission rests on the code ----
@@ -525,8 +551,15 @@ def classify_absent_unit(pricing_key: str, unit: str, value: Any) -> Verdict:
       free, and the caller reports it.
 
     Otherwise ``UNKNOWN`` — the caller reports it rather than pricing it at zero.
-    A count that is not a number is ``UNKNOWN`` too: it is not a measured zero,
-    and treating an unreadable count as one is how a failed read becomes a value.
+
+    ⚠️ Note the order, because it bounds the previous sentence: a count that is
+    not a number is ``UNKNOWN`` only if **no** declaration covers the unit. It is
+    not a measured zero, and treating an unreadable count as one is how a failed
+    read becomes a value — but a *declared* free unit is free whatever its count
+    says, since the declaration is about the rate and not about the reading. The
+    bound costs nothing in practice and both callers are why: the product coerces
+    the count to a float before this call, and the harness reports a non-numeric
+    count before reaching the lookup at all.
 
     Note what the third rule means for a key this register does not name: a cache
     unit absent from *any other* Bedrock pricing entry is ``UNKNOWN``. That is the
