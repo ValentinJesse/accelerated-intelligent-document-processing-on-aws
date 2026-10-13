@@ -60,9 +60,12 @@ yourself are not rewritten, the same as in EU regions.
 |---------|-----------------|-------------------|-----|
 | Confidence assessment (`extraction.confidence.model`) | `us.amazon.nova-lite-v1:0` | `ca.amazon.nova-lite-v1:0` | Same model through its Canada geo profile; processes in Canada |
 | Discovery, with and without ground truth (`model_id`) | `us.amazon.nova-pro-v1:0` | `us.amazon.nova-2-lite-v1:0` | No Nova Pro profile in ca-central-1. Nova 2 Lite is the catalog's Nova default for OCR, classification and evaluation, and is multimodal and cheaper |
-| Multi-document discovery embedding (`multi_document.embedding_model_id`) | `us.cohere.embed-v4:0` | `global.cohere.embed-v4:0` | Only the global profile exists in Canada |
+| Multi-document discovery embedding (`multi_document.embedding_model_id`) | `us.cohere.embed-v4:0` | `global.cohere.embed-v4:0` | Only the global profile exists in Canada. The swap is ca-central-1-only in effect: this profile does not exist in ca-west-1 either, so a ca-west-1 stack moves from one id it cannot call to another |
 
-Every swapped-in id is in the Canada picklists.
+The two text-generation ids swapped in above are in the Canada picklists.
+`multi_document.embedding_model_id` has no picklist — it is a free-text field
+with a `default:` and no `enum` — so its value is only ever set by this swap or
+by hand.
 
 `ca.amazon.nova-lite-v1:0` is new to the catalog with this support, and it is
 the only `ca.` profile AWS offers. It is in every model dropdown where its EU
@@ -144,8 +147,15 @@ in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configu
   elsewhere) emits no metering entry — `generate_embedding` returns a bare
   vector — and neither id has a row in `config_library/pricing.yaml`, so
   embedding usage does not appear in cost reporting. Pre-existing and not
-  specific to Canada; the pricing coverage gate exempts embedding models for
-  this reason.
+  specific to Canada. The coverage gates record this per id rather than as a
+  blanket rule for embeddings: `_COVERAGE_EXEMPT` in
+  `lib/idp_common_pkg/tests/unit/reporting/test_pricing_lookup.py` and
+  `EMBEDDING_MODELS` in `scripts/tests/test_model_surface_consistency.py` name
+  the Knowledge Base embedding models, and `NON_SELECTABLE_DEFAULTS` names
+  `us.cohere.embed-v4:0`. `global.cohere.embed-v4:0` is in none of them, and
+  needs no entry only because it reaches a stack through the swap table rather
+  than through any surface those gates walk — so a shipped preset or code
+  default naming it would fail them with no entry to point at.
 - **ca-west-1 is handled, but the model lists are derived from ca-central-1.**
   A `ca-west-1` stack resolves to the same `ca` region type and gets the same
   picklists, swaps and Knowledge Base default, which is validated for
