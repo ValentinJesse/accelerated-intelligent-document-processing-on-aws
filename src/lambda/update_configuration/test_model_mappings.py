@@ -224,3 +224,33 @@ def test_a_govcloud_profile_is_offered_only_in_the_us_region_type(
 
     offered = index.filter_models_by_region(schema, region_type)
     assert (model_id in offered["properties"]["model"]["enum"]) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "region_type,ca_offered", [("us", False), ("eu", False), ("ca", True)]
+)
+def test_a_list_with_no_us_or_eu_id_is_still_a_model_picklist(
+    region_type: str, ca_offered: bool
+):
+    """A Canada-only picklist has to be recognised as a picklist.
+
+    ``filter_models_by_region`` decides a list is a model list by finding a geo id
+    in it. While that test named only ``us.`` and ``eu.``, a list whose geo ids
+    were all Canada ones fell through to the generic recursion untouched — so a US
+    or EU stack would be offered a ``ca.`` id it cannot call, with no filtering
+    applied to that list at all. Every shipped picklist carries ``us.`` entries,
+    which is why nothing is wrong today and why this case needs its own test.
+    """
+    ca_model = "ca.amazon.nova-lite-v1:0"
+    everywhere = "global.anthropic.claude-sonnet-4-6"
+    schema = {
+        "properties": {"model": {"type": "string", "enum": [ca_model, everywhere]}}
+    }
+
+    offered = index.filter_models_by_region(schema, region_type)
+    offered = offered["properties"]["model"]["enum"]
+    assert (ca_model in offered) is ca_offered, region_type
+    assert everywhere in offered, (
+        f"a global. id is callable from {region_type} and must survive the filter"
+    )

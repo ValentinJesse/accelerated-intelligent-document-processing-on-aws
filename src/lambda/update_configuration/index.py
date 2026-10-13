@@ -307,10 +307,15 @@ def filter_models_by_region(data: Any, region_type: str) -> Any:
         filtered_data = {}
         for key, value in data.items():
             if isinstance(value, list) and any(
-                isinstance(item, str) and ("us." in item or "eu." in item)
+                isinstance(item, str)
+                and ("us." in item or "eu." in item or "ca." in item)
                 for item in value
             ):
-                # This is a model list - filter it
+                # This is a model list - filter it. `ca.` is in the test so a list
+                # whose only geo ids are Canada ones is still recognised: without
+                # it such a list skips filtering entirely and a US or EU stack is
+                # offered a `ca.` id it cannot call. Every shipped picklist also
+                # carries `us.` ids, so this changes no current output.
                 filtered_list = []
                 for item in value:
                     if isinstance(item, str):
@@ -367,7 +372,16 @@ def swap_model_ids(data: Any, region_type: str) -> Any:
                 # Never swap special model values
                 swapped_data[key] = value
             elif isinstance(value, str) and ("us." in value or "eu." in value):
-                # This is a model ID - check if it needs swapping
+                # This is a model ID - check if it needs swapping.
+                #
+                # `ca.` is deliberately NOT in this test, unlike the picklist
+                # filter above. Every arm below rewrites a stored id INTO the
+                # deploying region's geo, and none of them starts from a `ca.` id:
+                # CA_MODEL_MAPPINGS is one-way, so get_model_mapping(ca_id, "us")
+                # and (ca_id, "eu") both return the id unchanged by design — see
+                # that table's comment. A `ca.` arm here would be unreachable
+                # code, and widening the test alone would only walk `ca.` values
+                # that then match no arm.
                 if region_type == "us" and value.startswith("eu."):
                     new_model = get_model_mapping(value, "us")
                     if new_model != value:
