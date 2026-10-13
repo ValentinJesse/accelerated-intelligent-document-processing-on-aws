@@ -94,6 +94,7 @@ def _run_all_tests_module():
     spec.loader.exec_module(module)
     return module
 
+
 #: Gitignored directories that can hold a whole copy of this tree.
 LOCAL_WORK_DIRS = ("scratch", ".claude")
 
@@ -107,6 +108,7 @@ REPO_WALKING_GATES = (
     "test_classification_prompt_copies_in_sync.py",
     "test_iam_privilege_escalation.py",
     "test_lambda_log_groups.py",
+    "test_no_outbound_aws_is_universal.py",
     "test_log_group_encryption.py",
     "test_testing_doc.py",
     "test_well_architected_doc.py",
@@ -197,8 +199,7 @@ def test_the_tracked_helpers_fallback_walk_prunes_local_work(
         "fallback walk — the thing under test — would not run at all"
     )
     found = {
-        p.relative_to(root).as_posix()
-        for p in repo_files.tracked_paths(root, "*.py")
+        p.relative_to(root).as_posix() for p in repo_files.tracked_paths(root, "*.py")
     }
 
     assert "svc/handler.py" in found, (
