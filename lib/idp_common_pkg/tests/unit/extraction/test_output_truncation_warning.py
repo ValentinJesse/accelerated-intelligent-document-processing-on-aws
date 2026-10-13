@@ -257,9 +257,83 @@ class TestTheFindingReachesTheSection:
         assert issue.severity == "warning"
         assert issue.stage == "extraction"
         assert issue.details["truncated_list_fields"] == ["Transactions"]
+        # The section it belongs to. A random-sample mutation that dropped this
+        # attribution survived the suite, which is how it came to be asserted:
+        # an issue with no section is one the UI cannot place on a multi-section
+        # document.
+        assert issue.section_id == "1"
+        # ``root_cause`` is what an operator groups by when the same thing happens
+        # across a batch, so it has to name the mode, the model and the condition.
+        # Also unpinned until a mutation survived.
+        assert "traditional extraction" in issue.root_cause
+        assert "truncated before completion" in issue.root_cause
+        assert self._model_of(svc) in issue.root_cause
         # Durable, not merely in memory: this is what a reader opens.
         persisted = write.call_args.args[0]["metadata"]["processing_issues"]
         assert [i for i in persisted if i["code"] == CODE]
+
+    @staticmethod
+    def _model_of(svc: ExtractionService) -> str:
+        """The configured extraction model, read from the service under test.
+
+        Derived rather than written out, so the assertion does not pin whatever
+        the shipped default happens to be today.
+        """
+        model = svc.config.extraction.model
+        assert model, "the service has no extraction model configured"
+        return str(model)
+
+    def test_the_root_cause_names_the_agentic_mode_when_that_is_the_mode(self):
+        svc = _svc(agentic=True)
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+                output_truncated=True,
+            ),
+        )
+        issue = next(i for i in section.processing_issues if i.code == CODE)
+        assert "agentic extraction" in issue.root_cause
+        assert "traditional" not in issue.root_cause
+
+    def test_a_repaired_result_says_so_and_names_the_repair(self):
+        svc = _svc()
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+                output_truncated=True,
+                output_repaired=True,
+                repair_method="close_structures",
+            ),
+        )
+        issue = next(i for i in section.processing_issues if i.code == CODE)
+        assert issue.details["output_repaired"] is True
+        assert issue.details["repair_method"] == "close_structures"
+        assert "close_structures" in issue.root_cause
+
+    def test_an_unrepaired_result_does_not_claim_a_repair(self):
+        svc = _svc()
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+                output_truncated=True,
+            ),
+        )
+        issue = next(i for i in section.processing_issues if i.code == CODE)
+        assert issue.details["output_repaired"] is False
+        assert issue.details["repair_method"] is None
+        assert "repaired by" not in issue.root_cause
 
     def test_a_complete_result_carries_no_truncation_issue(self):
         svc = _svc()
@@ -288,7 +362,12 @@ class TestTheFindingReachesTheSection:
             ),
         )
         msg = next(i for i in section.processing_issues if i.code == CODE).message
+        assert "cut off before it finished" in msg
+        # Both halves of the Simple-mode remedy: what went wrong and what to do.
+        assert "one response per section" in msg
         assert "Advanced" in msg and "shards" in msg
+        assert "split the document" in msg
+        # Why no other signal flags it — the reason the issue exists at all.
         assert "confidence" in msg
         assert "Transactions" in msg
 
@@ -306,7 +385,11 @@ class TestTheFindingReachesTheSection:
         )
         msg = next(i for i in section.processing_issues if i.code == CODE).message
         assert "use Advanced" not in msg
+        # Both halves again. Pinning only the second left a mutation of the first
+        # alive through the random sample.
+        assert "Reduce the rows" in msg
         assert "max_pages_per_shard" in msg
+        assert "split the document" in msg
 
     def test_the_warning_does_not_fail_the_section(self):
         """Severity is ``warning``, always — the scope line of this change.
