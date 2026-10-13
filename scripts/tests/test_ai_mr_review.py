@@ -1841,20 +1841,103 @@ GIT_TARGET_CHECKER = "_assert_git_target_is"
 # here today.
 
 
-# The statement fields that hold a *block*: a run of statements that may or may not
-# execute. `_runs_every_time` descends into the ones that always begin executing and
-# these are what it refuses to look inside.
-_BLOCK_FIELDS = frozenset({"body", "orelse", "finalbody", "handlers"})
+# The node types that carry a *block*: a run of statements that may or may not
+# execute. Derived from the type a field holds rather than from a list of field
+# names, because a name list is one `match` statement away from being wrong and
+# wrong silently -- `cases` is neither `body` nor `handlers`, and these are the only
+# three block-bearing node types Python's grammar has.
+_BLOCK_BEARING = (ast.stmt, ast.excepthandler, ast.match_case)
+
+# Context managers that discard the exception their body raises, so a refusal
+# inside one never reaches the test runner. Unlike `_BLOCK_BEARING` this *is* a
+# named list and cannot be derived -- whether a context manager swallows is a
+# property of its implementation, not of the syntax -- so its reach is its contents.
+# Matched on the callee's last name component, so `suppress(...)` and
+# `contextlib.suppress(...)` are the same entry.
+_REFUSAL_DISCARDING_MANAGERS = frozenset({"suppress", "raises"})
+
+# A `try` is only descended into if it carries no handler at all, not merely no
+# handler that would catch an `AssertionError`: deciding which exceptions a handler
+# catches is a type analysis. The conservative direction fails loudly on a shape
+# nobody writes around a setup check, rather than passing quietly on one somebody
+# does.
+_TRY_STATEMENTS = (ast.Try, *((ast.TryStar,) if hasattr(ast, "TryStar") else ()))
+
+# Expressions whose body is *deferred*: it runs when the lambda is called or the
+# comprehension is iterated, not where it is written. A call in one of these has not
+# run, so `_own_expressions` yields the node and stops there.
+_DEFERRED_BODIES = (
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+def _own_expressions(node: ast.AST):
+    """``node`` and its descendants, stopping at anything whose body is deferred.
+
+    The three live call sites each *pass* a lambda to the check -- the check's own
+    call is the outer node -- so it is reached before the lambda is skipped, and
+    ``_ = lambda: <call>`` is not. Measured, that spelling previously left this
+    module green with the containment dead.
+
+    The one thing this gives up is a call in a comprehension's source iterable
+    (``[x for x in <call>()]``), which does run eagerly. Nothing writes that.
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, _DEFERRED_BODIES):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _spells_a_git_write(spelled: set[str]) -> bool:
+    """Whether a function's whole string literals name a git command that writes.
+
+    **Any one** write subcommand is enough, and that is the half worth driving from
+    a test rather than reading: the three live writers each spell ``config``, ``add``
+    and ``commit``, so tightening ``&`` to ``issubset`` agrees with this on today's
+    tree while quietly dropping any future writer that spells only one of them.
+    Narrowing the audited universe is the unsafe direction, and nothing about the
+    real tree can show it.
+    """
+    return GIT_COMMAND in spelled and bool(spelled & GIT_WRITE_SUBCOMMANDS)
+
+
+def _discards_a_refusal(statement: ast.With | ast.AsyncWith) -> bool:
+    """Whether a ``with`` statement's managers swallow what its body raises."""
+    for item in statement.items:
+        expression = item.context_expr
+        callee = expression.func if isinstance(expression, ast.Call) else expression
+        spelled = (
+            callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+        )
+        if spelled in _REFUSAL_DISCARDING_MANAGERS:
+            return True
+    return False
 
 
 def _runs_every_time(body: list[ast.stmt]) -> list[ast.stmt]:
-    """The statements in ``body`` that execute on every entry to it.
+    """The statements in ``body`` that run on every entry to it and can still fail.
 
     Descends into a ``with`` and into a ``try``'s own body and ``finally``, because
     all three always begin executing; refuses to descend into a conditional, a loop,
-    an exception handler, an ``else`` or a nested ``def``, because a statement in one
-    of those is a statement that may not happen. Stops at the first statement that
-    leaves the body, so a call written after a ``return`` does not count either.
+    an exception handler, an ``else``, a ``case`` or a nested ``def``, because a
+    statement in one of those is a statement that may not happen. Stops at the first
+    statement that leaves the body, so a call written after a ``return`` does not
+    count either.
+
+    "And can still fail" is the second half, and it is not the same question. A
+    control whose refusal is discarded has run and protected nothing, so a ``try``
+    carrying a handler, and a ``with`` whose manager is one of
+    :data:`_REFUSAL_DISCARDING_MANAGERS`, are both refused although their bodies
+    certainly execute. Measured before that: ``try: <call>`` with a swallowing
+    ``except``, and ``with contextlib.suppress(AssertionError): <call>``, each left
+    this module green with the containment dead.
     """
     reached: list[ast.stmt] = []
     for statement in body:
@@ -1862,9 +1945,11 @@ def _runs_every_time(body: list[ast.stmt]) -> list[ast.stmt]:
         if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
             break
         if isinstance(statement, (ast.With, ast.AsyncWith)):
-            reached.extend(_runs_every_time(statement.body))
-        elif isinstance(statement, ast.Try):
-            reached.extend(_runs_every_time(statement.body))
+            if not _discards_a_refusal(statement):
+                reached.extend(_runs_every_time(statement.body))
+        elif isinstance(statement, _TRY_STATEMENTS):
+            if not statement.handlers:
+                reached.extend(_runs_every_time(statement.body))
             reached.extend(_runs_every_time(statement.finalbody))
     return reached
 
@@ -1892,21 +1977,36 @@ def _calls_by_name(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> b
     An attribute callee (``helpers._assert_git_target_is(...)``) counts, because
     refusing one would fail on an ordinary refactor rather than on a missing check.
 
-    Two bounds, both deliberate. A decorator that replaces the function wholesale is
-    invisible to any reading of the function's own syntax. And a call nested inside a
-    ``lambda`` or a comprehension that is itself an unconditional statement's
-    expression is counted, although it runs only when that lambda is called -- the
-    three real call sites each *pass* a lambda to the check, so excluding lambda
-    bodies would mean tracking which lambda is the argument and which is the callee.
+    Four bounds, every one of them measured rather than reasoned about, because the
+    whole point of this function is that an unstated bound reads as coverage:
+
+    * A **conditional expression** counts, so ``<call> if strict else None`` and
+      ``strict and <call>`` are accepted although the statement form of the same
+      guard, ``if strict: <call>``, is refused. Both are expressions of a statement
+      that runs, and short-circuit and ternary analysis is more machinery than the
+      risk justifies -- but the ``and`` spelling is the ordinary one-line form of a
+      refused shape, so it is the sharpest edge here and is pinned as a known
+      positive in :data:`_CHECKER_CALL_SPELLINGS` rather than left to be found.
+    * A **decorator** that replaces the function wholesale is invisible to any
+      reading of the function's own syntax.
+    * A call in a **comprehension's source iterable** is missed, because
+      :func:`_own_expressions` stops at a comprehension and the source is the one
+      part of it that runs eagerly.
+    * A ``with`` manager that swallows but is **not named** in
+      :data:`_REFUSAL_DISCARDING_MANAGERS` counts. That list cannot be derived, so
+      its reach is its contents.
+
+    None of those is reachable by accident. Every shape that turns this control off
+    *without intent* -- deleting the line, commenting it out, ``if False:``, an
+    environment opt-out, a nested ``def``, a loop, an ``else``, a ``case``, a line
+    after a ``return``, a swallowing ``try`` or ``suppress`` -- is refused.
     """
     for statement in _runs_every_time(node.body):
-        for field, value in ast.iter_fields(statement):
-            if field in _BLOCK_FIELDS:
-                continue
+        for _field, value in ast.iter_fields(statement):
             for item in value if isinstance(value, list) else [value]:
-                if not isinstance(item, ast.AST):
+                if not isinstance(item, ast.AST) or isinstance(item, _BLOCK_BEARING):
                     continue
-                for child in ast.walk(item):
+                for child in _own_expressions(item):
                     if not isinstance(child, ast.Call):
                         continue
                     callee = child.func
@@ -2352,10 +2452,7 @@ def test_every_throwaway_repository_runner_confirms_its_target() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        spelled = tokens(node)
-        if GIT_COMMAND not in spelled:
-            continue
-        if not spelled & GIT_WRITE_SUBCOMMANDS:
+        if not _spells_a_git_write(tokens(node)):
             continue
         writers[node.name] = node
 
@@ -2403,8 +2500,13 @@ _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
         True,
     ),
     (
-        "a-call-inside-a-try-body",
+        "a-call-inside-a-try-body-with-no-handler",
         "def writer():\n    try:\n        {c}(thunk, repo)\n    finally:\n        pass\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-with-block-that-does-not-swallow",
+        "def writer():\n    with tempfile.TemporaryDirectory() as d:\n        {c}(thunk, d)\n",
         True,
     ),
     # --- the text form's measured survivors ---
@@ -2466,9 +2568,71 @@ _CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
         False,
     ),
     (
-        "a-call-short-circuited-away",
-        "def writer():\n    _ = False and {c}(thunk, repo)\n",
-        True,  # the `and` is an expression of an unconditional statement; see below
+        "a-call-only-when-a-while-condition-holds",
+        "def writer():\n    while retry:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-inside-a-match-case",
+        "def writer():\n    match repo.name:\n        case 'never':\n            {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "the-name-inside-a-call-it-is-not-the-callee-of",
+        "def writer():\n    register({c})\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-discarded-lambda",
+        "def writer():\n    _ = lambda: {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-comprehension-that-never-iterates",
+        "def writer():\n    _ = [{c}(thunk, repo) for _once in []]\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-generator-nobody-drains",
+        "def writer():\n    _ = ({c}(thunk, repo) for _once in targets)\n",
+        False,
+    ),
+    # --- a call that runs, and whose refusal is thrown away ---
+    (
+        "a-call-whose-refusal-a-handler-swallows",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    except AssertionError:\n        pass\n",
+        False,
+    ),
+    (
+        "a-call-whose-refusal-a-bare-except-swallows",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    except Exception:\n        log()\n",
+        False,
+    ),
+    (
+        "a-call-wrapped-in-contextlib-suppress",
+        "def writer():\n    with contextlib.suppress(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-wrapped-in-an-unqualified-suppress",
+        "def writer():\n    with suppress(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-inverted-by-pytest-raises",
+        "def writer():\n    with pytest.raises(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    # --- known positives that arguably should not be; see `_calls_by_name` ---
+    (
+        "a-call-guarded-by-a-short-circuit",
+        "def writer():\n    _ = strict and {c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-guarded-by-a-ternary",
+        "def writer():\n    _ = {c}(thunk, repo) if strict else None\n",
+        True,
     ),
 ]
 
@@ -2492,16 +2656,54 @@ def test_the_call_check_reads_a_call_and_not_the_text(
     by mutating this file, because the mutation is the thing being defended against
     and a test cannot leave it installed.
 
-    One case is a known positive that *should* arguably be a negative and is
-    recorded as what the check really does rather than as what would be ideal:
-    ``False and <call>`` never runs, but it is an expression of a statement that
-    does, and a short-circuit analysis is more machinery than the risk justifies --
-    nobody silences a setup call by writing that. It is listed so the behaviour is
-    pinned rather than discovered later.
+    The last two cases are known positives that arguably should be negatives, and
+    they are recorded as what the check really does rather than as what would be
+    ideal. ``strict and <call>`` and ``<call> if strict else None`` are the
+    expression forms of ``if strict: <call>``, which is pinned a few rows above as a
+    negative, so the check draws a line between the statement form of a guard and
+    the expression form of the same guard. That line is where it is because
+    short-circuit and ternary analysis is more machinery than the risk justifies,
+    not because the expression form is safer. Listing them is the point: a bound
+    nobody wrote down is the defect this whole module's lineage is about.
     """
     body = source.format(c=GIT_TARGET_CHECKER)
     node = ast.parse(body).body[0]
     assert _calls_by_name(node, GIT_TARGET_CHECKER) is counts, body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("spelled", "qualifies"),
+    [
+        ({GIT_COMMAND, "commit"}, True),
+        ({GIT_COMMAND, "add"}, True),
+        ({GIT_COMMAND, "config"}, True),
+        ({GIT_COMMAND, "commit", "add", "config"}, True),
+        ({GIT_COMMAND, "rev-parse", "show"}, False),
+        ({"commit", "add", "config"}, False),
+        (set(), False),
+    ],
+    ids=[
+        "one-subcommand-commit",
+        "one-subcommand-add",
+        "one-subcommand-config",
+        "all-three",
+        "a-read-only-command",
+        "a-subcommand-but-no-command-name",
+        "nothing",
+    ],
+)
+def test_one_write_subcommand_is_enough_to_be_audited(
+    spelled: set[str], qualifies: bool
+) -> None:
+    """The audited universe must not narrow, and the real tree cannot show it.
+
+    All three live writers spell all three subcommands, so requiring every one of
+    them instead of any one agrees with the rule against this tree while dropping a
+    future writer that spells only ``commit``. Driven over token sets, which is the
+    only input that separates the two readings.
+    """
+    assert _spells_a_git_write(spelled) is qualifies, sorted(spelled)
 
 
 @pytest.mark.unit
