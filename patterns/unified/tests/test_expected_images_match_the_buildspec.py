@@ -60,11 +60,10 @@ above uncovered for that entry.
 
 One shape is read without complaint and is worth knowing about: a resource
 declaring ``ExpectedImages`` **twice** in the same mapping yields only the last
-block, because that is what PyYAML does with a duplicate key. The gate therefore
-agrees with the resource CloudFormation would create, and the duplicate itself is
-an ERROR-class ``cfn-lint`` finding (``E0000 Duplicate found``) on a gate that
-runs in ``lint``, ``fastlint`` and ``lint-cicd``, so it is caught before this one
-is reached rather than left to it.
+block, because that is what PyYAML does with a duplicate key. ``cfn-lint`` reports
+the duplicate at ERROR class (``E0000 Duplicate found``) on a gate that runs in
+``lint``, ``fastlint`` and ``lint-cicd``, so it does not go unreported -- and that
+gate and this one run in parallel rather than in sequence, so neither is "first".
 """
 
 from __future__ import annotations
@@ -338,10 +337,13 @@ def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
         f"the probes splice a tail onto one block-style {_PROPERTY} list and found "
         f"{len(starts)} candidate lines, not 1. More than one means a second "
         "declaring site the probes would silently skip, so extend them to cover "
-        "each. None means the list is no longer block style -- a flow sequence "
-        f"({_PROPERTY}: [a, b]) or an alias writes it on the key's own line -- in "
-        "which case the gate itself is unaffected, because it reads the parsed "
-        "document, and what needs rewriting is the splice below."
+        "each. None means nothing matched the key line this locator looks for, "
+        "which is the key alone on its line: a trailing comment on it "
+        f"({_PROPERTY}:  # the list) is the likeliest cause and leaves the list "
+        f"perfectly block style, while a flow sequence ({_PROPERTY}: [a, b]) or an "
+        "alias moves the entries onto the key's line too. In every one of those "
+        "the gate itself is unaffected, because it reads the parsed document; what "
+        "needs rewriting is the splice below."
     )
     start = starts[0]
     indent = len(lines[start]) - len(lines[start].lstrip())
@@ -354,6 +356,11 @@ def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
     while block and not block[-1].strip():
         block.pop()
     assert block, f"the {_PROPERTY} block at line {start + 1} reads as empty"
+    assert any(line.lstrip().startswith("-") for line in block), (
+        f"the {_PROPERTY} block at line {start + 1} holds no list entries, only "
+        f"comments: {block}. The splices below take their indentation from an "
+        "existing entry, so there is nothing to splice onto."
+    )
     return start + 1, block
 
 
@@ -380,8 +387,18 @@ def _minimal_document(block: list[str]) -> str:
 
 
 def _tail_indent(block: list[str]) -> str:
-    """The indentation the block's own entries sit at."""
-    reference = next(line for line in block if line.lstrip().startswith("-"))
+    """The indentation the block's **first** entry sits at.
+
+    First rather than any, because a nested line under an earlier entry is more
+    indented and would move every splice in with it.
+    """
+    entries = [line for line in block if line.lstrip().startswith("-")]
+    assert entries, (
+        f"no list entry in {block}, so there is no indentation to splice at. "
+        "_block_bounds refuses this, and a bare StopIteration from a generator "
+        "would name neither the block nor the reason."
+    )
+    reference = entries[0]
     return reference[: len(reference) - len(reference.lstrip())]
 
 
@@ -498,31 +515,53 @@ def test_the_parse_sees_every_entry_whatever_its_spelling(
     )
 
 
-def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check() -> None:
+@pytest.mark.parametrize("position", ["start-of-list", "mid-list", "end-of-list"])
+def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
+    position: str,
+) -> None:
     """The issue's own measurement, against the real template text.
 
-    A comment inserted mid-list plus an unbuilt image after it has to reach the
-    subset assertion. Spliced into the whole template rather than the one-resource
-    frame the probes use, so nothing about the frame can be what makes it visible.
+    A comment plus an unbuilt image after it has to reach the subset assertion.
+    Spliced into the whole template rather than the one-resource frame the probes
+    use, so nothing about the frame can be what makes it visible.
+
+    All three positions are driven, and the reason is that one position tests the
+    parse while three test the **comparison** as well. :func:`_unbuilt` is where a
+    silently-dropped entry would next be possible, and a sentinel sitting in the
+    middle is seen by a comparison that discards either end -- measured, with the
+    sentinel mid-list, ``set(expected[:-1]) - built`` and ``set(expected[1:]) -
+    built`` both passed, and the first of those is the drop-the-tail shape this
+    whole module exists to prevent. A single splice position cannot distinguish
+    them; putting the sentinel first, in the middle and last does.
     """
     lines = _template_text().splitlines()
     start, block = _block_bounds()
     indent = _tail_indent(block)
-    insert_at = start + len(block) - 1  # before the block's last entry
+    index = {
+        "start-of-list": 0,
+        "mid-list": len(block) - 1,
+        "end-of-list": len(block),
+    }[position]
     mutated = (
-        lines[:insert_at]
+        lines[: start + index]
         + [f"{indent}# a note about the entry below"]
         + [f'{indent}- "{_SENTINEL}"']
-        + lines[insert_at:]
+        + lines[start + index :]
     )
 
     parsed = _expected_images_in_text("\n".join(mutated) + "\n")
     assert _SENTINEL in parsed, (
-        f"{_SENTINEL} was spliced in after a comment and the parse did not return it"
+        f"{_SENTINEL} was spliced in {position} after a comment and the parse did "
+        "not return it"
+    )
+    landed = {"start-of-list": parsed[0], "end-of-list": parsed[-1]}.get(position)
+    assert landed in (None, _SENTINEL), (
+        f"the {position} splice did not land where it was meant to, so a comparison "
+        f"discarding that end would still see it: {parsed}"
     )
     assert _unbuilt(parsed, _built_images()) == [_SENTINEL], (
-        "an unbuilt image spliced in after a comment did not reach the subset check: "
-        f"the parse returned {parsed}"
+        f"an unbuilt image spliced in {position} after a comment did not reach the "
+        f"subset check: the parse returned {parsed}"
     )
 
 
@@ -585,11 +624,12 @@ def test_the_walk_descends_into_a_sequence(conditional: str) -> None:
 #
 # Every assertion in the parsing half fires on a shape the template does not
 # currently have, so none of them is exercised by the live assertions -- removing
-# any one of them leaves this module green. Measured: of fourteen deliberate
-# mutations of the parsing half, seven survived, and six of the seven were an
-# assertion in exactly that position. Each is therefore driven here against a
-# synthetic document, which is the only input that can distinguish the guard from
-# its absence.
+# any one of them leaves this module green -- which is how six of them were found:
+# mutating the parsing half assertion by assertion, every survivor was an assertion
+# in exactly that position. Each is therefore driven here against a synthetic
+# document, which is the only input that can distinguish the guard from its
+# absence. No count is quoted because the mutation set is not in this repository
+# and the figure would be unverifiable here.
 # --------------------------------------------------------------------------- #
 
 
@@ -639,6 +679,36 @@ def test_a_second_declaring_site_fails_the_probe_locator() -> None:
         "the gate's parse must union every declaring site"
     )
     with pytest.raises(AssertionError, match="candidate lines"):
+        _block_bounds(text)
+
+
+@pytest.mark.parametrize(
+    ("case", "text", "expected"),
+    [
+        (
+            "no-lines-under-the-key",
+            f"A:\n  {_PROPERTY}:\nB: 1\n",
+            "reads as empty",
+        ),
+        (
+            "comments-only-under-the-key",
+            f'A:\n  {_PROPERTY}:\n    # all commented out\n    # - "a-function"\nB: 1\n',
+            "holds no list entries",
+        ),
+    ],
+)
+def test_a_block_with_nothing_to_splice_onto_is_refused(
+    case: str, text: str, expected: str
+) -> None:
+    """Both empty shapes refuse by name, rather than raising from a generator.
+
+    A commented-out list is what a refactor leaves behind, and before this the
+    second shape reached ``_tail_indent`` and raised a bare ``StopIteration`` --
+    naming neither the block nor the reason. The gate proper survives either
+    (the property parses as ``None`` and is refused as "not a list"); this is the
+    probe scaffolding saying so too.
+    """
+    with pytest.raises(AssertionError, match=expected):
         _block_bounds(text)
 
 
@@ -692,6 +762,14 @@ def test_an_export_the_loop_does_not_name_is_not_a_built_image() -> None:
         'export FUNCTION_BETA="src/lambda/beta_function"',
         "for func_var in FUNCTION_ALPHA; do echo $func_var; done",
     ]
+    exports = _exported_functions(commands)
+    looped = _looped_functions(commands)
+    assert set(exports) - set(looped), (
+        f"the synthetic buildspec exports {sorted(exports)} and loops over "
+        f"{sorted(looped)}, so there is no un-looped export and the assertion below "
+        "would hold whichever list the implementation read"
+    )
+
     built = _built_images_from(commands)
     assert built == frozenset({"alpha-function"}), built
 
