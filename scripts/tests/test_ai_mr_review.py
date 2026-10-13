@@ -25,6 +25,7 @@ assert that the mocks are wired up, not that a review is any good.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -331,8 +332,19 @@ def test_the_instruction_file_set_is_derived_not_authored(mod, tmp_path) -> None
 
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills").mkdir(parents=True)
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+
+    # The repository is named in argv (`git -C <repo>`) rather than through `cwd=`.
+    # Every git call below writes -- `init`, `config`, `add`, `commit` -- and a `cwd=`
+    # that goes missing points all of them at this checkout, where `git config` from a
+    # linked worktree writes the SHARED config and `t@example.invalid` becomes the
+    # author of the next commit anything else in the repository makes.
+    def run(*a: str):
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [a[0], "-C", str(repo), *a[1:]], check=True, capture_output=True
+        )
+
     run("git", "init", "-q")
+    _assert_git_target_is(lambda: run("git", "rev-parse", "--show-toplevel"), repo)
     # Detach the throwaway repo from this machine's git configuration. A managed
     # developer machine may set ``core.hooksPath`` system-wide to a directory of
     # hook runners belonging to a security tool, and one such runner rejects a
@@ -1518,10 +1530,18 @@ def test_the_review_criteria_come_from_the_target_branch_not_the_mr(
     """
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills").mkdir(parents=True)
-    run = lambda *argv: __import__("subprocess").run(  # noqa: E731
-        argv, cwd=repo, check=True, capture_output=True
-    )
+
+    # `git -C <repo>` rather than `cwd=repo`, for the reason spelled out at the other
+    # throwaway repo in this file.
+    def run(*argv: str):
+        return __import__(
+            "subprocess"
+        ).run(  # noqa: S603 - fixed argv, no shell
+            [argv[0], "-C", str(repo), *argv[1:]], check=True, capture_output=True
+        )
+
     run("git", "init", "-q")
+    _assert_git_target_is(lambda: run("git", "rev-parse", "--show-toplevel"), repo)
     # Hook-free and identity-pinned, for the reason spelled out at the other
     # throwaway repo in this file.
     (tmp_path / "empty-hooks").mkdir(exist_ok=True)
@@ -1694,3 +1714,1287 @@ def test_a_missing_precondition_is_reported_as_a_skip_not_a_pass(
 
     strict = mod.main(["--all-open", "--fail-on-skip", "--artifact-dir", artifacts])
     assert strict == 1, "--fail-on-skip must turn the skip into an error"
+
+
+# --------------------------------------------------------------------------- #
+# the fixtures that commit survive a host that will not let them commit
+#
+# Two tests here build a throwaway repository and commit to it. On a developer
+# machine whose ``/etc/gitconfig`` sets ``core.hooksPath`` to a directory of hook
+# runners belonging to a security tool, git runs those runners in the throwaway
+# repository too, and one of them refuses a commit whose author email is not the
+# registered one -- so ``subprocess.run(..., check=True)`` raised and both tests
+# failed, on that machine and nowhere else. CI stayed green, and the failure text
+# says a failure here is a regression until proved otherwise, which takes a while
+# the first time. It also poisoned the coverage gate, which correctly refuses to
+# compare a tree whose run recorded failures
+# ([#1309](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1309)).
+#
+# Each fixture now pins ``core.hooksPath`` at an empty directory and
+# ``commit.gpgsign`` off, local configuration beating system configuration. Both
+# halves are load-bearing and were measured separately: the hook refusal exits 1,
+# and signing with no secret key exits 128.
+#
+# What is below is the part that was missing -- nothing re-measured it, so
+# deleting either line left every suite green on a runner. The guard runs those
+# same tests again in a subprocess under a *synthetic* hostile system
+# configuration, which is what makes it mean something on a runner whose
+# ``/etc/gitconfig`` is empty, and the three controls prove the synthetic
+# configuration is genuinely hostile first.
+#
+# Two bounds worth knowing, because a derived set with unstated slack reads
+# stronger than it is.
+#
+# **Scope.** This covers the committing fixtures *in this module*. Three sibling
+# suites also build committing fixtures and carry their own neutralisation --
+# ``scripts/tests/test_check_shared_branch.py`` and
+# ``scripts/sdlc/tests/test_typecheck_pr_changes.py`` the same way, and
+# ``scripts/srt/tests/test_nested_checkouts.py`` with ``--no-verify`` plus an
+# emptied global and system config. Extending this guard across them would mean
+# running them twice to cancel out failures that have nothing to do with git
+# configuration, which costs more than it buys.
+#
+# **Recognition.** The selection below reads the module's source, so what it
+# recognises is a git ``commit`` written as a quoted string literal and reached
+# from a test by name -- directly, through a ``Test...`` class, or through any
+# depth of module-level ``def`` or fixture, including a fixture requested and never
+# used in the body. Seven shapes it does **not** see, all of them measured rather
+# than guessed:
+#
+#   * a subcommand assembled at runtime (``"com" + "mit"``);
+#   * a whole command passed as one shell string;
+#   * a helper imported from another module, or from ``conftest.py``;
+#   * a helper bound to a ``lambda`` rather than a ``def`` -- which is the shape
+#     this file itself used until recently;
+#   * the subcommand held in a module-level constant;
+#   * a helper reached by attribute access (``Fixtures().seed(repo)``);
+#   * a fixture requested with ``@pytest.mark.usefixtures`` instead of a parameter.
+#
+# None occurs here or in the three sibling suites named above today, and closing
+# them would need the call graph rather than the text. The cost of a miss is
+# bounded to what #1309 already cost -- a red ``make test`` on a managed machine --
+# so the answer is to write the bound down rather than claim a closure the
+# derivation does not have. There is no authored exclusion list to go with it: the
+# selection is the whole of it, and the guard skips itself through the marker
+# below if it is ever selected.
+# --------------------------------------------------------------------------- #
+
+# Set in the nested run so the guard cannot re-enter itself. This is the only stop
+# there is, deliberately: an authored list of tests to leave out of the nested run
+# protects nothing, because running a control in there is harmless. Measured, the
+# list's whole effect was to narrow the selection from 8 of this module's 71 tests
+# to 2, for 0.4s -- so a derived selection with no list is both simpler and no more
+# expensive. (It is worth being accurate about the reason: the list was *not*
+# demanded by `scripts/tests/gate_exemptions.json`. Measured twice, restoring it
+# verbatim leaves `test_gate_exemption_registry.py` green, because neither its name
+# nor its comment matches the collector's vocabularies. It is gone because it was
+# unnecessary, not because a gate asked for it.)
+NESTED_PROBE_MARKER = "IDP_GIT_HERMETICITY_NESTED_RUN"
+
+_COMMIT_TOKEN = re.compile(r"""['"]commit['"]""")
+
+# Held as constants rather than written inline in the function that uses them,
+# so that function does not spell the very tokens it looks for and match itself.
+# It did, and it then passed only because its own source happens to contain the
+# name of the check it is asserting about.
+GIT_COMMAND = "git"
+GIT_WRITE_SUBCOMMANDS = frozenset({"commit", "add", "config"})
+
+# The check every throwaway-repository writer has to call, held as a constant so
+# `test_every_throwaway_repository_runner_confirms_its_target` can compare an
+# `ast.Call`'s callee against it instead of searching the source text for it. A text
+# reading is satisfied by a commented-out call, by a call replaced with a bare string
+# spelling the name, and by this comment.
+GIT_TARGET_CHECKER = "_assert_git_target_is"
+
+# What the `writers` derivation in that test cannot see. It is a *text* reading of
+# one function at a time -- a function qualifies by spelling `GIT_COMMAND`'s value
+# and one of `GIT_WRITE_SUBCOMMANDS` as whole string literals in its own body -- so
+# it has the same class of slack as the `_committing_tests` selection above, written
+# down here in the same style rather than claimed closed. Each shape below was
+# measured by adding a fourth throwaway-repository writer in that shape and checking
+# whether this module went red:
+#
+#   * the command name taken from `GIT_COMMAND` rather than spelled `"git"` -- this
+#     PR introduced that constant, to stop the test matching its own source, so the
+#     repository's own constant is now the cheapest way to add an unseen writer;
+#   * the subcommand taken from a constant, or assembled (`"com" + "mit"`);
+#   * a whole command passed as one shell string (`"git commit -qm base"`), which
+#     spells no `"git"` token of its own;
+#   * a write through a subcommand outside the trio -- `stash`, `update-ref`,
+#     `reset`, `tag`. (`update-ref` is used here, in a function that also spells
+#     `add` and `commit`, so it is covered incidentally rather than by the rule.)
+#   * a writer split across two functions, the `"git"` literal in a runner and the
+#     subcommand in its caller: this derivation is per-function with no reachability
+#     walk, unlike `_committing_tests`, so neither half qualifies alone;
+#   * a runner bound to a `lambda` rather than a `def`;
+#   * a helper in `conftest.py` or another module, which this module's source does
+#     not contain.
+#
+# `len(writers) >= audited` cannot notice any of them: an unseen writer is simply
+# absent from the set, and that assertion only fails when writers are *lost*. The
+# cost of a miss is what #1309 already cost plus what a misdirected fixture cost
+# while this was being measured -- a junk commit, a placeholder author in the shared
+# configuration, and a repository-wide `core.hooksPath` redirect -- so the bound is
+# worth writing down rather than leaving to be inferred from a green run. Closing it
+# would need the call graph rather than the text, and none of these shapes occurs
+# here today.
+
+
+# The node types that carry a *block*: a run of statements that may or may not
+# execute. Derived from the type a field holds rather than from a list of field
+# names, because a name list is one `match` statement away from being wrong and
+# wrong silently -- `cases` is neither `body` nor `handlers`, and these are the only
+# three block-bearing node types Python's grammar has.
+_BLOCK_BEARING = (ast.stmt, ast.excepthandler, ast.match_case)
+
+# Context managers that discard the exception their body raises, so a refusal
+# inside one never reaches the test runner. Unlike `_BLOCK_BEARING` this *is* a
+# named list and cannot be derived -- whether a context manager swallows is a
+# property of its implementation, not of the syntax -- so its reach is its contents.
+# Matched on the callee's last name component, so `suppress(...)` and
+# `contextlib.suppress(...)` are the same entry.
+_REFUSAL_DISCARDING_MANAGERS = frozenset({"suppress", "raises"})
+
+# A `try` is only descended into if it carries no handler at all, not merely no
+# handler that would catch an `AssertionError`: deciding which exceptions a handler
+# catches is a type analysis. The conservative direction fails loudly on a shape
+# nobody writes around a setup check, rather than passing quietly on one somebody
+# does.
+_TRY_STATEMENTS = (ast.Try, *((ast.TryStar,) if hasattr(ast, "TryStar") else ()))
+
+# Expressions whose body is *deferred*: it runs when the lambda is called or the
+# comprehension is iterated, not where it is written. A call in one of these has not
+# run, so `_own_expressions` yields the node and stops there.
+_DEFERRED_BODIES = (
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+def _own_expressions(node: ast.AST):
+    """``node`` and its descendants, stopping at anything whose body is deferred.
+
+    The three live call sites each *pass* a lambda to the check -- the check's own
+    call is the outer node -- so it is reached before the lambda is skipped, and
+    ``_ = lambda: <call>`` is not. Measured, that spelling previously left this
+    module green with the containment dead.
+
+    The one thing this gives up is a call in a comprehension's source iterable
+    (``[x for x in <call>()]``), which does run eagerly. Nothing writes that.
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, _DEFERRED_BODIES):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _spells_a_git_write(spelled: set[str]) -> bool:
+    """Whether a function's whole string literals name a git command that writes.
+
+    **Any one** write subcommand is enough, and that is the half worth driving from
+    a test rather than reading: the three live writers each spell ``config``, ``add``
+    and ``commit``, so tightening ``&`` to ``issubset`` agrees with this on today's
+    tree while quietly dropping any future writer that spells only one of them.
+    Narrowing the audited universe is the unsafe direction, and nothing about the
+    real tree can show it.
+    """
+    return GIT_COMMAND in spelled and bool(spelled & GIT_WRITE_SUBCOMMANDS)
+
+
+def _discards_a_refusal(statement: ast.With | ast.AsyncWith) -> bool:
+    """Whether a ``with`` statement's managers swallow what its body raises."""
+    for item in statement.items:
+        expression = item.context_expr
+        callee = expression.func if isinstance(expression, ast.Call) else expression
+        spelled = (
+            callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+        )
+        if spelled in _REFUSAL_DISCARDING_MANAGERS:
+            return True
+    return False
+
+
+def _runs_every_time(body: list[ast.stmt]) -> list[ast.stmt]:
+    """The statements in ``body`` that run on every entry to it and can still fail.
+
+    Descends into a ``with`` and into a ``try``'s own body and ``finally``, because
+    all three always begin executing; refuses to descend into a conditional, a loop,
+    an exception handler, an ``else``, a ``case`` or a nested ``def``, because a
+    statement in one of those is a statement that may not happen. Stops at the first
+    statement that leaves the body, so a call written after a ``return`` does not
+    count either.
+
+    "And can still fail" is the second half, and it is not the same question. A
+    control whose refusal is discarded has run and protected nothing, so a ``try``
+    carrying a handler, and a ``with`` whose manager is one of
+    :data:`_REFUSAL_DISCARDING_MANAGERS`, are both refused although their bodies
+    certainly execute. Measured before that: ``try: <call>`` with a swallowing
+    ``except``, and ``with contextlib.suppress(AssertionError): <call>``, each left
+    this module green with the containment dead.
+    """
+    reached: list[ast.stmt] = []
+    for statement in body:
+        reached.append(statement)
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            break
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            if not _discards_a_refusal(statement):
+                reached.extend(_runs_every_time(statement.body))
+        elif isinstance(statement, _TRY_STATEMENTS):
+            if not statement.handlers:
+                reached.extend(_runs_every_time(statement.body))
+            reached.extend(_runs_every_time(statement.finalbody))
+    return reached
+
+
+def _calls_by_name(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Whether ``node`` calls ``name`` unconditionally, read as a call.
+
+    Not as text. The text form was what this module shipped, and measured, it is
+    satisfied by a commented-out call, by a call replaced with a bare string
+    spelling the name, and by a docstring mentioning it -- three of the four ways a
+    control like this dies. Only whole-line deletion was caught, and commenting a
+    line out is the commoner way: someone bisecting, or silencing a fixture that
+    misbehaves locally. A ``#`` leaves no :class:`ast.Call` node behind, which is
+    what this sees and a substring search cannot.
+
+    Unconditionally, and not merely somewhere in the function, because an
+    ``ast.Call`` node is just as easy to leave in place as a name: ``if False:``
+    around the call, a nested ``def`` that is never invoked, an ``except`` branch,
+    or a line after a ``return`` all keep the node and turn the control off. So the
+    search runs over :func:`_runs_every_time` rather than over the whole subtree,
+    and does not look inside any block those statements own. That is the rule this
+    gate wants anyway: call the check straight after ``git init``, before the first
+    write, not under a condition.
+
+    An attribute callee (``helpers._assert_git_target_is(...)``) counts, because
+    refusing one would fail on an ordinary refactor rather than on a missing check.
+
+    Four bounds, every one of them measured rather than reasoned about, because the
+    whole point of this function is that an unstated bound reads as coverage:
+
+    * A **conditional expression** counts, so ``<call> if strict else None`` and
+      ``strict and <call>`` are accepted although the statement form of the same
+      guard, ``if strict: <call>``, is refused. Both are expressions of a statement
+      that runs, and short-circuit and ternary analysis is more machinery than the
+      risk justifies -- but the ``and`` spelling is the ordinary one-line form of a
+      refused shape, so it is the sharpest edge here and is pinned as a known
+      positive in :data:`_CHECKER_CALL_SPELLINGS` rather than left to be found.
+    * A **decorator** that replaces the function wholesale is invisible to any
+      reading of the function's own syntax.
+    * A call in a **comprehension's source iterable** is missed, because
+      :func:`_own_expressions` stops at a comprehension and the source is the one
+      part of it that runs eagerly.
+    * A ``with`` manager that swallows but is **not named** in
+      :data:`_REFUSAL_DISCARDING_MANAGERS` counts. That list cannot be derived, so
+      its reach is its contents.
+
+    None of those is reachable by accident. Every shape that turns this control off
+    *without intent* -- deleting the line, commenting it out, ``if False:``, an
+    environment opt-out, a nested ``def``, a loop, an ``else``, a ``case``, a line
+    after a ``return``, a swallowing ``try`` or ``suppress`` -- is refused.
+    """
+    for statement in _runs_every_time(node.body):
+        for _field, value in ast.iter_fields(statement):
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, ast.AST) or isinstance(item, _BLOCK_BEARING):
+                    continue
+                for child in _own_expressions(item):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    callee = child.func
+                    spelled = (
+                        callee.id
+                        if isinstance(callee, ast.Name)
+                        else getattr(callee, "attr", None)
+                    )
+                    if spelled == name:
+                        return True
+    return False
+
+
+def _module_source() -> str:
+    return Path(__file__).read_text(encoding="utf-8")
+
+
+def _committing_tests(source: str | None = None) -> list[str]:
+    """Every test in this module whose throwaway repository takes a commit.
+
+    Returned as pytest node id suffixes, so a test written as a method of a
+    ``Test...`` class comes back as ``Class::method`` and selects correctly.
+
+    Derived from the module's source rather than listed. A test counts if a git
+    ``commit`` appears in its own body, or in any module-level function or fixture
+    reachable from it by name -- to a fixed point, not one level, because a fixture
+    that calls a seeding helper is the ordinary shape and stopping at one level
+    would quietly miss it. What the derivation cannot see is written out in the
+    section comment above; it is a text reading, not a call graph.
+
+    ``source`` is for driving it over a synthetic module. No test here commits
+    through a class or through two helper levels today, so nothing else would
+    measure either.
+    """
+    source = _module_source() if source is None else source
+    tree = ast.parse(source)
+
+    helpers: dict[str, ast.AST] = {}
+    tests: dict[str, ast.AST] = {}
+
+    def collect(body: list[ast.stmt], prefix: str) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                # Only a class pytest will collect. `python_classes` defaults to
+                # `Test*`, so a helper class holding a `test_` method yields a node
+                # id pytest answers with "not found" -- which prints no summary, so
+                # the guard refuses with "produced no pytest summary line" and
+                # misdiagnoses a selection problem as a run problem.
+                if node.name.startswith("Test"):
+                    collect(node.body, f"{prefix}{node.name}::")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    tests[f"{prefix}{node.name}"] = node
+                else:
+                    # Keyed on the bare name because that is what a reference site
+                    # spells. A method and a module function sharing a name would
+                    # collide; none do, and a collision would only widen the text.
+                    helpers[node.name] = node
+
+    collect(tree.body, "")
+
+    def names_in(node: ast.AST) -> set[str]:
+        referenced = {
+            child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+        }
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Parameter names are how a test requests a fixture.
+            referenced |= {argument.arg for argument in node.args.args}
+            referenced |= {argument.arg for argument in node.args.kwonlyargs}
+        return referenced
+
+    def reachable_text(node: ast.AST) -> str:
+        pieces = [ast.get_source_segment(source, node) or ""]
+        frontier = names_in(node)
+        seen: set[str] = set()
+        while frontier:
+            name = frontier.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            helper = helpers.get(name)
+            if helper is None:
+                continue
+            pieces.append(ast.get_source_segment(source, helper) or "")
+            frontier |= names_in(helper) - seen
+        return "".join(pieces)
+
+    return sorted(
+        name
+        for name, node in tests.items()
+        if _COMMIT_TOKEN.search(reachable_text(node))
+    )
+
+
+def _hostile_system_config(
+    root: Path, *, redirect_hooks: bool = True, require_signing: bool = True
+) -> dict[str, str]:
+    """A system-wide git configuration that refuses commits, the way a host does.
+
+    ``GIT_CONFIG_SYSTEM`` stands in for ``/etc/gitconfig``. Two other variables
+    have to be answered too, or the synthetic policy reads as hostile on one
+    machine and not on another, which is the probe-inherits-its-own-environment
+    shape:
+
+    * ``GIT_CONFIG_GLOBAL`` is emptied, because a global ``commit.gpgsign = false``
+      overrides the system setting -- measured in
+      :func:`test_a_global_configuration_can_rescue_the_signing_half`.
+    * ``GIT_CONFIG_NOSYSTEM`` is turned off, because it suppresses
+      ``GIT_CONFIG_SYSTEM`` outright -- measured in
+      :func:`test_an_ambient_no_system_flag_would_defeat_the_hostile_configuration`.
+      It is also exactly what #1309 teaches as the way to prove the failure is the
+      host's, so a developer who put it in a shell profile would otherwise get two
+      red controls out of the suite the issue is about.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    sections = []
+    if redirect_hooks:
+        hooks = root / "managed-hooks"
+        hooks.mkdir(exist_ok=True)
+        refusing = hooks / "pre-commit"
+        refusing.write_text(
+            "#!/bin/sh\n"
+            "# Stands in for a managed hook runner that checks the author identity.\n"
+            "echo 'managed hook: author email is not registered' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        refusing.chmod(0o755)
+        sections.append(f"[core]\n\thooksPath = {hooks}\n")
+    if require_signing:
+        sections.append("[commit]\n\tgpgsign = true\n")
+
+    config = root / "system.gitconfig"
+    config.write_text("".join(sections), encoding="utf-8")
+    return {
+        "GIT_CONFIG_SYSTEM": str(config),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "0",
+    }
+
+
+def _commit_in_a_throwaway_repo(
+    repo: Path, env: dict[str, str], *, neutralise: Path | None = None
+):
+    """Build a repository and try one commit. Returns the commit's result.
+
+    ⚠️ The target is named in **argv**, as ``git -C <repo>``, never through
+    ``cwd=``. Every command here writes: ``init``, two ``config`` calls that land
+    in the repository's config, ``add -A`` and ``commit``. A ``cwd=`` that goes
+    missing -- deleted by a mutation run, or lost in a refactor -- silently
+    redirects all five at this checkout, and because ``git config`` from a linked
+    worktree writes the **shared** config, ``user.email=t@example.invalid`` then
+    becomes the author of whatever anything else in the repository commits next.
+    That is not hypothetical: it happened while this guard was being measured, and
+    it put a placeholder author on a commit in a different worktree. In argv the
+    path cannot be dropped without the command failing loudly.
+
+    :func:`_assert_git_target_is`, called below, is the other half: it refuses both
+    a target inside this repository and a target git did not in fact resolve to,
+    and it does so for all three throwaway repositories here rather than this one
+    only.
+    """
+    repo.mkdir(parents=True, exist_ok=True)
+
+    def git(*arguments: str):
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", "-C", str(repo), *arguments],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert git("init", "-q").returncode == 0, "git init failed"
+    _assert_git_target_is(lambda: git("rev-parse", "--show-toplevel"), repo)
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    if neutralise is not None:
+        neutralise.mkdir(parents=True, exist_ok=True)
+        git("config", "core.hooksPath", str(neutralise))
+        git("config", "commit.gpgsign", "false")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    assert git("add", "-A").returncode == 0, "git add failed"
+    return git("commit", "-qm", "base")
+
+
+def _assert_git_target_is(show_toplevel, repo: Path) -> None:
+    """Refuse to go further unless git's effective repository is the throwaway one.
+
+    Checks the repository git actually *resolved*, not the argument meant to point
+    at it. That distinction is the whole value: ``-C <path>`` and ``cwd=`` are each
+    a single token, a refactor or a mutation run drops one, and git then operates
+    on whatever directory it inherited -- this checkout. Every command after this
+    point writes (``config``, ``add``, ``commit``), and ``git config`` from a linked
+    worktree writes the **shared** config, so ``user.email=t@example.invalid``
+    becomes the author of the next commit anything else in the repository makes.
+    That is not hypothetical: it happened while this section was being measured,
+    and put a placeholder author on a commit in a different worktree.
+
+    Called straight after ``git init`` and before the first write. The caller
+    passes a thunk that runs ``git rev-parse --show-toplevel`` through its *own*
+    runner, so the target is resolved exactly the way the caller's writes will
+    resolve it -- a check that re-derived the path itself would pass while the
+    caller wrote somewhere else.
+
+    Both sides of the first comparison are resolved. ``repo.parents`` on the
+    *unresolved* path does not see a symlink into this checkout -- measured, a
+    target under a symlink to the checkout root passed both halves where every
+    other hostile target was refused -- and a symlink is what a developer's own
+    scratch directory, or a container bind mount, ordinarily is.
+    """
+    checkout = REPO_ROOT.resolve()
+    target = repo.resolve()
+    assert checkout not in target.parents and target != checkout, (
+        f"{repo} is inside this checkout, so a correctly-passed target is still the "
+        "wrong target. Everything after this line writes -- config, index, a commit "
+        "-- so this has to be a throwaway directory, normally pytest's tmp_path."
+    )
+    result = show_toplevel()
+    # Checked before the output is read: `stdout` on a failed `rev-parse` is empty,
+    # and `Path("")` resolves to the *process* working directory -- which is this
+    # checkout under pytest. That would name the most alarming possible path in a
+    # message whose subject is "did we write into the checkout", and it would pass
+    # outright wherever the process directory happens to be the throwaway one.
+    assert result.returncode == 0, (
+        f"`git rev-parse --show-toplevel` failed (exit {result.returncode}), so "
+        "there is no answer to compare and nothing below may run. stderr: "
+        f"{result.stderr!r}"
+    )
+    output = result.stdout
+    if isinstance(output, bytes):
+        output = output.decode()
+    resolved = Path(output.strip()).resolve()
+    assert resolved == repo.resolve(), (
+        f"git resolved {resolved}, not the throwaway repository {repo.resolve()}. "
+        "Everything after this line writes, so it would have written there. The "
+        "target is almost certainly no longer being passed to git."
+    )
+
+
+def _nested_outcome_counts(stdout: str) -> dict[str, int]:
+    """Parse pytest's final summary line into ``{outcome: count}``.
+
+    Read from the summary rather than from the exit code alone, because the two
+    answer different questions: the code says whether anything failed, this says
+    whether the tests that were selected are the tests that ran. A run that
+    collected nothing exits 5 but also prints no counts, so an empty result here is
+    a refusal rather than a pass.
+
+    ``skipped`` is counted as having run on purpose -- if the guard ever selects
+    itself it skips through the marker, and that is a correct outcome, not a
+    missing one.
+    """
+    summary = next(
+        (
+            line
+            for line in reversed(stdout.splitlines())
+            if re.search(r"\d+ (passed|failed|error|skipped|deselected)", line)
+        ),
+        None,
+    )
+    if summary is None:
+        return {}
+    return {
+        outcome: int(number)
+        for number, outcome in re.findall(
+            r"(\d+) (passed|failed|errors|error|skipped|deselected|xfailed|xpassed)",
+            summary,
+        )
+    }
+
+
+def _nested_environment(policy_root: Path) -> dict[str, str]:
+    """The environment the nested run gets: hostile git policy, plus the marker."""
+    return {
+        **os.environ,
+        **_hostile_system_config(policy_root),
+        NESTED_PROBE_MARKER: "1",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("case", "target", "resolved_to", "git_succeeds", "expected"),
+    [
+        ("the-target-is-the-throwaway-repo", "throwaway", "throwaway", True, None),
+        (
+            "git-resolved-this-checkout",
+            "throwaway",
+            "checkout-root",
+            True,
+            "not the throwaway repository",
+        ),
+        ("git-answered-nothing", "throwaway", "throwaway", False, "failed (exit"),
+        (
+            "the-target-is-the-checkout-root",
+            "checkout-root",
+            "checkout-root",
+            True,
+            "inside this checkout",
+        ),
+    ],
+)
+def test_the_containment_refuses_a_target_it_cannot_confirm(
+    tmp_path: Path,
+    case: str,
+    target: str,
+    resolved_to: str,
+    git_succeeds: bool,
+    expected,
+) -> None:
+    """The containment, driven directly in all four of its outcomes.
+
+    It is the control that stands between a dropped target and a write into this
+    checkout, and the write in question is not only a junk commit: ``git config``
+    from a *linked worktree* writes the **shared** configuration, so a misdirected
+    fixture sets ``core.hooksPath`` repository-wide, at a pytest temporary
+    directory that is then deleted -- and git commits happily through a hooks path
+    naming a directory that does not exist. On a managed machine that silently
+    turns the commit scanner off for every worktree until someone notices.
+
+    The fourth case passes the checkout root **itself**, and it is the likeliest
+    input rather than an edge: a dropped ``-C`` makes git fall back to the process
+    working directory, which under pytest is the checkout root and not a
+    subdirectory of it. Every other case here passes a child.
+
+    It is also what separates the two halves of the first assertion.
+    ``checkout not in checkout.parents`` is trivially true, so the parents half does
+    not refuse the root at all, and with only that half installed the checkout root
+    is an accepted target -- measured. The halves are not shown to be load-bearing
+    by a paired mutation, and it is worth being precise about why: a mutation
+    showing one matters once the other is gone shows it is *sufficient in the
+    other's absence*, which is the definition of redundancy. They are load-bearing
+    because each is the only half that refuses an input driven here -- the root
+    itself for the equality half, and a symlinked child, in
+    :func:`test_the_containment_refuses_a_target_symlinked_into_this_checkout`, for
+    the parents half.
+    """
+    places = {"throwaway": tmp_path / "throwaway", "checkout-root": REPO_ROOT}
+    places["throwaway"].mkdir()
+    repo = places[target]
+    reported = places[resolved_to]
+
+    def show_toplevel():
+        return subprocess.CompletedProcess(
+            args=["git", "rev-parse", "--show-toplevel"],
+            returncode=0 if git_succeeds else 128,
+            stdout=f"{reported}\n" if git_succeeds else "",
+            stderr="" if git_succeeds else "fatal: not a git repository",
+        )
+
+    if expected is None:
+        _assert_git_target_is(show_toplevel, repo)  # must not raise
+        return
+    with pytest.raises(AssertionError, match=re.escape(expected)):
+        _assert_git_target_is(show_toplevel, repo)
+
+
+@pytest.mark.unit
+def test_the_containment_refuses_a_target_symlinked_into_this_checkout(
+    tmp_path: Path,
+) -> None:
+    """A symlink is the one hostile target the unresolved form let through.
+
+    Measured: with ``repo.parents`` read on the unresolved path, a directory
+    *under* a symlink to the checkout root passed both halves, while the checkout
+    root, every child of it and an inconsistent resolution were all refused. The
+    equality half does not catch it either, because the path is a child rather than
+    the root. Symlinks are ordinary here -- a developer's scratch directory, a
+    container bind mount -- so this is the input that makes resolving both sides
+    load-bearing rather than tidy.
+    """
+    link = tmp_path / "link-to-the-checkout"
+    link.symlink_to(REPO_ROOT)
+    with pytest.raises(AssertionError, match="inside this checkout"):
+        _assert_git_target_is(lambda: None, link / "scratchjunk")
+
+
+@pytest.mark.unit
+def test_the_containment_refuses_a_throwaway_inside_this_checkout(
+    tmp_path: Path,
+) -> None:
+    """A target that is *consistently* this checkout would otherwise pass.
+
+    The resolved-target comparison alone cannot see it -- git really did resolve
+    what it was asked for -- so the containment answers the two questions
+    separately, and this is the second. It applies to all three throwaway
+    repositories here rather than to the one helper that used to carry it.
+    """
+    with pytest.raises(AssertionError, match="inside this checkout"):
+        _assert_git_target_is(lambda: None, REPO_ROOT / "scripts")
+
+
+@pytest.mark.unit
+def test_every_throwaway_repository_runner_confirms_its_target() -> None:
+    """An ``ast`` assertion, and the reason it is one is worth stating.
+
+    The behavioural form was tried and is not available here: the only input that
+    distinguishes "the call is present" from "the call has been deleted" is one
+    where git writes into the developer's own checkout -- a junk commit, a
+    placeholder author in the shared configuration, and a repository-wide
+    ``core.hooksPath`` redirect. A test is not allowed to produce that in order to
+    observe it, and a test that produced it somewhere harmless would be measuring a
+    copy rather than this code. So what is pinned instead is that every function
+    here which drives a throwaway repository through a git **write** also calls the
+    check, which is a property of the source and readable from it.
+
+    The set is derived rather than listed, and asserted non-empty and count-pinned,
+    because a derivation that found nothing would make this pass over an empty
+    universe. What that derivation cannot see is written out above
+    :func:`_calls_by_name`; the count pin cannot notice any of it, because an unseen
+    writer is absent from the set rather than failing in it.
+
+    The call is read as a call, through :func:`_calls_by_name`, and not as a
+    substring of the function's source. That distinction is the whole of this
+    test's value: measured against the text form, commenting the three calls out
+    left this green.
+    """
+    source = _module_source()
+    tree = ast.parse(source)
+
+    def tokens(node: ast.AST) -> set[str]:
+        """Every string the function spells as a *whole* literal.
+
+        Whole literals rather than a substring search, because one test here
+        carries a synthetic Python module as a long string in which a git write
+        appears as text. That string is parsed, never executed, and a substring
+        match flags it -- measured, it did. A token-level reading separates a git
+        call from a description of one.
+
+        The example is described rather than quoted on purpose: spelling the
+        subcommand here would put it in this function's own source, and the
+        *selection* in :func:`_committing_tests` is a substring reading, so the
+        prose would pull this test into the nested run. That also happened.
+        """
+        return {
+            child.value
+            for child in ast.walk(node)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        }
+
+    writers: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _spells_a_git_write(tokens(node)):
+            continue
+        writers[node.name] = node
+
+    audited = 3
+    assert len(writers) >= audited, (
+        f"{len(writers)} function(s) here drive a throwaway repository through a git "
+        f"write, fewer than the {audited} audited: {sorted(writers)}. Re-measure "
+        "rather than lowering the number."
+    )
+    unchecked = sorted(
+        name
+        for name, node in writers.items()
+        if not _calls_by_name(node, GIT_TARGET_CHECKER)
+    )
+    assert not unchecked, (
+        f"{unchecked} run a git write against a throwaway repository without calling "
+        "_assert_git_target_is first. A target passed by one token -- `git -C <path>` "
+        "or `cwd=` -- can go missing in a refactor, and git then writes wherever it "
+        "was invoked, which under pytest is this checkout. Call the check straight "
+        "after `git init` and before the first write."
+    )
+
+
+# (case id, a synthetic writer's source, whether the check must count it as calling)
+# `{c}` is the checker's name. Three of the negatives are the mutations the previous
+# substring form passed, measured against this module before this probe existed; the
+# rest are ways to leave a genuine `ast.Call` node in place while the call never
+# runs, which is the attack a presence-only reading invites. The positives are the
+# spellings a real caller uses here or would use after an ordinary refactor.
+_CHECKER_CALL_SPELLINGS: list[tuple[str, str, bool]] = [
+    ("a-direct-call", "def writer():\n    {c}(thunk, repo)\n", True),
+    (
+        "a-call-through-an-attribute",
+        "def writer():\n    helpers.{c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-whose-result-is-bound",
+        "def writer():\n    outcome = {c}(thunk, repo)\n    return outcome\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-with-block",
+        "def writer():\n    with ctx() as c:\n        {c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-try-body-with-no-handler",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    finally:\n        pass\n",
+        True,
+    ),
+    (
+        "a-call-inside-a-with-block-that-does-not-swallow",
+        "def writer():\n    with tempfile.TemporaryDirectory() as d:\n        {c}(thunk, d)\n",
+        True,
+    ),
+    # --- the text form's measured survivors ---
+    (
+        "a-commented-out-call",
+        "def writer():\n    # {c}(thunk, repo)\n    pass\n",
+        False,
+    ),
+    (
+        "the-name-left-behind-as-a-bare-string",
+        'def writer():\n    "{c}: skipped"\n',
+        False,
+    ),
+    (
+        "the-name-left-behind-in-a-docstring",
+        'def writer():\n    """Calls {c} further down."""\n',
+        False,
+    ),
+    (
+        "the-name-referenced-but-never-called",
+        "def writer():\n    checker = {c}\n    del checker\n",
+        False,
+    ),
+    ("no-mention-at-all", "def writer():\n    pass\n", False),
+    # --- a real `ast.Call` node that never executes ---
+    (
+        "a-call-switched-off-by-a-constant-condition",
+        "def writer():\n    if False:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-behind-any-condition-at-all",
+        "def writer():\n    if confirm:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-in-a-nested-function-that-is-invoked",
+        "def writer():\n    def inner():\n        {c}(thunk, repo)\n\n    inner()\n",
+        False,
+    ),
+    (
+        "a-call-in-an-except-branch",
+        "def writer():\n    try:\n        pass\n    except Exception:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-in-a-try-else-branch",
+        "def writer():\n    try:\n        pass\n    except Exception:\n        pass\n    else:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-after-a-return",
+        "def writer():\n    return None\n    {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-only-when-a-loop-has-an-iteration",
+        "def writer():\n    for _ in targets:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-only-when-a-while-condition-holds",
+        "def writer():\n    while retry:\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-inside-a-match-case",
+        "def writer():\n    match repo.name:\n        case 'never':\n            {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "the-name-inside-a-call-it-is-not-the-callee-of",
+        "def writer():\n    register({c})\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-discarded-lambda",
+        "def writer():\n    _ = lambda: {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-comprehension-that-never-iterates",
+        "def writer():\n    _ = [{c}(thunk, repo) for _once in []]\n",
+        False,
+    ),
+    (
+        "a-call-deferred-into-a-generator-nobody-drains",
+        "def writer():\n    _ = ({c}(thunk, repo) for _once in targets)\n",
+        False,
+    ),
+    # --- a call that runs, and whose refusal is thrown away ---
+    (
+        "a-call-whose-refusal-a-handler-swallows",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    except AssertionError:\n        pass\n",
+        False,
+    ),
+    (
+        "a-call-whose-refusal-a-bare-except-swallows",
+        "def writer():\n    try:\n        {c}(thunk, repo)\n    except Exception:\n        log()\n",
+        False,
+    ),
+    (
+        "a-call-wrapped-in-contextlib-suppress",
+        "def writer():\n    with contextlib.suppress(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-wrapped-in-an-unqualified-suppress",
+        "def writer():\n    with suppress(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    (
+        "a-call-inverted-by-pytest-raises",
+        "def writer():\n    with pytest.raises(AssertionError):\n        {c}(thunk, repo)\n",
+        False,
+    ),
+    # --- known positives that arguably should not be; see `_calls_by_name` ---
+    (
+        "a-call-guarded-by-a-short-circuit",
+        "def writer():\n    _ = strict and {c}(thunk, repo)\n",
+        True,
+    ),
+    (
+        "a-call-guarded-by-a-ternary",
+        "def writer():\n    _ = {c}(thunk, repo) if strict else None\n",
+        True,
+    ),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source", "counts"),
+    [(source, counts) for _, source, counts in _CHECKER_CALL_SPELLINGS],
+    ids=[case for case, _, _ in _CHECKER_CALL_SPELLINGS],
+)
+def test_the_call_check_reads_a_call_and_not_the_text(
+    source: str, counts: bool
+) -> None:
+    """The assertion above is only worth having if these negatives are red.
+
+    Three of them are the measured survivors of the substring form this replaced:
+    a commented-out call, a call replaced by a bare string spelling the name, and
+    the name in prose. The rest are the next attack along -- a real ``ast.Call``
+    node that never executes, which a presence-only reading would accept and which
+    is no harder to write than a comment. Driven over synthetic sources rather than
+    by mutating this file, because the mutation is the thing being defended against
+    and a test cannot leave it installed.
+
+    The last two cases are known positives that arguably should be negatives, and
+    they are recorded as what the check really does rather than as what would be
+    ideal. ``strict and <call>`` and ``<call> if strict else None`` are the
+    expression forms of ``if strict: <call>``, which is pinned a few rows above as a
+    negative, so the check draws a line between the statement form of a guard and
+    the expression form of the same guard. That line is where it is because
+    short-circuit and ternary analysis is more machinery than the risk justifies,
+    not because the expression form is safer. Listing them is the point: a bound
+    nobody wrote down is the defect this whole module's lineage is about.
+    """
+    body = source.format(c=GIT_TARGET_CHECKER)
+    node = ast.parse(body).body[0]
+    assert _calls_by_name(node, GIT_TARGET_CHECKER) is counts, body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("spelled", "qualifies"),
+    [
+        ({GIT_COMMAND, "commit"}, True),
+        ({GIT_COMMAND, "add"}, True),
+        ({GIT_COMMAND, "config"}, True),
+        ({GIT_COMMAND, "commit", "add", "config"}, True),
+        ({GIT_COMMAND, "rev-parse", "show"}, False),
+        ({"commit", "add", "config"}, False),
+        (set(), False),
+    ],
+    ids=[
+        "one-subcommand-commit",
+        "one-subcommand-add",
+        "one-subcommand-config",
+        "all-three",
+        "a-read-only-command",
+        "a-subcommand-but-no-command-name",
+        "nothing",
+    ],
+)
+def test_one_write_subcommand_is_enough_to_be_audited(
+    spelled: set[str], qualifies: bool
+) -> None:
+    """The audited universe must not narrow, and the real tree cannot show it.
+
+    All three live writers spell all three subcommands, so requiring every one of
+    them instead of any one agrees with the rule against this tree while dropping a
+    future writer that spells only ``commit``. Driven over token sets, which is the
+    only input that separates the two readings.
+    """
+    assert _spells_a_git_write(spelled) is qualifies, sorted(spelled)
+
+
+@pytest.mark.unit
+def test_a_redirected_hooks_path_really_refuses_a_commit(tmp_path: Path) -> None:
+    """Control: the synthetic hostile configuration is hostile.
+
+    Without this the guard below would pass on any machine where the override
+    environment variables are ignored -- ``GIT_CONFIG_SYSTEM`` arrived in git
+    2.32 -- and a guard that cannot fail is worse than no guard.
+    """
+    env = {
+        **os.environ,
+        **_hostile_system_config(tmp_path / "policy", require_signing=False),
+    }
+    result = _commit_in_a_throwaway_repo(tmp_path / "repo", env)
+    assert result.returncode != 0, (
+        "a system-wide core.hooksPath pointing at a refusing pre-commit hook did not "
+        "refuse the commit, so this control measured nothing. git "
+        f"{subprocess.run(['git', '--version'], capture_output=True, text=True, check=False).stdout.strip()} "  # noqa: E501,S603,S607
+        "must honour GIT_CONFIG_SYSTEM (2.32 and later) for this to mean anything."
+    )
+    assert "managed hook" in result.stderr, result.stderr
+
+
+@pytest.mark.unit
+def test_signing_with_no_key_really_refuses_a_commit(tmp_path: Path) -> None:
+    """Control for the second half, which the hook refusal would otherwise mask.
+
+    ``commit.gpgsign`` is a separate host policy and fails with a different exit
+    code, so a neutralisation that handled only the hooks path would still leave a
+    signing machine red.
+    """
+    env = {
+        **os.environ,
+        **_hostile_system_config(tmp_path / "policy", redirect_hooks=False),
+    }
+    result = _commit_in_a_throwaway_repo(tmp_path / "repo", env)
+    assert result.returncode != 0, (
+        "a system-wide commit.gpgsign=true did not refuse a commit by an identity "
+        "with no secret key, so the gpgsign half of the neutralisation is untested "
+        f"here: {result.stdout} {result.stderr}"
+    )
+
+
+@pytest.mark.unit
+def test_the_neutralisation_the_fixtures_apply_defeats_both_halves(
+    tmp_path: Path,
+) -> None:
+    """The recipe itself, driven directly: local configuration beats system.
+
+    Measured here rather than inferred from git's precedence rules, because the
+    whole of #1309 was a precedence question answered from memory.
+    """
+    env = {**os.environ, **_hostile_system_config(tmp_path / "policy")}
+    result = _commit_in_a_throwaway_repo(
+        tmp_path / "repo", env, neutralise=tmp_path / "empty-hooks"
+    )
+    assert result.returncode == 0, (
+        "pointing core.hooksPath at an empty directory and turning commit.gpgsign "
+        f"off did not get a commit through: {result.stdout} {result.stderr}"
+    )
+
+
+@pytest.mark.unit
+def test_a_global_configuration_can_rescue_the_signing_half(tmp_path: Path) -> None:
+    """Why ``GIT_CONFIG_GLOBAL`` is emptied, measured rather than assumed.
+
+    A global ``commit.gpgsign = false`` beats the system setting, so on a machine
+    whose own global configuration turns signing off, leaving it in place would
+    make the signing control pass while measuring nothing -- the shape of a probe
+    that inherits the environment it is testing. This test is the measurement, and
+    it is also what makes the emptying load-bearing: without it, nothing here
+    distinguishes the two.
+    """
+    rescuing = tmp_path / "global.gitconfig"
+    rescuing.write_text("[commit]\n\tgpgsign = false\n", encoding="utf-8")
+
+    hostile = _hostile_system_config(tmp_path / "policy", redirect_hooks=False)
+    assert hostile["GIT_CONFIG_GLOBAL"] == os.devnull, (
+        "the hostile configuration must empty the global config, or a developer's "
+        "own gpgsign setting decides whether the signing control can fail"
+    )
+
+    rescued = _commit_in_a_throwaway_repo(
+        tmp_path / "repo",
+        {
+            **os.environ,
+            "GIT_CONFIG_SYSTEM": hostile["GIT_CONFIG_SYSTEM"],
+            "GIT_CONFIG_GLOBAL": str(rescuing),
+        },
+    )
+    assert rescued.returncode == 0, (
+        "a global commit.gpgsign=false did not override the system setting, so the "
+        f"reason for emptying the global config no longer holds: {rescued.stderr}"
+    )
+
+
+@pytest.mark.unit
+def test_an_ambient_no_system_flag_would_defeat_the_hostile_configuration(
+    tmp_path: Path,
+) -> None:
+    """Why ``GIT_CONFIG_NOSYSTEM`` is answered, measured rather than assumed.
+
+    It suppresses ``GIT_CONFIG_SYSTEM`` entirely, so an ambient ``=1`` -- which is
+    the command #1309 itself gives for proving the failure is the host's, and so a
+    plausible thing to find in a shell profile -- would leave the controls passing
+    a commit and reporting that the synthetic policy is not hostile. The remedy
+    would then read as a git-version problem, which it is not.
+    """
+    hostile = _hostile_system_config(tmp_path / "policy")
+    assert hostile["GIT_CONFIG_NOSYSTEM"] == "0", (
+        "the hostile configuration must turn GIT_CONFIG_NOSYSTEM off, or an ambient "
+        "value decides whether the controls can fail at all"
+    )
+
+    defeated = _commit_in_a_throwaway_repo(
+        tmp_path / "repo",
+        {
+            **os.environ,
+            **hostile,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    assert defeated.returncode == 0, (
+        "GIT_CONFIG_NOSYSTEM=1 did not suppress the synthetic system configuration, "
+        f"so the reason for answering it no longer holds: {defeated.stderr}"
+    )
+
+
+@pytest.mark.unit
+def test_the_derivation_follows_a_commit_inside_a_helper_or_fixture() -> None:
+    """The resolution step, driven over a synthetic module.
+
+    Every committing test here has its commit inline and reaches it directly, so
+    this is the only thing that measures the three parts of the resolution: a class
+    method, a fixture requested and never referenced in the body, and a helper two
+    levels out. All three are shapes the sibling suites use, which is why they are
+    in the derivation at all.
+    """
+    synthetic = (
+        "import pytest\n"
+        "\n"
+        "def _commit(repo):\n"
+        '    run("git", "commit", "-qm", "base")\n'
+        "\n"
+        "def _seed(repo):\n"  # one hop further out than _commit
+        "    _commit(repo)\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def seeded(tmp_path):\n"
+        "    _seed(tmp_path)\n"
+        "    return tmp_path\n"
+        "\n"
+        "def test_through_two_helper_levels(tmp_path):\n"
+        "    _seed(tmp_path)\n"
+        "\n"
+        "def test_through_a_fixture(seeded):\n"
+        "    assert True\n"
+        "\n"
+        # Requested and never referenced in the body, which is the only shape the
+        # parameter lists are needed for -- a fixture the body does use is found as
+        # an ast.Name regardless.
+        "def test_through_a_keyword_only_fixture(*, seeded):\n"
+        "    assert True\n"
+        "\n"
+        "class TestHostPolicy:\n"
+        "    def test_as_a_method(self, tmp_path):\n"
+        "        _seed(tmp_path)\n"
+        "\n"
+        "def test_commits_nothing(tmp_path):\n"
+        "    assert tmp_path\n"
+    )
+    assert _committing_tests(synthetic) == [
+        "TestHostPolicy::test_as_a_method",
+        "test_through_a_fixture",
+        "test_through_a_keyword_only_fixture",
+        "test_through_two_helper_levels",
+    ], _committing_tests(synthetic)
+
+
+@pytest.mark.unit
+def test_the_nested_run_cannot_re_enter_the_guard(tmp_path: Path) -> None:
+    """The recursion stop, exercised rather than reasoned about.
+
+    This marker is the only stop there is -- there is no list of tests held out of
+    the nested run -- so it is worth exercising rather than reasoning about. The
+    guard is not selected today, because no git ``commit`` is reachable by name
+    from it; the marker is what holds if that ever stops being true.
+    """
+    assert _nested_environment(tmp_path / "policy").get(NESTED_PROBE_MARKER), (
+        "the nested run is handed no marker, so the only thing stopping it from "
+        "re-entering this guard is the node-id selection"
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(NESTED_PROBE_MARKER, "1")
+        with pytest.raises(pytest.skip.Exception):
+            test_the_committing_fixtures_survive_a_host_that_refuses_commits(tmp_path)
+
+
+@pytest.mark.unit
+def test_the_committing_fixtures_survive_a_host_that_refuses_commits(
+    tmp_path: Path,
+) -> None:
+    """Re-run this module's committing tests under a hostile system configuration.
+
+    The behavioural form, not a source assertion: what has to hold is that the
+    fixtures as written get a commit through, and the only way to know is to let
+    them try against a host that says no.
+    """
+    if os.environ.get(NESTED_PROBE_MARKER):
+        pytest.skip("this is the nested run; it must not re-enter itself")
+
+    selected = _committing_tests()
+    assert selected, (
+        "no committing test was derived from this module's source, so this guard "
+        "would pass without running anything -- an empty selection is how a "
+        "guarantee goes quiet"
+    )
+    audited = 8
+    assert len(selected) >= audited, (
+        f"{len(selected)} committing test(s) derived, fewer than the {audited} this "
+        f"guard was written against: {selected}. Re-measure rather than lowering the "
+        "number -- a derivation that collapsed is the failure this pin exists for. "
+        "Two of the eight are the fixtures #1309 was about. Five more reach a commit "
+        "through this section's own helpers. The eighth is the derivation's own test, "
+        "selected because the synthetic module it carries as a string quotes the "
+        "word; it commits nothing. Running any of them here is harmless, which is "
+        "why there is no list to take them out of."
+    )
+
+    env = _nested_environment(tmp_path / "policy")
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *(f"{Path(__file__)}::{name}" for name in selected),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    counts = _nested_outcome_counts(result.stdout)
+    assert counts, (
+        f"the nested run of {selected} produced no pytest summary line at all, so it "
+        "did not run what it was given and this guard measured nothing.\n"
+        f"exit {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert not counts.get("deselected"), (
+        f"the nested run deselected {counts['deselected']} of the tests it was given, "
+        "so a selected test did not run and its fixture was never exercised.\n"
+        f"stdout:\n{result.stdout}"
+    )
+    ran = sum(
+        counts.get(outcome, 0)
+        for outcome in (
+            "passed",
+            "failed",
+            "error",
+            "errors",
+            "skipped",
+            "xfailed",
+            "xpassed",
+        )
+    )
+    # `>=`, not `==`: one node id can produce several outcomes. A parametrised test
+    # yields one per case and `@pytest.mark.xfail` yields an `xfailed` -- both
+    # measured, and under `==` both turned this guard red with a message saying the
+    # run did not correspond to the selection, which would have been a false red in
+    # both CIs on an ordinary change. What has to be ruled out is the other
+    # direction, a selected test that did not run at all.
+    assert ran >= len(selected), (
+        f"the nested run reported {ran} outcome(s) for the {len(selected)} test(s) it "
+        f"was given ({selected}), so at least one did not run and its fixture was "
+        f"never exercised.\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        "at least one of these failed when re-run under a system-wide "
+        f"core.hooksPath and commit.gpgsign: {selected}. Read the nested output "
+        "below for which and why -- this guard reports the run, it does not diagnose "
+        "it, and a test here can fail for reasons that have nothing to do with git "
+        "configuration.\n\nThe usual cause is the one this guard exists for: a test "
+        "that builds a throwaway repository and commits to it has to detach that "
+        "repository from host policy first -- point core.hooksPath at an empty "
+        "directory and set commit.gpgsign to false before the first commit, the same "
+        "way _make_hermetic does in "
+        "scripts/sdlc/tests/test_typecheck_pr_changes.py.\n"
+        f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
