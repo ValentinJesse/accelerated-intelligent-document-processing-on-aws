@@ -149,12 +149,10 @@ def test_an_unmapped_model_is_returned_unchanged():
 
 @pytest.mark.unit
 def test_a_canada_profile_is_offered_in_neither_us_nor_eu_picklists():
-    """A region-scoped id belongs to its own region type only.
+    """A geo profile for one region type must not appear in another's picklist.
 
-    The US and EU filters kept any id that started with neither ``us.`` nor
-    ``eu.`` — the right rule for ``global.`` and unprefixed ids, but it also let
-    the Canada geo profile ``ca.amazon.nova-lite-v1:0`` through, which neither
-    region can call.
+    The US and EU filters keep ids with no geo prefix (``global.``, unprefixed),
+    so every geo-scoped prefix has to be excluded explicitly.
     """
     enum = [
         "us.amazon.nova-2-lite-v1:0",
@@ -175,3 +173,34 @@ def test_a_canada_profile_is_offered_in_neither_us_nor_eu_picklists():
         assert "global.anthropic.claude-sonnet-4-6" in offered, region_type
         assert "qwen.qwen3-vl-235b-a22b" in offered, region_type
         assert "LambdaHook" in offered, region_type
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("region_type", ["us", "eu", "ca"])
+def test_a_geo_profile_outside_the_region_type_is_offered_nowhere(region_type: str):
+    """The filters read geo prefixes from the shared prefix rule, not a local list.
+
+    ``apac.``, ``jp.``, ``au.`` and ``us-gov.`` profiles are callable from none
+    of the US, EU or Canada region types, so no picklist offers them. ``global.``
+    and unprefixed ids stay offered in all three.
+    """
+    geo_scoped = [
+        "apac.amazon.nova-lite-v1:0",
+        "jp.anthropic.claude-haiku-5-5",
+        "au.anthropic.claude-haiku-5-5",
+        "us-gov.anthropic.claude-sonnet-4-6",
+    ]
+    region_agnostic = [
+        "global.anthropic.claude-sonnet-4-6",
+        "example.unprefixed-model-v1:0",
+    ]
+    # The us. entry makes the filter treat this list as a model list.
+    enum = ["us.amazon.nova-2-lite-v1:0", *geo_scoped, *region_agnostic]
+    schema = {"properties": {"model": {"type": "string", "enum": enum}}}
+
+    offered = index.filter_models_by_region(schema, region_type)
+    offered = offered["properties"]["model"]["enum"]
+    for model_id in geo_scoped:
+        assert model_id not in offered, (region_type, model_id)
+    for model_id in region_agnostic:
+        assert model_id in offered, (region_type, model_id)

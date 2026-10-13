@@ -171,7 +171,10 @@ MODEL_MAPPINGS = {
 # ca-central-1. A SEPARATE table on purpose: get_model_mapping(..., "us") walks
 # MODEL_MAPPINGS backwards over its twin rows, so a Canada row placed there would
 # rewrite a US deployment's stored id as well. This table is a one-way lookup and
-# is never reversed.
+# is never reversed. The consequence: a stored ca. id stays as it is when the
+# configuration is redeployed into a US or EU region, and a stored eu. id in a
+# Canada stack is not rewritten. The picklists hide both, but a stored value stays
+# until someone edits it.
 CA_MODEL_MAPPINGS = {
     # Twin: the Canada geo profile of the same model, processed in Canada.
     "us.amazon.nova-lite-v1:0": "ca.amazon.nova-lite-v1:0",
@@ -201,9 +204,12 @@ CA_UNAVAILABLE_MODELS = {
     "nvidia.nemotron-nano-12b-v2",
 }
 
-# Geo inference-profile prefixes offered only in their own region type; ids with
-# a `global.` prefix or none at all are offered everywhere.
-REGION_SCOPED_PREFIXES = ("us.", "eu.", "ca.")
+
+def _is_geo_scoped(model_id: str) -> bool:
+    """True for a geo inference-profile id (us., eu., ca., apac., ...); False for
+    global. and unprefixed ids. Uses the shared prefix rule, so a new geo prefix
+    reaches this filter too."""
+    return _base_model_id(model_id) != model_id and not model_id.startswith("global.")
 
 
 def get_current_region() -> str:
@@ -314,25 +320,23 @@ def filter_models_by_region(data: Any, region_type: str) -> Any:
                         # Include models that match the region type or are region-agnostic
                         elif region_type == "us":
                             # Include US models and non-region-specific models, exclude other geo prefixes
-                            if item.startswith("us.") or not item.startswith(
-                                REGION_SCOPED_PREFIXES
-                            ):
+                            if item.startswith("us.") or not _is_geo_scoped(item):
                                 filtered_list.append(item)
                         elif region_type == "eu":
                             # Exclude US-only models (e.g., openai.gpt-5.*) that have no EU availability
                             if _is_us_only(item):
                                 continue
                             # Include EU models and non-region-specific models, exclude other geo prefixes
-                            if item.startswith("eu.") or not item.startswith(
-                                REGION_SCOPED_PREFIXES
-                            ):
+                            if item.startswith("eu.") or not _is_geo_scoped(item):
                                 filtered_list.append(item)
                         elif region_type == "ca":
                             # Exclude US-only models and ids with no profile in ca-central-1
                             if _is_us_only(item) or item in CA_UNAVAILABLE_MODELS:
                                 continue
-                            # Include US, Canada and non-region-specific models, exclude EU models
-                            if not item.startswith("eu."):
+                            # Include US, Canada and non-region-specific models, exclude other geo prefixes
+                            if item.startswith(("us.", "ca.")) or not _is_geo_scoped(
+                                item
+                            ):
                                 filtered_list.append(item)
                         else:
                             # For other regions, include all models
