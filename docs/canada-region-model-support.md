@@ -113,13 +113,15 @@ An asynchronous OCR path is a possible follow-up.
 
 ## Knowledge Base model
 
-`KnowledgeBaseModelId` is a stack parameter, and the configuration step does
-not touch stack parameters. Its default, `us.amazon.nova-pro-v1:0`, is not
-callable in ca-central-1, so a Canada deployment must set it to a callable
-AllowedValue: `ca.amazon.nova-lite-v1:0` keeps Knowledge Base answers in
-Canada; `us.amazon.nova-2-lite-v1:0`,
-`us.anthropic.claude-sonnet-4-5-20250929-v1:0` and
-`global.anthropic.claude-sonnet-4-5-20250929-v1:0` are also callable. The
+`KnowledgeBaseModelId` is a stack parameter, so the configuration step does not
+swap it. Its default, `us.amazon.nova-pro-v1:0`, has no inference profile in
+ca-central-1, so the root template swaps it instead: a stack in a Canada region
+that leaves the parameter at its default gives the Knowledge Base
+`ca.amazon.nova-lite-v1:0`, which keeps Knowledge Base answers in Canada (the
+stack parameter itself still shows the default). An explicit choice is passed
+through unchanged, so it must be one ca-central-1 can call, such as
+`us.amazon.nova-2-lite-v1:0`, `us.anthropic.claude-sonnet-4-5-20250929-v1:0` or
+`global.anthropic.claude-sonnet-4-5-20250929-v1:0`. The
 Knowledge Base embedding model, `amazon.titan-embed-text-v2:0`, is supported
 in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configuration).
 
@@ -146,15 +148,13 @@ template yourself, in one of two forms:
 ```bash
 # Build, publish to a bucket in your account and deploy in one step
 idp-cli deploy --stack-name my-idp --region ca-central-1 --from-code . \
-    --admin-email your.email@example.com \
-    --parameters "KnowledgeBaseModelId=ca.amazon.nova-lite-v1:0" --wait
+    --admin-email your.email@example.com --wait
 
 # Or publish first, then deploy the published template
 idp-cli publish --source-dir . --region ca-central-1
 idp-cli deploy --stack-name my-idp --region ca-central-1 \
     --template-url <template URL printed by publish> \
-    --admin-email your.email@example.com \
-    --parameters "KnowledgeBaseModelId=ca.amazon.nova-lite-v1:0" --wait
+    --admin-email your.email@example.com --wait
 ```
 
 The general build-from-source procedure, including the prerequisites, is in the
