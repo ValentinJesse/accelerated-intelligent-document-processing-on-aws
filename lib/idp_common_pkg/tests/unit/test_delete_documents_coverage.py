@@ -71,10 +71,20 @@ from idp_common.delete_documents import (
     delete_single_document,
     get_documents_by_batch,
     get_documents_by_pattern,
+    list_entry_names_document,
 )
 
 KEY = "batch-1/invoice.pdf"
 QUEUED = "2025-09-10T12:03:27.256164+00:00"
+
+#: How a double tells the module's two `query` calls apart. Both go through
+#: `_call_with_retry` with the same bound method, so the *arguments* are the only
+#: discriminator — and the shard query carries no `FilterExpression` any more, so
+#: `ProjectionExpression` is what is left. Named here so a shape change breaks one
+#: constant rather than silently disarming a test class; see
+#: `_table_whose_shard_query_faults`.
+_SHARD_QUERY_PROJECTION = "PK, SK, ObjectKey"
+_RUN_RECORD_PROJECTION = "PK, SK"
 
 #: The list-entry key the cascade computes from ``QUEUED`` — hour 12 falls in shard 03.
 #: Spelled out because several tests need to distinguish the row strategy 1 aimed at from
@@ -112,6 +122,19 @@ def _condition_parts(condition) -> list:
     for value in expression["values"]:
         parts.extend(_condition_parts(value))
     return parts
+
+
+def _list_row(marker: str, pk: str = "list#2025-09-10#s#03") -> dict:
+    """A shard row that actually names ``KEY``, which the selection now requires.
+
+    These fixtures used to carry rows like ``{"SK": "a"}``. That was sound while the
+    selection was a server-side ``FilterExpression`` — anything the double returned was
+    a match by construction. It is a client-side predicate now
+    (``list_entry_names_document``, because the sort-key half cannot be a ``Query``
+    filter — #1366), so a row has to name the document or the assertions below would be
+    pinning that three non-matching rows are correctly ignored.
+    """
+    return {"PK": pk, "SK": f"ts#{marker}#id#{KEY}"}
 
 
 def _table() -> MagicMock:
@@ -279,15 +302,14 @@ class TestQueryShardForObjectKey:
         # A single-page test passes with the pagination loop deleted, and a truncated
         # result here means list entries survive the delete.
         table = _table()
+        pages = [_list_row("a"), _list_row("b"), _list_row("c")]
         table.query.side_effect = [
-            {"Items": [{"SK": "a"}], "LastEvaluatedKey": {"PK": "p"}},
-            {"Items": [{"SK": "b"}], "LastEvaluatedKey": {"PK": "p2"}},
-            {"Items": [{"SK": "c"}]},
+            {"Items": [pages[0]], "LastEvaluatedKey": {"PK": "p"}},
+            {"Items": [pages[1]], "LastEvaluatedKey": {"PK": "p2"}},
+            {"Items": [pages[2]]},
         ]
         assert [i["SK"] for i in _query_shard_for_object_key(table, "pk", KEY)] == [
-            "a",
-            "b",
-            "c",
+            row["SK"] for row in pages
         ]
 
     def test_the_continuation_key_is_passed_back(self):
@@ -301,19 +323,90 @@ class TestQueryShardForObjectKey:
             "PK": "cursor"
         }
 
-    def test_the_filter_matches_both_the_attribute_and_the_sort_key(self):
-        # Two shapes exist in the table: older entries carry ObjectKey as an attribute,
-        # newer ones encode it in the SK as "#id#<key>". Matching only one leaves the
-        # other orphaned, which is why the filter is an OR.
+    def test_both_shapes_of_list_entry_are_selected(self):
+        """Two shapes exist in the table and both have to be found.
+
+        Older entries carry ``ObjectKey`` as an attribute; every entry encodes the key
+        in its sort key as ``ts#<timestamp>#id#<key>``. Matching only one shape leaves
+        the other orphaned in the document list.
+
+        ⚠️ **This asserts the selection, not the expression.** The previous version of
+        this test asserted that ``contains(SK, :obj_id)`` appeared in the call's
+        ``FilterExpression`` — and that is a string DynamoDB refuses, because a key
+        attribute is not allowed in a ``Query`` filter. The table here is a
+        ``MagicMock``, which accepts any expression, so the assertion held while the
+        shipped query raised ``ValidationException`` on every call and no list entry
+        was ever deleted (#1366). Replacing the mock with ``moto`` does not fix that:
+        measured on moto 5.1.8, moto accepts the same expression and returns filtered
+        items. Nothing short of a real endpoint can tell the two apart at run time, so
+        the string is guarded at source by
+        ``scripts/tests/test_dynamodb_query_filter_keys.py`` and what is asserted here
+        is the behaviour that string was supposed to produce.
+        """
+        by_attribute = {"PK": "pk", "SK": "ts#2026-01-01T00:00:00#id#elsewhere"}
+        by_attribute["ObjectKey"] = KEY
+        by_sort_key = {"PK": "pk", "SK": f"ts#2026-01-01T01:00:00#id#{KEY}"}
+        someone_else = {
+            "PK": "pk",
+            "SK": "ts#2026-01-01T02:00:00#id#other/doc.pdf",
+            "ObjectKey": "other/doc.pdf",
+        }
+        table = _table()
+        table.query.return_value = {
+            "Items": [by_attribute, by_sort_key, someone_else]
+        }
+
+        selected = _query_shard_for_object_key(table, "pk", KEY)
+
+        assert selected == [by_attribute, by_sort_key], (
+            "both shapes must be selected and another document's row must not be"
+        )
+
+    def test_the_query_names_no_key_attribute_in_a_filter(self):
+        """The repair itself: the shard query carries no ``FilterExpression`` at all.
+
+        Stated as a property of the call rather than of a string, because the failure
+        this guards is "DynamoDB refuses the request", and the only filter it would
+        accept here is one that cannot express the sort-key half.
+        """
         table = _table()
         _query_shard_for_object_key(table, "pk", KEY)
         kwargs = table.query.call_args.kwargs
-        assert "ObjectKey = :obj_key" in kwargs["FilterExpression"]
-        assert "contains(SK, :obj_id)" in kwargs["FilterExpression"]
-        assert kwargs["ExpressionAttributeValues"] == {
-            ":obj_key": KEY,
-            ":obj_id": f"#id#{KEY}",
-        }
+        assert "FilterExpression" not in kwargs
+        assert kwargs["ProjectionExpression"] == "PK, SK, ObjectKey", (
+            "the three attributes the predicate and the delete read, and no more"
+        )
+
+    @pytest.mark.parametrize(
+        "entry, expected",
+        [
+            ({"ObjectKey": KEY}, True),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY}"}, True),
+            ({"ObjectKey": "other.pdf", "SK": "ts#2026-01-01T00:00:00#id#other.pdf"}, False),
+            ({}, False),
+            ({"SK": None}, False),
+            ({"SK": 7}, False),
+            ({"ObjectKey": KEY, "SK": None}, True),
+        ],
+        ids=[
+            "attribute-match",
+            "sort-key-match",
+            "another-document",
+            "neither-attribute",
+            "null-sort-key",
+            "non-string-sort-key",
+            "attribute-wins-over-a-null-sort-key",
+        ],
+    )
+    def test_the_selection_predicate(self, entry, expected):
+        """The predicate alone, including the shapes a malformed row arrives in.
+
+        A non-string ``SK`` cannot occur on this table, whose sort key is ``S``, but
+        ``f"#id#…" in 7`` is a ``TypeError`` rather than a miss — and this predicate
+        runs inside the loop that selects rows for deletion, so an exception here
+        aborts a delete rather than narrowing it.
+        """
+        assert list_entry_names_document(entry, KEY) is expected
 
     @pytest.mark.parametrize(
         "paginate, guard",
@@ -426,9 +519,7 @@ class TestDeleteListEntriesRobust:
         table = _table()
         # Exact delete misses, then the query finds one entry which deletes cleanly.
         table.delete_item.side_effect = [{}, {"Attributes": {"x": 1}}]
-        table.query.return_value = {
-            "Items": [{"PK": "list#2025-09-10#s#03", "SK": "ts#...#id#x"}]
-        }
+        table.query.return_value = {"Items": [_list_row("...")]}
         assert delete_list_entries_robust(table, KEY, {"QueuedTime": QUEUED}) is True
 
     def test_strategy_three_searches_the_adjacent_shards(self):
@@ -438,7 +529,8 @@ class TestDeleteListEntriesRobust:
         table.delete_item.side_effect = [{}, {"Attributes": {"x": 1}}]
         table.query.side_effect = [
             {"Items": []},  # computed shard: nothing
-            {"Items": [{"PK": "list#2025-09-10#s#02", "SK": "sk"}]},  # neighbour: hit
+            # neighbour: hit
+            {"Items": [_list_row("sk", pk="list#2025-09-10#s#02")]},
             {"Items": []},
         ]
         assert delete_list_entries_robust(table, KEY, {"QueuedTime": QUEUED}) is True
@@ -480,7 +572,7 @@ class TestDeleteListEntriesRobust:
             {},
             *(_modelled_error("DeleteItem", "ThrottlingException") for _ in range(4)),
         ]
-        table.query.return_value = {"Items": [{"PK": "p", "SK": "s"}]}
+        table.query.return_value = {"Items": [_list_row("s", pk="p")]}
         with pytest.raises(ClientError):
             delete_list_entries_robust(table, KEY, {"QueuedTime": QUEUED})
 
@@ -1522,9 +1614,26 @@ class TestAListEntryFaultIsNotReportedAsADeletedDocument:
         }
 
         def query(**kwargs):
-            if "FilterExpression" in kwargs:  # the shard query, not run records
+            # ⚠️ **This discriminator is load bearing, so it refuses to guess.** It used
+            # to read `"FilterExpression" in kwargs` — the shard query carried one and the
+            # run-record query did not. When the shard query stopped carrying a
+            # `FilterExpression` (it named the sort key, which DynamoDB refuses in a
+            # `Query` filter — #1366) that test became "no call faults at all", and every
+            # test in this class passed while asserting nothing: measured, 9 of them went
+            # green on a `success is False` that was now `True`. A double that stops
+            # recognising the call under test has to fail rather than fall through, which
+            # is why the `else` below raises instead of returning an empty page.
+            projection = kwargs.get("ProjectionExpression")
+            if projection == _SHARD_QUERY_PROJECTION:
                 raise failure
-            return {"Items": []}
+            if projection == _RUN_RECORD_PROJECTION:
+                return {"Items": []}
+            raise AssertionError(
+                "this double no longer recognises the query it is meant to fault; "
+                f"ProjectionExpression={projection!r}. Update "
+                "_SHARD_QUERY_PROJECTION / _RUN_RECORD_PROJECTION rather than letting "
+                "this class pass vacuously."
+            )
 
         # A callable side_effect raises on every call, so the retry ladder cannot run the
         # double out of responses — a list would end in `StopIteration` instead.

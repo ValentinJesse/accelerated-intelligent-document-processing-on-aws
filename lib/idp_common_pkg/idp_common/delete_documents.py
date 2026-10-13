@@ -851,7 +851,13 @@ def delete_single_document(
                 # ``s3:DeleteObject`` and not the versioned form) could delist a
                 # document while leaving every byte of its output in the bucket, and
                 # report success (#1366).
-                failures = response.get("Errors") or []
+                # Membership rather than ``.get()``, the same way the pagination loops
+                # in this module read ``LastEvaluatedKey`` and for the same reason:
+                # ``MagicMock().get("Errors")`` auto-creates a **truthy** value, so the
+                # other form reports a refusal against every bare test double and
+                # ``len()`` of it is meaningless. S3 omits ``Errors`` when nothing was
+                # refused, so absence is the ordinary case.
+                failures = response["Errors"] if "Errors" in response else []
                 deleted_output_count += len(batch) - len(failures)
                 if failures:
                     codes = ", ".join(sorted({f.get("Code", "?") for f in failures}))
