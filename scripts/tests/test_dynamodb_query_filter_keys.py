@@ -184,7 +184,9 @@ def _mentions_key_attribute(expression: str) -> str | None:
     import re
 
     for name in KEY_ATTRIBUTE_NAMES:
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expression):
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expression
+        ):
             return name
     return None
 
@@ -230,9 +232,10 @@ def scan_source(source: str, path: str) -> List[Finding]:
             continue
         candidates: List[Tuple[int, str]] = []
         for kw in node.keywords:
-            if kw.arg == "FilterExpression" and (
-                text := _literal_string(kw.value)
-            ) is not None:
+            if (
+                kw.arg == "FilterExpression"
+                and (text := _literal_string(kw.value)) is not None
+            ):
                 candidates.append((getattr(kw.value, "lineno", node.lineno), text))
         candidates.extend(_splatted_filter_expressions(node, module))
         for lineno, expression in candidates:
@@ -257,9 +260,7 @@ def _findings_over(paths: Iterable[Path]) -> List[Finding]:
         except (OSError, UnicodeDecodeError):
             continue
         try:
-            findings.extend(
-                scan_source(source, str(path.relative_to(REPO_ROOT)))
-            )
+            findings.extend(scan_source(source, str(path.relative_to(REPO_ROOT))))
         except SyntaxError:
             # A file this interpreter cannot parse is out of reach of any AST gate.
             continue
@@ -310,7 +311,7 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
     "source, expect_finding, why",
     [
         (
-            'table.query(KeyConditionExpression=k, '
+            "table.query(KeyConditionExpression=k, "
             'FilterExpression="ObjectKey = :o OR contains(SK, :i)")',
             True,
             "the shipped #1366 expression, as a literal keyword",

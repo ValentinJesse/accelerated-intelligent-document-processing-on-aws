@@ -273,9 +273,7 @@ def test_the_versioned_grants_are_scoped_and_partition_parameterised(
         if isinstance(resources, (str, dict)):
             resources = [resources]
         for resource in resources:
-            rendered = (
-                resource["Fn::Sub"] if isinstance(resource, dict) else resource
-            )
+            rendered = resource["Fn::Sub"] if isinstance(resource, dict) else resource
             assert isinstance(rendered, str), (
                 f"{action} resource is not a plain Fn::Sub string: {resource!r}"
             )

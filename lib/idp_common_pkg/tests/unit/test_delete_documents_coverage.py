@@ -356,9 +356,7 @@ class TestQueryShardForObjectKey:
             "ObjectKey": "other/doc.pdf",
         }
         table = _table()
-        table.query.return_value = {
-            "Items": [by_attribute, by_sort_key, someone_else]
-        }
+        table.query.return_value = {"Items": [by_attribute, by_sort_key, someone_else]}
 
         selected = _query_shard_for_object_key(table, "pk", KEY)
 
@@ -386,7 +384,10 @@ class TestQueryShardForObjectKey:
         [
             ({"ObjectKey": KEY}, True),
             ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY}"}, True),
-            ({"ObjectKey": "other.pdf", "SK": "ts#2026-01-01T00:00:00#id#other.pdf"}, False),
+            (
+                {"ObjectKey": "other.pdf", "SK": "ts#2026-01-01T00:00:00#id#other.pdf"},
+                False,
+            ),
             ({}, False),
             ({"SK": None}, False),
             ({"SK": 7}, False),
@@ -881,7 +882,9 @@ class TestDeleteSingleDocument:
         ``len(batch) - len(Errors)``; a report of "3 deleted" for a batch of three where
         one was refused is the same miscount as the whole-batch case, just quieter.
         """
-        versions = [{"Key": f"{KEY}/sections/{i}.json", "VersionId": f"v{i}"} for i in range(3)]
+        versions = [
+            {"Key": f"{KEY}/sections/{i}.json", "VersionId": f"v{i}"} for i in range(3)
+        ]
         s3 = _s3([{"Versions": versions}])
         s3.delete_objects.return_value = {
             "Errors": [
