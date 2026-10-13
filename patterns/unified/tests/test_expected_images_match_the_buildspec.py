@@ -60,11 +60,10 @@ above uncovered for that entry.
 
 One shape is read without complaint and is worth knowing about: a resource
 declaring ``ExpectedImages`` **twice** in the same mapping yields only the last
-block, because that is what PyYAML does with a duplicate key. The gate therefore
-agrees with the resource CloudFormation would create, and the duplicate itself is
-an ERROR-class ``cfn-lint`` finding (``E0000 Duplicate found``) on a gate that
-runs in ``lint``, ``fastlint`` and ``lint-cicd``, so it is caught before this one
-is reached rather than left to it.
+block, because that is what PyYAML does with a duplicate key. ``cfn-lint`` reports
+the duplicate at ERROR class (``E0000 Duplicate found``) on a gate that runs in
+``lint``, ``fastlint`` and ``lint-cicd``, so it does not go unreported -- and that
+gate and this one run in parallel rather than in sequence, so neither is "first".
 """
 
 from __future__ import annotations
@@ -318,6 +317,24 @@ def test_every_variable_the_loop_names_is_exported() -> None:
 _SENTINEL = "probe-sentinel-function"
 _HASHED_SENTINEL = "probe#sentinel-function"
 
+# One sentinel per splice position, and the prefixes are the point rather than
+# decoration: ``_unbuilt`` sorts before it compares, so a comparison that truncates
+# the **sorted** list is blind to every splice position unless the sentinel's name
+# sorts where it was spliced. ``probe-sentinel-function`` sorts to rank 9 of the 14
+# entries -- strictly interior, whatever line it sits on -- so measured,
+# ``set(sorted(set(expected))[:-1]) - built`` and ``set(sorted(set(expected))[1:]) -
+# built`` both passed all three positions, and a slice landing beside the
+# ``sorted(...)`` already in ``_unbuilt`` is a plausible edit. The alphabetically
+# last expected image today is ``summarization-function``, so ``zzz-`` sorts after
+# every real entry and ``aaa-`` before every one. The rank is asserted in the test
+# rather than assumed, so a rename that lands interior fails loudly instead of
+# quietly giving the property back.
+_POSITION_SENTINELS = {
+    "start-of-list": f"aaa-{_SENTINEL}",
+    "mid-list": _SENTINEL,
+    "end-of-list": f"zzz-{_SENTINEL}",
+}
+
 
 def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
     """Where the ``ExpectedImages`` block starts, and its lines verbatim.
@@ -338,10 +355,13 @@ def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
         f"the probes splice a tail onto one block-style {_PROPERTY} list and found "
         f"{len(starts)} candidate lines, not 1. More than one means a second "
         "declaring site the probes would silently skip, so extend them to cover "
-        "each. None means the list is no longer block style -- a flow sequence "
-        f"({_PROPERTY}: [a, b]) or an alias writes it on the key's own line -- in "
-        "which case the gate itself is unaffected, because it reads the parsed "
-        "document, and what needs rewriting is the splice below."
+        "each. None means nothing matched the key line this locator looks for, "
+        "which is the key alone on its line: a trailing comment on it "
+        f"({_PROPERTY}:  # the list) is the likeliest cause and leaves the list "
+        f"perfectly block style, while a flow sequence ({_PROPERTY}: [a, b]) or an "
+        "alias moves the entries onto the key's line too. In every one of those "
+        "the gate itself is unaffected, because it reads the parsed document; what "
+        "needs rewriting is the splice below."
     )
     start = starts[0]
     indent = len(lines[start]) - len(lines[start].lstrip())
@@ -354,6 +374,11 @@ def _block_bounds(text: str | None = None) -> tuple[int, list[str]]:
     while block and not block[-1].strip():
         block.pop()
     assert block, f"the {_PROPERTY} block at line {start + 1} reads as empty"
+    assert any(line.lstrip().startswith("-") for line in block), (
+        f"the {_PROPERTY} block at line {start + 1} holds no list entries, only "
+        f"comments: {block}. The splices below take their indentation from an "
+        "existing entry, so there is nothing to splice onto."
+    )
     return start + 1, block
 
 
@@ -380,8 +405,18 @@ def _minimal_document(block: list[str]) -> str:
 
 
 def _tail_indent(block: list[str]) -> str:
-    """The indentation the block's own entries sit at."""
-    reference = next(line for line in block if line.lstrip().startswith("-"))
+    """The indentation the block's **first** entry sits at.
+
+    First rather than any, because a nested line under an earlier entry is more
+    indented and would move every splice in with it.
+    """
+    entries = [line for line in block if line.lstrip().startswith("-")]
+    assert entries, (
+        f"no list entry in {block}, so there is no indentation to splice at. "
+        "_block_bounds refuses this, and a bare StopIteration from a generator "
+        "would name neither the block nor the reason."
+    )
+    reference = entries[0]
     return reference[: len(reference) - len(reference.lstrip())]
 
 
@@ -459,6 +494,29 @@ _SPELLINGS: list[tuple[str, list[str], list[str]]] = [
 ]
 
 
+def _splice_index(position: str, block: list[str]) -> int:
+    """Where the comparison probe's sentinel goes, as an offset into the block.
+
+    A function rather than a dict literal inside the test, so its refusal is
+    reachable from a probe the way every other refusal in this module is. Against
+    the real thirteen-entry block it can never fire, and a refusal nothing can
+    reach is one nobody has measured.
+    """
+    indices = {
+        "start-of-list": 0,
+        "mid-list": len(block) - 1,
+        "end-of-list": len(block),
+    }
+    middle = indices["mid-list"]
+    assert 0 < middle < len(block), (
+        f"the {_PROPERTY} block is {len(block)} line(s) long, so the mid-list splice "
+        f"offset is {middle}, which is not strictly inside it. The three positions "
+        "then stop being three distinct inputs and `mid-list` measures what one of "
+        "the ends already does. Splice at a named interior entry instead."
+    )
+    return indices[position]
+
+
 def test_the_probe_block_is_the_real_block() -> None:
     """Control: the probes' locator and the gate's parse must agree.
 
@@ -498,31 +556,96 @@ def test_the_parse_sees_every_entry_whatever_its_spelling(
     )
 
 
-def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check() -> None:
+@pytest.mark.parametrize("position", list(_POSITION_SENTINELS))
+def test_an_unbuilt_entry_after_a_comment_fails_the_subset_check(
+    position: str,
+) -> None:
     """The issue's own measurement, against the real template text.
 
-    A comment inserted mid-list plus an unbuilt image after it has to reach the
-    subset assertion. Spliced into the whole template rather than the one-resource
-    frame the probes use, so nothing about the frame can be what makes it visible.
+    A comment plus an unbuilt image after it has to reach the subset assertion.
+    Spliced into the whole template rather than the one-resource frame the probes
+    use, so nothing about the frame can be what makes it visible.
+
+    What each of the three positions buys is worth being exact about, because the
+    obvious summary -- "one tests the parse, three test the comparison" -- is not
+    quite what is true.
+
+    :func:`_unbuilt` is where a silently-dropped entry would next be possible after
+    the parse, and the shapes a comparison realistically acquires act on the *ends*
+    of a list: a slice, a sort then a slice, a ``reverse=True`` then a slice.
+    ``start-of-list`` and ``end-of-list`` are what catch those, and they need the
+    sentinel to land at that end in **both** of the orders such a comparison might
+    truncate -- document order, and sorted order, since ``_unbuilt`` sorts before it
+    subtracts. That is why each position brings its own sentinel from
+    :data:`_POSITION_SENTINELS` and why both orders are asserted: with one interior
+    name for all three, ``set(sorted(set(expected))[:-1]) - built`` passed every
+    position, and that is the drop-the-tail shape the whole module exists to prevent.
+
+    ``mid-list`` is not what catches an end-truncating comparison. It covers the
+    parse at an interior block offset, and it keeps the exact-equality of
+    ``_unbuilt`` measured there rather than only at the ends. Its own property is
+    that it really is interior in both orders, which is asserted, because a
+    ``mid-list`` that collapsed onto one of the ends would leave two of the three
+    cases measuring the same input.
+
+    Two spellings remain uncovered, measured and left so deliberately: dropping a
+    fixed interior index, and dropping the element at ``len(expected) // 2``. No
+    splice position catches either, because they need an index nothing plausible
+    writes -- a comparison that discards an interior element is not a shape a slice,
+    a sort or a set operation produces.
     """
+    sentinel = _POSITION_SENTINELS[position]
+    assert sentinel not in _built_images(), (
+        f"the {position} sentinel {sentinel} is a name {_buildspec_path().name} "
+        "really builds, so the subset check below could not flag it. Rename it."
+    )
+
     lines = _template_text().splitlines()
     start, block = _block_bounds()
     indent = _tail_indent(block)
-    insert_at = start + len(block) - 1  # before the block's last entry
+    index = _splice_index(position, block)
     mutated = (
-        lines[:insert_at]
+        lines[: start + index]
         + [f"{indent}# a note about the entry below"]
-        + [f'{indent}- "{_SENTINEL}"']
-        + lines[insert_at:]
+        + [f'{indent}- "{sentinel}"']
+        + lines[start + index :]
     )
 
     parsed = _expected_images_in_text("\n".join(mutated) + "\n")
-    assert _SENTINEL in parsed, (
-        f"{_SENTINEL} was spliced in after a comment and the parse did not return it"
+    assert sentinel in parsed, (
+        f"{sentinel} was spliced in {position} after a comment and the parse did "
+        "not return it"
     )
-    assert _unbuilt(parsed, _built_images()) == [_SENTINEL], (
-        "an unbuilt image spliced in after a comment did not reach the subset check: "
-        f"the parse returned {parsed}"
+
+    by_sort = sorted(set(parsed))
+    if position == "mid-list":
+        assert sentinel not in (parsed[0], parsed[-1]), (
+            f"the mid-list splice landed at an end of the parse, so this case "
+            f"duplicates one of the other two and nothing measures the interior: "
+            f"{parsed}"
+        )
+        assert sentinel not in (by_sort[0], by_sort[-1]), (
+            f"the mid-list sentinel sorts to an end of {by_sort}, so under a "
+            "comparison that sorts before truncating this case duplicates one of "
+            "the other two"
+        )
+    else:
+        document_end = parsed[0] if position == "start-of-list" else parsed[-1]
+        assert document_end == sentinel, (
+            f"the {position} splice did not land where it was meant to, so a "
+            "comparison discarding that end of the document order would still see "
+            f"it: {parsed}"
+        )
+        sort_end = by_sort[0] if position == "start-of-list" else by_sort[-1]
+        assert sort_end == sentinel, (
+            f"{sentinel} does not sort to the {position} end of {by_sort}, so a "
+            "comparison that sorts before truncating would still see it. The "
+            "sentinel's name has to sort with the position it is spliced at."
+        )
+
+    assert _unbuilt(parsed, _built_images()) == [sentinel], (
+        f"an unbuilt image spliced in {position} after a comment did not reach the "
+        f"subset check: the parse returned {parsed}"
     )
 
 
@@ -585,11 +708,12 @@ def test_the_walk_descends_into_a_sequence(conditional: str) -> None:
 #
 # Every assertion in the parsing half fires on a shape the template does not
 # currently have, so none of them is exercised by the live assertions -- removing
-# any one of them leaves this module green. Measured: of fourteen deliberate
-# mutations of the parsing half, seven survived, and six of the seven were an
-# assertion in exactly that position. Each is therefore driven here against a
-# synthetic document, which is the only input that can distinguish the guard from
-# its absence.
+# any one of them leaves this module green -- which is how six of them were found:
+# mutating the parsing half assertion by assertion, every survivor was an assertion
+# in exactly that position. Each is therefore driven here against a synthetic
+# document, which is the only input that can distinguish the guard from its
+# absence. No count is quoted because the mutation set is not in this repository
+# and the figure would be unverifiable here.
 # --------------------------------------------------------------------------- #
 
 
@@ -642,6 +766,60 @@ def test_a_second_declaring_site_fails_the_probe_locator() -> None:
         _block_bounds(text)
 
 
+@pytest.mark.parametrize(
+    ("case", "text", "expected"),
+    [
+        (
+            "no-lines-under-the-key",
+            f"A:\n  {_PROPERTY}:\nB: 1\n",
+            "reads as empty",
+        ),
+        (
+            "comments-only-under-the-key",
+            f'A:\n  {_PROPERTY}:\n    # all commented out\n    # - "a-function"\nB: 1\n',
+            "holds no list entries",
+        ),
+    ],
+)
+def test_a_block_with_nothing_to_splice_onto_is_refused(
+    case: str, text: str, expected: str
+) -> None:
+    """Both empty shapes refuse by name, rather than raising from a generator.
+
+    A commented-out list is what a refactor leaves behind, and before this the
+    second shape reached ``_tail_indent`` and raised a bare ``StopIteration`` --
+    naming neither the block nor the reason. The gate proper survives either
+    (the property parses as ``None`` and is refused as "not a list"); this is the
+    probe scaffolding saying so too.
+    """
+    with pytest.raises(AssertionError, match=expected):
+        _block_bounds(text)
+
+
+def test_a_block_too_short_to_have_an_interior_is_refused() -> None:
+    """A one-entry block would make ``mid-list`` the same input as ``start-of-list``.
+
+    Silently, which is the shape that matters: both cases would pass, the pair would
+    read as two measurements, and the interior would be covered by neither. The real
+    block holds thirteen entries, so this refusal cannot fire against the template
+    and is driven synthetically, like every other refusal in this module.
+    """
+    with pytest.raises(AssertionError, match="not strictly inside it"):
+        _splice_index("mid-list", ['        - "alpha-function"'])
+
+
+def test_the_three_splice_positions_are_distinct_against_the_real_block() -> None:
+    """And the live block is long enough, which is what makes the refusal inert."""
+    block = _block_lines()
+    offsets = {
+        position: _splice_index(position, block) for position in _POSITION_SENTINELS
+    }
+    assert len(set(offsets.values())) == 3, offsets
+    assert offsets["start-of-list"] < offsets["mid-list"] < offsets["end-of-list"], (
+        offsets
+    )
+
+
 def _buildspec_document(*values: str) -> str:
     resources = "".join(
         f"  Project{index}:\n"
@@ -692,6 +870,14 @@ def test_an_export_the_loop_does_not_name_is_not_a_built_image() -> None:
         'export FUNCTION_BETA="src/lambda/beta_function"',
         "for func_var in FUNCTION_ALPHA; do echo $func_var; done",
     ]
+    exports = _exported_functions(commands)
+    looped = _looped_functions(commands)
+    assert set(exports) - set(looped), (
+        f"the synthetic buildspec exports {sorted(exports)} and loops over "
+        f"{sorted(looped)}, so there is no un-looped export and the assertion below "
+        "would hold whichever list the implementation read"
+    )
+
     built = _built_images_from(commands)
     assert built == frozenset({"alpha-function"}), built
 
