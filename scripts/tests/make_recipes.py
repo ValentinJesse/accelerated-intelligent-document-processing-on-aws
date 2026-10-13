@@ -22,6 +22,7 @@ it would run.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -32,14 +33,17 @@ from pathlib import Path
 PYTEST_MARKER = "-m pytest"
 
 
-def dry_run_command(target: str, directory: Path) -> str:
-    """The command ``make <target>`` would run, as ``make`` itself expands it.
+def dry_run_lines(
+    target: str, directory: Path, *, allow_failure: bool = False
+) -> list[str]:
+    """Every command ``make <target>`` would run, as ``make`` itself expands it.
 
     ``--dry-run`` prints the recipe without executing it, which matters here: the
     targets this is used on run test suites, one of them against real AWS.
 
-    The last non-empty line is taken, so a target whose recipe starts with a
-    conditional install step (``test-unit-cicd``) still yields its pytest line.
+    ``allow_failure`` returns an empty list instead of asserting, for the sweep
+    that dry-runs every target in a makefile to find the ones that run pytest —
+    where a target that cannot be dry-run is not a finding.
     """
     result = subprocess.run(  # noqa: S603 - fixed argv, no shell
         ["make", "--no-print-directory", "--dry-run", target],
@@ -48,12 +52,64 @@ def dry_run_command(target: str, directory: Path) -> str:
         text=True,
         check=False,
     )
-    assert result.returncode == 0, (
-        f"`make --dry-run {target}` failed in {directory}: {result.stderr}"
+    if result.returncode != 0:
+        if allow_failure:
+            return []
+        raise AssertionError(
+            f"`make --dry-run {target}` failed in {directory}: {result.stderr}"
+        )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def pytest_lines(lines: list[str]) -> list[str]:
+    """The subset of ``lines`` that start pytest."""
+    return [line for line in lines if PYTEST_MARKER in line]
+
+
+def targets(makefile: Path) -> list[str]:
+    """Every ordinary target name a makefile defines, in file order.
+
+    Names beginning with ``.`` (``.PHONY`` and friends) are directives rather than
+    targets, and a line with no tab-indented body is a dependency declaration; both
+    are harmless to dry-run and are dropped here so the sweep reads cleanly.
+    """
+    found: list[str] = []
+    for line in makefile.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^([A-Za-z][A-Za-z0-9_.-]*):(?!=)", line)
+        if match and match.group(1) not in found:
+            found.append(match.group(1))
+    return found
+
+
+def recipe_text(makefile: Path, target: str) -> str:
+    """The tab-indented body of ``target``, as written — not expanded."""
+    lines = makefile.read_text(encoding="utf-8").splitlines()
+    body: list[str] = []
+    collecting = False
+    for line in lines:
+        if re.match(rf"^{re.escape(target)}:(?!=)", line):
+            collecting = True
+            continue
+        if collecting:
+            if line.startswith("\t"):
+                body.append(line)
+            elif line.strip():
+                break
+    return "\n".join(body)
+
+
+def dry_run_command(target: str, directory: Path) -> str:
+    """The one pytest command ``make <target>`` would run.
+
+    Asserts there is exactly one, so a recipe that grew a second pytest
+    invocation is a deliberate edit here rather than a silently unprobed half.
+    """
+    found = pytest_lines(dry_run_lines(target, directory))
+    assert len(found) == 1, (
+        f"`make --dry-run {target}` in {directory} contains {len(found)} commands "
+        f"with {PYTEST_MARKER!r}, expected exactly one: {found}"
     )
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines, f"`make --dry-run {target}` printed no command in {directory}"
-    return lines[-1]
+    return found[0]
 
 
 def probe_command(command: str, code: str) -> str:

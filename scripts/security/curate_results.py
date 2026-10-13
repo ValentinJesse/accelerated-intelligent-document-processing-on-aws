@@ -57,7 +57,10 @@ RESULTS_ROOT = REPO_ROOT / "security" / "test-results"
 # again — a copy of the rule here would agree today and diverge on the next change
 # to it.
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "srt"))
-from ci_paths import partition_by_name_heuristic_scope  # noqa: E402
+from ci_paths import (  # noqa: E402
+    partition_by_ci_visibility,
+    partition_by_name_heuristic_scope,
+)
 
 sys.path.pop(0)
 
@@ -194,43 +197,25 @@ def _stub(title: str, source_hint: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _git_ignored_set(paths: list[str]) -> set[str]:
-    """Return the subset of `paths` that git ignores (one batched call).
-
-    A fresh local `.srt/issues.json` scans gitignored trees (`.aws-sam/`,
-    `scratch/`, vendored `layer/python/`, …) that a CI clean-checkout never
-    sees. To publish a result that matches what CI gates on, we drop findings
-    whose path is git-ignored. `git check-ignore --stdin` classifies every path
-    in one process (per-path spawning is far too slow for an 8k-finding scan).
-    On any error we return an empty set — better a false-keep than silently
-    hiding a real finding.
-    """
-    uniq = sorted({p for p in paths if p})
-    if not uniq:
-        return set()
-    try:
-        res = subprocess.run(
-            ["git", "check-ignore", "--stdin"],
-            cwd=REPO_ROOT,
-            input="\n".join(uniq),
-            capture_output=True,
-            text=True,
-        )
-        return {ln for ln in res.stdout.splitlines() if ln}
-    except Exception:
-        return set()
-
-
 def curate_srt(issues_path: Path) -> tuple[str, dict]:
     if not issues_path.exists():
         return _stub("SRT — SAST & Dependency Scan", f"`{issues_path}`"), {
             "status": "not-run"
         }
     raw_issues = json.loads(issues_path.read_text())
-    # Reconcile to CI's view: drop findings whose path is git-ignored.
-    ignored = _git_ignored_set([i.get("path", "") for i in raw_issues])
-    issues = [i for i in raw_issues if i.get("path", "") not in ignored]
-    dropped = len(raw_issues) - len(issues)
+    # Reconcile to CI's view — with the gate's own partition rather than a second
+    # implementation of it. A fresh local `.srt/issues.json` scans build output and
+    # vendored trees that CI's clean checkout never contains, and reporting those as
+    # blocking produced phantom regressions after every publish.
+    #
+    # This was a private `git check-ignore` pass, which asks a DIFFERENT question:
+    # CI checks out the TRACKED files, so "untracked" is the criterion and
+    # "ignored" is a subset of it. The two agree on a released tree and disagree on
+    # an untracked-but-not-ignored file, where the gate passed and this published a
+    # FAIL — one rule, copied, diverging, which is the defect #1365 is about
+    # surviving in the other half of the same function.
+    issues, not_in_ci = partition_by_ci_visibility(raw_issues, REPO_ROOT)
+    dropped = len(not_in_ci)
     # Which source produced this — the live scan results or the committed
     # disposition register — is itself an audit-relevant fact.
     src_name = issues_path.name
@@ -328,7 +313,8 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
         ),
         f"- **Source:** {source_desc}"
         + (
-            f" — {dropped} git-ignored finding(s) excluded to match the CI view"
+            f" — {dropped} finding(s) in files CI's checkout does not contain,"
+            " excluded to match the CI view"
             if dropped
             else ""
         ),
@@ -401,14 +387,17 @@ def curate_srt(issues_path: Path) -> tuple[str, dict]:
             "decision `make srt-scan` applies, applied here so this snapshot and "
             "that gate give the same verdict.",
             "",
-            "| Source | Check | Path | Line | Issue |",
-            "|--------|-------|------|-----:|-------|",
+            "| Source | Check | Path | Line |",
+            "|--------|-------|------|-----:|",
         ]
+        # The check id, path and line locate the finding; Bandit's message for
+        # B105/B106 quotes the literal it matched, and these are published
+        # routinely rather than after a triage, so it is left out here. The scan's
+        # own output carries it for whoever is looking.
         for i in name_scoped:
             lines.append(
                 f"| {redact(i.get('source', ''))} | `{redact(i.get('check_id', ''))}` "
-                f"| `{redact(i.get('path', ''))}` | {i.get('line', '')} "
-                f"| {redact(i.get('issue', ''))} |"
+                f"| `{redact(i.get('path', ''))}` | {i.get('line', '')} |"
             )
         lines.append("")
 
@@ -1148,7 +1137,17 @@ def write_manifest(out_dir: Path, version: str, date: str, per_test: dict) -> No
         "|------|------|--------|",
         f"| [SRT — SAST & deps](./srt.md) | {gate_of('srt')} | "
         f"{per_test.get('srt', {}).get('open_high', '?')} open/reopened HIGH of "
-        f"{per_test.get('srt', {}).get('total', '?')} tracked |",
+        f"{per_test.get('srt', {}).get('total', '?')} tracked"
+        # A PASS reached by scoping findings out of the gate says so here. The
+        # count is a property of the snapshot a reader acts on: it is the
+        # difference between "nothing was found" and "what was found does not
+        # block", and only one of those two is worth a second look.
+        + (
+            f", {per_test['srt']['name_scoped']} scoped out"
+            if per_test.get("srt", {}).get("name_scoped")
+            else ""
+        )
+        + " |",
         f"| [RBAC — static](./rbac-static.md) | {gate_of('rbac_static')} | "
         f"{per_test.get('rbac_static', {}).get('fail', '?')} fail, "
         f"{per_test.get('rbac_static', {}).get('warn', '?')} known-gap warn |",

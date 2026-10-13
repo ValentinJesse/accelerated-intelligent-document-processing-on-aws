@@ -35,26 +35,30 @@ Each of those is parametrized over paths **derived from the tree**, with the
 derived lists asserted non-empty: an empty parametrization is collected as a skip
 rather than a failure, which is how a guarantee goes quiet here.
 
-Two things this does not claim, both of them measured rather than supposed. Of
-161 behaviour-changing mutations of ``curate_srt`` and ``ci_paths`` — every
-effective line of both, deleted one at a time, plus thirteen chosen to attack the
-verdict — this catches 145, and the sixteen survivors are exactly these two
-shapes:
+What is and is not covered was measured rather than supposed, by deleting every
+effective line of ``curate_srt`` and ``ci_paths`` one at a time and adding
+mutations chosen to attack the verdict. Of 161 behaviour-changing mutations this
+caught 145 at first writing, and the survivors came in two shapes. One of them is
+now closed and the other is a property of the comparison:
 
-* **It compares verdicts, not documents.** Fourteen of the sixteen are the
-  ``lines.append(...)`` rows and per-source counters that build the markdown: the
-  published tables go wrong or empty and the verdict does not change. The one
-  document property that *is* asserted is that a finding scoped out of the gate is
-  still named in the snapshot, because an audit artifact that agrees with the gate
-  by withholding the evidence is the worse of the two failures.
-* **Both sides of a comparison derived from one classifier move together.** The
-  other two survivors narrow ``ci_paths._has_test_shape`` itself. The path classes
-  below come from that function, so a change to it reclassifies the fixtures and
-  the curator in step and the agreement still holds. That is a property of an
-  agreement gate and not a hole in it: what holds the classifier against an
-  *independent* fact is ``scripts/srt/tests/test_name_heuristic_scope.py``, whose
-  closure assertion is stated against the ``CodeUri`` directories the templates
-  declare.
+* **The verdict a human reads and the verdict a machine reads are different
+  lines**, and only the second was asserted. ``MANIFEST.md`` renders
+  ``meta["gate"]``; ``srt.md``'s Summary renders a string built beside it, and an
+  unconditional ``FAIL ❌`` in that string published the issue's own symptom
+  alongside a ``PASS ✅`` in the manifest row. :func:`_curate` now checks the two
+  against each other on **every** curation below, along with the scoped-out count.
+  The remaining document lines — the per-analyzer table, the priority × status
+  matrix, the finding rows themselves — are still unasserted here; what *is*
+  asserted about them is that a finding scoped out of the gate appears somewhere
+  in the page, because an audit artifact that agrees with the gate by withholding
+  the evidence is the worse of the two failures.
+* **Both sides of a comparison derived from one classifier move together.** Two
+  survivors narrow ``ci_paths._has_test_shape`` itself. The path classes below come
+  from that function, so a change to it reclassifies the fixtures and the curator
+  in step and the agreement still holds. That is a property of an agreement gate
+  and not a hole in it: what holds the classifier against an *independent* fact is
+  ``scripts/srt/tests/test_name_heuristic_scope.py``, whose closure assertion is
+  stated against the ``CodeUri`` directories the templates declare.
 
 It also does not run SRT, so it says nothing about whether the scanner's own
 output is complete — ``scripts/srt/scanner_health.py`` is that check.
@@ -66,6 +70,7 @@ import functools
 import importlib.util
 import json
 import random
+import subprocess
 import sys
 from pathlib import Path
 
@@ -158,7 +163,49 @@ def _finding(path: str, check_id: str = "B105") -> dict:
 def _curate(issues: list[dict], tmp_path: Path) -> tuple[str, dict]:
     report = tmp_path / "issues.json"
     report.write_text(json.dumps(issues), encoding="utf-8")
-    return curate.curate_srt(report)
+    markdown, meta = curate.curate_srt(report)
+    _assert_the_document_says_what_the_meta_says(markdown, meta)
+    return markdown, meta
+
+
+def _assert_the_document_says_what_the_meta_says(markdown: str, meta: dict) -> None:
+    """The verdict a reader sees and the verdict the MANIFEST reads are one verdict.
+
+    Checked on **every** curation below rather than in a test of its own, because
+    the two are produced by different lines and only one of them is machine-read.
+    ``MANIFEST.md`` renders ``meta["gate"]``; ``srt.md``'s Summary renders a string
+    built beside it. Measured: an unconditional ``FAIL ❌`` in that string
+    published ``SRT — FAIL ❌ (7 open/reopened HIGH)`` in the page and
+    ``PASS ✅`` in the manifest row above it, from one run, with every verdict
+    assertion in this module green.
+    """
+    stated = [line for line in markdown.splitlines() if "**Gate (open/reopened" in line]
+    assert len(stated) == 1, (
+        f"expected exactly one Gate line in the curated page, found {len(stated)}. "
+        "That line is the verdict a human reads; if it moved, this check has "
+        "stopped comparing it with the one the MANIFEST reads."
+    )
+    says_pass = "PASS ✅" in stated[0]
+    says_fail = "FAIL ❌" in stated[0]
+    assert says_pass != says_fail, f"the Gate line states neither or both: {stated[0]}"
+    assert says_pass == (meta["gate"] == "pass"), (
+        f"the curated page states {stated[0].strip()!r} while the machine-readable "
+        f"verdict the MANIFEST renders is {meta['gate']!r}. One snapshot cannot "
+        "carry two verdicts."
+    )
+    if says_fail:
+        assert f"({meta['open_high']} open/reopened HIGH)" in stated[0], (
+            f"the Gate line's count disagrees with open_high={meta['open_high']}: "
+            f"{stated[0]}"
+        )
+    scoped = [line for line in markdown.splitlines() if "**Scoped out of the" in line]
+    if meta["name_scoped"]:
+        assert len(scoped) == 1 and f" {meta['name_scoped']} " in scoped[0], (
+            f"name_scoped={meta['name_scoped']} is not stated in the page's "
+            f"summary: {scoped}"
+        )
+    else:
+        assert not scoped, f"nothing was scoped out, yet the page says {scoped}"
 
 
 def _gate_verdict(issues: list[dict]) -> list[dict]:
@@ -306,38 +353,64 @@ def test_a_dispositioned_finding_does_not_fail_the_snapshot(
     )
 
 
+#: Paths CI's clean checkout does not contain, in the two shapes that differ.
+#: ``ignored`` is the case the curator's own private implementation handled;
+#: ``untracked`` is the case it got wrong, because it asked "is this git-ignored"
+#: where the gate asks "is this tracked" — a file that is neither is invisible to
+#: CI and was published as gate-blocking.
+_NOT_IN_CI = {
+    "ignored": ".aws-sam/packaged.yaml",
+    "untracked-but-not-ignored": "a-file-nobody-has-committed.py",
+}
+
+
 @functools.lru_cache(maxsize=1)
-def _an_ignored_path() -> str:
-    """A path git ignores, taken from git rather than from a guess.
-
-    The curated snapshot reconciles to CI's view by dropping findings in files a
-    clean checkout does not contain — a local tree that has been built carries
-    ``.aws-sam/`` artifacts and vendored trees that ``srt assess`` scans happily
-    and CI never sees. That is the partition the curator *did* implement, and it
-    had no test either.
-    """
-    candidates = [
-        ".aws-sam/packaged.yaml",
-        "scratch/probe.py",
-        "src/ui/node_modules/probe.js",
-        ".srt/issues.json",
-    ]
-    ignored = curate._git_ignored_set(candidates)  # noqa: SLF001 - the curator's own rule
-    assert ignored, (
-        "none of the candidate paths is git-ignored, so the CI-visibility half of "
-        f"the reconciliation cannot be exercised: {candidates}"
+def _not_in_ci_paths() -> dict[str, str]:
+    """The two shapes above, each confirmed against git rather than assumed."""
+    tracked = ci_paths.tracked_files(REPO_ROOT)
+    assert tracked, "git listed no tracked files"
+    ignored = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["git", "check-ignore", "--stdin"],
+        cwd=str(REPO_ROOT),
+        input="\n".join(_NOT_IN_CI.values()),
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    assert _NOT_IN_CI["ignored"] in ignored, (
+        f"{_NOT_IN_CI['ignored']} is no longer git-ignored, so the shape both "
+        "implementations agree on is not being exercised"
     )
-    return sorted(ignored)[0]
+    assert _NOT_IN_CI["untracked-but-not-ignored"] not in ignored, (
+        f"{_NOT_IN_CI['untracked-but-not-ignored']} is git-ignored, so the shape "
+        "the two implementations DISAGREED on is not being exercised and this "
+        "module would stop covering the divergence it was written for"
+    )
+    for path in _NOT_IN_CI.values():
+        assert path not in tracked, f"{path} is tracked; pick a path that is not"
+    return _NOT_IN_CI
 
 
+@pytest.mark.parametrize("shape", sorted(_NOT_IN_CI))
 def test_a_finding_in_a_file_cis_checkout_cannot_see_does_not_fail_the_snapshot(
-    tmp_path: Path,
+    shape: str, tmp_path: Path
 ) -> None:
-    _, meta = _curate([_finding(_an_ignored_path(), "B608")], tmp_path)
+    """A clean checkout contains the tracked files, and nothing else.
+
+    A local tree that has been built carries ``.aws-sam/`` artifacts and vendored
+    trees that ``srt assess`` scans happily and CI never sees, and reporting those
+    as blocking produced phantom regressions after every publish. The curator did
+    implement that reconciliation — as its own ``git check-ignore`` pass, which
+    answers a *different* question from the gate's ``tracked_files``: ignored is a
+    subset of untracked, so a file nobody has committed was invisible to the gate
+    and gate-blocking in the snapshot. Both shapes are covered here, and the
+    curator now calls the gate's function.
+    """
+    path = _not_in_ci_paths()[shape]
+    _, meta = _curate([_finding(path, "B608")], tmp_path)
     assert meta["gate"] == "pass", (
-        f"a HIGH finding in {_an_ignored_path()} fails the snapshot. That file is "
-        "git-ignored, so CI's clean checkout does not contain it and the gate "
-        "cannot see the finding at all"
+        f"a HIGH finding in {path} fails the snapshot. CI's clean checkout does "
+        "not contain that file, so the gate cannot see the finding at all"
     )
     assert meta["total"] == 0, (
         "the finding was counted among the CI-visible findings as well"
@@ -401,18 +474,28 @@ def test_the_snapshot_names_the_findings_it_scoped_out(tmp_path: Path) -> None:
         )
 
 
-def test_the_curator_uses_the_gate_s_own_classifier_rather_than_a_copy() -> None:
+@pytest.mark.parametrize(
+    "name", ["partition_by_ci_visibility", "partition_by_name_heuristic_scope"]
+)
+def test_the_curator_uses_the_gate_s_own_rules_rather_than_a_copy(name: str) -> None:
     """One definition, two consumers — the property a copy satisfies today.
 
-    A private reimplementation in the curator would pass every assertion above on
-    the day it was written and diverge on the next change to the rule, which is
-    exactly how this defect arrived: the git-ignored partition *was* reimplemented
-    here, correctly, and the second rule was then added to only one of the two.
+    **Both** of the gate's partitions, which is the point. A private
+    reimplementation passes every assertion above on the day it is written and
+    diverges on the next change to the rule, and this repository has the receipt:
+    the CI-visibility partition *was* reimplemented here, as a ``git check-ignore``
+    pass that answered a narrower question, and the second rule was then added to
+    only one of the two. Asserting sharing for the rule that was just added and not
+    for the one that was already copied would be the same omission again.
     """
-    function = curate.partition_by_name_heuristic_scope
-    assert function.__module__ == "ci_paths", (
-        "curate_results.partition_by_name_heuristic_scope comes from "
-        f"{function.__module__!r}, not from scripts/srt/ci_paths.py. The scope "
-        "decision has been copied rather than shared, and the copy will drift"
+    function = getattr(curate, name, None)
+    assert function is not None, (
+        f"curate_results no longer imports {name} from scripts/srt/ci_paths.py, so "
+        "the curated snapshot is deciding that half of the gate's rule for itself"
     )
-    assert function is ci_paths.partition_by_name_heuristic_scope
+    assert function.__module__ == "ci_paths", (
+        f"curate_results.{name} comes from {function.__module__!r}, not from "
+        "scripts/srt/ci_paths.py. The rule has been copied rather than shared, "
+        "and the copy will drift"
+    )
+    assert function is getattr(ci_paths, name)

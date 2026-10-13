@@ -525,15 +525,6 @@ with the test extras, and never write "GovCloud works" from a commercial run.
 
 ## Standing issues to recognise, not rediscover (delete when fixed)
 
-- **`make security-results` curates an SRT verdict its own gate disagrees with**
-  (2026-09-26, open). `make srt-scan` carries a scope decision: Bandit `B105`/`B106`
-  match an identifier's *name* against a password wordlist, and in test code that no
-  deployment artifact is built from they are reported at Bandit's own severity rather
-  than blocking. `scripts/security/curate_results.py` implements no equivalent, so the
-  **published** snapshot read `SRT — FAIL ❌ (5 open/reopened HIGH)` for a release whose
-  security gate was green, on the same `.srt/issues.json`. Check the open-HIGH list
-  against the scan's own "identifier-name findings in test code" block before believing
-  a red snapshot, and say in the record which of the two you are reporting.
 - **`make coverage-summary` is a baseline, not a measurement** (see tier A). It prints
   `scripts/coverage_debt.json`, which is a ratchet floor and always self-consistent, so
   quoting it as the release's coverage cannot fail visibly.
