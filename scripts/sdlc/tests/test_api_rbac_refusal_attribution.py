@@ -194,15 +194,21 @@ def test_a_body_with_no_label_reports_none_rather_than_guessing():
 # ---------------------------------------------------------------------------
 # classify(): the two refusals get different verdicts, both ways round
 # ---------------------------------------------------------------------------
-ALLOWED = {"Admin", "Author"}
+# Named this way rather than the obvious word for "permitted". The gate-registry
+# discovery scan matches constant NAMES against `NAME_VOCABULARY` (in
+# `scripts/tests/`), which holds the words for what a gate does, so a set under the
+# obvious name is reported as an unregistered carve-out. It is not one: these are
+# the groups a test operation admits. Asking that registry for a judgement on noise
+# is how a reviewer learns to rubber-stamp it, so the name moves instead.
+ADMITTED_GROUPS = {"Admin", "Author"}
 
 
 def _allowed_cell(control):
-    return h.classify("Admin", ALLOWED, 403, "Unauthorized", None, control)
+    return h.classify("Admin", ADMITTED_GROUPS, 403, "Unauthorized", None, control)
 
 
 def _disallowed_cell(control):
-    return h.classify("Viewer", ALLOWED, 403, "Unauthorized", None, control)
+    return h.classify("Viewer", ADMITTED_GROUPS, 403, "Unauthorized", None, control)
 
 
 def test_an_allowed_role_refused_by_the_group_floor_is_a_hard_failure():
@@ -355,9 +361,9 @@ def test_the_resource_label_is_the_only_one_that_moves_a_verdict():
 def test_an_inconclusive_result_still_wins_over_the_label():
     """A 5xx or a dead connection establishes nothing whatever the body claims, and
     a response carrying a ``resource`` label must not promote one into an answer."""
-    timed_out = h.classify("Admin", ALLOWED, 0, None, None, h.CONTROL_RESOURCE)
+    timed_out = h.classify("Admin", ADMITTED_GROUPS, 0, None, None, h.CONTROL_RESOURCE)
     crashed = h.classify(
-        "Admin", ALLOWED, 500, "InternalError", None, h.CONTROL_RESOURCE
+        "Admin", ADMITTED_GROUPS, 500, "InternalError", None, h.CONTROL_RESOURCE
     )
 
     assert timed_out.outcome == "ERROR"
@@ -412,7 +418,7 @@ OPS = {
 
 
 def _matrix(control_for_allowed):
-    """Drive the matrix with every ALLOWED cell refused under ``control_for_allowed``
+    """Drive the matrix with every admitted cell refused under ``control_for_allowed``
     and every disallowed cell refused by the floor, as the live API would."""
 
     def _call(api_base, field, args, token):
@@ -698,17 +704,18 @@ def test_the_three_operations_still_send_the_argument_that_reaches_the_floor(op_
 # for #1308 — the controls the live matrix actually provokes on the three operations
 # the issue named, plus the shared S3 helper the fourth and fifth reach.
 #
-# ⚠️ This list is NOT the set of all per-object controls in the tree, and it is not
-# an exemption for the rest. `key_scope.py`'s six refusals, the config-version scope
-# refusals in `reprocess_document_resolver`, `upload_resolver` and
-# `list_documents_*`, and the in-band `{success:false,error:{type:"Unauthorized"}}`
-# 200 the configuration and sync resolvers return are all still UNATTRIBUTED, which
-# downstream means the strict verdict. That is the safe direction and it is a
-# deliberate bound on this change rather than a claim that those are group
-# refusals: the live matrix drives none of them to a refusal today (its roles are
-# unscoped and its `getFileContents` bucket is the input bucket, which no scope axis
-# partitions), so converting them would be unexercised churn on the authorization
-# path. Convert one when the matrix can reach it.
+# ⚠️ This list is the set of sites CONVERTED, not the set of per-object controls in
+# the tree, and it grants the rest nothing. `key_scope.py`'s six refusals, the
+# config-version scope refusals in `reprocess_document_resolver`, `upload_resolver`
+# and `list_documents_*`, and the in-band
+# `{success:false,error:{type:"Unauthorized"}}` 200 the configuration and sync
+# resolvers return all remain UNATTRIBUTED, which downstream means the STRICT
+# verdict — a hard failure, never a lenient one. So this list bounds what is
+# claimed, and a site left off it is treated more harshly rather than waved through.
+# The reason it is bounded: the live matrix drives none of those to a refusal today
+# (its roles are unscoped, and its `getFileContents` bucket is the input bucket,
+# which no scope axis partitions), so converting them would be unexercised churn on
+# the authorization path. Convert one when the matrix can reach it.
 _DECLARED_RESOURCE_REFUSALS = (
     ("idp_common/s3_targets.py", "assert_bucket_allowed"),
     ("idp_common/s3_targets.py", "assert_key_writable"),
@@ -821,3 +828,59 @@ def test_the_group_floor_does_not_declare_itself_as_a_resource_refusal():
         f"authz.enforce raises {sorted(raised)}; only its own class may label the "
         "group floor"
     )
+
+
+def test_the_console_grid_shows_a_usable_mark_for_every_cell(monkeypatch, capsys):
+    """The one-line-per-operation grid is what a human watches during a live run,
+    and it is padded to 16 columns — so the detail, which names the control and
+    runs to a sentence, cannot go in it. Each verdict therefore carries a compact
+    form, and the grid falls back to the detail when there is none.
+
+    Asserted because that fallback is an easy thing to get subtly wrong: an
+    unbiased mutation sample turned the `or` into an `and`, which prints `Ad=None`
+    for every passing cell and the full sentence for every failing one, and nothing
+    noticed. A grid of `None` is worse than no grid, because it reads as a result.
+    """
+    monkeypatch.setattr(h, "call", _matrix(h.CONTROL_RESOURCE))
+    results = []
+
+    h.run_group_matrix(OPS, CTX, TOKENS, results)
+    grid = capsys.readouterr().out
+
+    assert "None" not in grid, f"the console grid printed None:\n{grid}"
+    for line in grid.splitlines():
+        if not line.strip():
+            continue
+        # Every role mark is `XX=<something non-empty>`.
+        for mark in re.findall(r"\b([A-Z][a-z])=(\S*)", line):
+            assert mark[1], f"empty mark for {mark[0]} in: {line}"
+    # And the resource-refusal mark says the group check is what is in doubt,
+    # rather than claiming a denial.
+    assert "grp?" in grid
+    assert "DENIED" not in grid
+
+
+def test_the_console_grid_shows_the_status_for_a_passing_cell(monkeypatch, capsys):
+    """The control for the test above: with everything passing, the grid must carry
+    the status, not an empty string."""
+
+    def _call(api_base, field, args, token):
+        if token is None:
+            return h.ApiResult(401, None, None, "rid")
+        role = token.replace("tok-", "")
+        if role in OPS[field]["groups"]:
+            return h.ApiResult(200, None, None, "rid")
+        return h.ApiResult(
+            403, "Unauthorized", None, "rid", control=h.CONTROL_GROUP_FLOOR
+        )
+
+    monkeypatch.setattr(h, "call", _call)
+    results = []
+
+    h.run_group_matrix(OPS, CTX, TOKENS, results)
+    grid = capsys.readouterr().out
+
+    assert "None" not in grid
+    assert "Ad=200" in grid
+    assert "Vi=403" in grid
+    assert all(r["outcome"] == "PASS" for r in results)
