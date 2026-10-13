@@ -515,6 +515,88 @@ class TestAStopReasonIsNotACompletenessCheck:
         )
 
 
+class TestReachability:
+    """⚠️ Treat this as a Simple-mode signal, and here is why.
+
+    ``_build_extraction_issues`` runs for both modes and reports whatever
+    ``metadata["output_truncated"]`` says, so the *reporting* half is mode-blind.
+    The *setting* half is not: both branches of ``_invoke_extraction_model``
+    return through one ``ExtractionResult``, and the flag is assigned only inside
+    the Simple branch. The Advanced branch never touches it, so it stays ``False``
+    from the initialiser and no Advanced-mode run can currently produce this
+    issue. The Advanced-mode wording above is therefore exercised by handing
+    ``_save_results`` a result with the flag set, which is a direct call and not a
+    flow — said here rather than implied, because a document claiming "both
+    modes" without this note is the over-claim the equivalent note on
+    ``extraction_list_truncated`` exists to prevent.
+
+    If an Advanced-mode setter is ever added, this test fails and the note has to
+    be rewritten rather than quietly becoming false.
+    """
+
+    SRC = (
+        Path(__file__).resolve().parents[3] / "idp_common/extraction/service.py"
+    ).read_text(encoding="utf-8")
+
+    def _invoke_fn(self) -> ast.FunctionDef:
+        tree = ast.parse(self.SRC)
+        fns = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_invoke_extraction_model"
+        ]
+        assert len(fns) == 1, f"expected one definition, found {len(fns)}"
+        return fns[0]
+
+    def test_the_flag_is_only_ever_set_on_the_simple_branch(self):
+        fn = self._invoke_fn()
+        branches = [
+            n
+            for n in fn.body
+            if isinstance(n, ast.If)
+            and ast.unparse(n.test) == "use_agentic"
+            and n.orelse
+        ]
+        assert len(branches) == 1, (
+            "the mode branch this assertion is anchored on is gone; re-derive it"
+        )
+        simple = branches[0].orelse
+        simple_lines = range(simple[0].lineno, (simple[-1].end_lineno or 0) + 1)
+        stores = [
+            n.lineno
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Name)
+            and n.id == "output_truncated"
+            and isinstance(n.ctx, ast.Store)
+        ]
+        assert stores, "output_truncated is never assigned: this pin is vacuous"
+        initialiser = min(stores)
+        assert initialiser < branches[0].lineno, (
+            "the initialiser must precede the mode branch"
+        )
+        outside = [ln for ln in stores if ln != initialiser and ln not in simple_lines]
+        assert not outside, (
+            f"output_truncated is assigned outside the Simple branch at line(s) "
+            f"{outside}. If that is deliberate, the 'no reachable Advanced-mode "
+            f"path' note in both doc tiers is now false and must be rewritten."
+        )
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "docs/extraction-and-confidence.md",
+            "lib/idp_common_pkg/idp_common/extraction/README.md",
+        ],
+    )
+    def test_both_doc_tiers_state_the_reachability_bound(self, rel):
+        repo = Path(__file__).resolve().parents[5]
+        text = re.sub(r"[*`#\s]+", " ", (repo / rel).read_text(encoding="utf-8"))
+        assert "no reachable Advanced-mode path" in text, (
+            f"{rel} no longer tells a reader that the Advanced-mode wording is "
+            f"exercised by a direct call rather than by a flow"
+        )
+
+
 class TestTheMatcher:
     def test_the_stop_reason_vocabulary_is_not_empty(self):
         """Every parametrisation in this module is derived from this set.

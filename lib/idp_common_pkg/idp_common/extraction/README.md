@@ -2402,7 +2402,7 @@ signals make both loud without changing what is extracted:
 
   Giving a `minItems` violation its own consequence in Simple mode is a product decision,
   not a wording one, and is deliberately not taken here (GitHub issue #1048).
-- `extraction_output_truncated` (warning, both modes) — the model's response stopped before
+- `extraction_output_truncated` (warning) — the model's response stopped before
   it finished, so the result is a **prefix** of the answer. The only certain signal in this
   list; every other one above is an estimate. Set from two sources, ORed, in
   `_invoke_extraction_model`: the response's own `stopReason`
@@ -2432,6 +2432,20 @@ signals make both loud without changing what is extracted:
   `extraction.row_shortfall_action` governs `ROW_SHORTFALL_CODE` only, and widening it to
   this code would start failing runs that complete today on a deployment that opted into
   `fail` for a different check.
+
+  ⚠️ **Reachability: treat this as a Simple-mode signal.** `_build_extraction_issues` runs
+  for both modes and reports whatever `metadata["output_truncated"]` says, so the
+  *reporting* half is mode-blind — but the *setting* half is not. Both branches of
+  `_invoke_extraction_model` return through one `ExtractionResult`, and the flag is
+  assigned only inside the Simple branch (the Advanced branch leaves it at its
+  initialiser), so there is **no reachable Advanced-mode path** to this issue today. The
+  Advanced-mode wording is exercised by handing `_save_results` a result with the flag
+  set, which is a direct call rather than a flow, and
+  `test_output_truncation_warning.py::TestReachability` fails if an Advanced-mode setter is
+  ever added — so this note has to be rewritten rather than quietly becoming false. On that
+  path the shard runtime's own completeness checks and `minItems` are the guards, and a
+  shard whose own response is cut off fails at the agent's tool boundary instead of
+  returning a short list.
 - `ExtractionOutputIncomplete` — the section's list came back under half the rows its own
   OCR text evidences, and `extraction.row_shortfall_action` is `fail` (opt-in; see the trade
   above). Raised by `_fail_on_row_shortfall`, which is the **last statement of
