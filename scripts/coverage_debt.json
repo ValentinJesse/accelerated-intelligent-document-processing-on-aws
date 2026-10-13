@@ -11,7 +11,20 @@
     "tolerance fails.",
     "",
     "A tree with no report is left untouched rather than erased, so a",
-    "partial run cannot silently discard another tree's baseline."
+    "partial run cannot silently discard another tree's baseline.",
+    "",
+    "Each tree's `conditions` are the measurement conditions its figures",
+    "were taken under: how many tests were COLLECTED, and how many of",
+    "them SKIPPED. A figure is a property of the test set that produced",
+    "it, and a capability gate (an absent CLI, a missing optional",
+    "dependency) removes tests silently on a machine without it -- so a",
+    "baseline recorded on a more capable machine is a floor the gate's",
+    "own environment cannot reach. idp_feature_sdk was exactly that:",
+    "recorded at 99.94% where the AWS SAM CLI was installed, and",
+    "unreachable in CI, which skips 24 tests and measures 97.15%. A count",
+    "difference is never itself a failure -- it is quoted beside a fall,",
+    "so a reader can tell a file that lost lines from one whose tests",
+    "did not run."
   ],
   "generator": "python3 scripts/check_coverage_debt.py --write",
   "tolerancePct": 1.0,
@@ -394,17 +407,21 @@
       }
     },
     "idp_feature_sdk": {
-      "total": 99.94,
+      "total": 97.15,
+      "conditions": {
+        "collected": 461,
+        "skipped": 24
+      },
       "files": {
         "idp_feature_sdk/__init__.py": 100.0,
         "idp_feature_sdk/bundle.py": 100.0,
-        "idp_feature_sdk/cli.py": 99.82,
+        "idp_feature_sdk/cli.py": 98.55,
         "idp_feature_sdk/manifest.py": 100.0,
-        "idp_feature_sdk/pack.py": 100.0,
-        "idp_feature_sdk/publisher.py": 100.0,
+        "idp_feature_sdk/pack.py": 92.2,
+        "idp_feature_sdk/parameters.py": 100.0,
+        "idp_feature_sdk/publisher.py": 94.79,
         "idp_feature_sdk/scaffold.py": 100.0,
-        "idp_feature_sdk/seller_service.py": 100.0,
-        "idp_feature_sdk/parameters.py": 100.0
+        "idp_feature_sdk/seller_service.py": 100.0
       }
     },
     "seller_entitlement": {
