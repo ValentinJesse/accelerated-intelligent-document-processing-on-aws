@@ -62,14 +62,31 @@ DIGEST_PATH = os.path.join(
     os.path.dirname(__file__), "data", "bedrock_cache_dimensions.json"
 )
 
-#: The two metering units this project prices cache activity in, and the shapes
-#: AWS spells the corresponding dimension in. Both offer files are matched
-#: case-insensitively with ``-``/``_`` removed first, because the same dimension
-#: appears as ``NovaLite-cache-read-input-token-count`` in one file and
+#: The metering units this digest records published rates for, and the shapes AWS
+#: spells the corresponding dimension in. Both offer files are matched
+#: case-insensitively with ``-``/``_``/``:`` removed first, because the same
+#: dimension appears as ``NovaLite-cache-read-input-token-count`` in one file and
 #: ``MP:UGW1_CacheReadInputTokenCount-Units`` in the other.
-CACHE_UNIT_PATTERNS = {
+#:
+#: ⚠️ **The order is load-bearing and this dict is matched in it**, first hit
+#: wins. ``cache-read-input-token-count`` normalises to a string *containing*
+#: ``inputtoken``, so a rule that tested the input pattern first — or tested all
+#: three independently — would count every cache dimension as an input one as
+#: well. That is not hypothetical: it is the error that put ``inputTokens`` at
+#: 5,580 published products instead of 4,909 in the sibling digest for #1212.
+#:
+#: ``inputTokens`` is here for a reason that is not pricing. It is what ties a
+#: recorded ``price_list_model`` to the pricing entry that cites it: the entry's
+#: own input rate has to be one AWS publishes for that model. Without it a basis
+#: could name a *different real model* with the same cache answer and nothing
+#: would notice — measured, naming ``NVIDIA Nemotron Nano 2`` (the 9B text model)
+#: where ``NVIDIA Nemotron Nano 2 VL`` (the 12B one this project prices) is meant
+#: left the suite green, because neither publishes a cache dimension and both
+#: carry 208 token-priced dimensions.
+DIMENSION_PATTERNS = {
     "cacheReadInputTokens": r"cacheread",
     "cacheWriteInputTokens": r"cachewrite",
+    "inputTokens": r"inputtoken",
 }
 
 #: Dimension variants excluded from the per-model rate sets, each because this
@@ -110,15 +127,19 @@ def digest_offer_files(offers: list[dict[str, Any]]) -> dict[str, Any]:
     """One record per price-list model, unioned across the offer files.
 
     For each model the ``model`` attribute names, the per-token rates AWS
-    publishes for each cache unit, plus the count of token-priced dimensions of
-    any kind. That last number is what makes an empty cache-rate list readable:
-    a model with 16 token dimensions and no cache dimension is a measured
-    absence, while a model with 0 of either means the extraction found nothing
-    and the absence proves nothing.
+    publishes for each dimension in :data:`DIMENSION_PATTERNS`, plus the count of
+    token-priced dimensions of any kind. That last number is what makes an empty
+    cache-rate list readable: a model with 16 token dimensions and no cache
+    dimension is a measured absence, while a model with 0 of either means the
+    extraction found nothing and the absence proves nothing.
+
+    Each dimension row is classified **once**, by the first pattern that matches
+    — see the warning on :data:`DIMENSION_PATTERNS`, which is why this is a loop
+    with a ``break`` rather than three independent tests.
     """
     excluded = re.compile(EXCLUDED_VARIANTS)
-    cache_res = {
-        unit: re.compile(pattern) for unit, pattern in CACHE_UNIT_PATTERNS.items()
+    dimension_res = {
+        unit: re.compile(pattern) for unit, pattern in DIMENSION_PATTERNS.items()
     }
 
     models: dict[str, dict[str, Any]] = {}
@@ -145,7 +166,7 @@ def digest_offer_files(offers: list[dict[str, Any]]) -> dict[str, Any]:
                     model,
                     {
                         "token_dimension_count": 0,
-                        **{unit: set() for unit in CACHE_UNIT_PATTERNS},
+                        **{unit: set() for unit in DIMENSION_PATTERNS},
                     },
                 )
                 for term in sku_offers.values():
@@ -158,9 +179,10 @@ def digest_offer_files(offers: list[dict[str, Any]]) -> dict[str, Any]:
                         record["token_dimension_count"] += 1
                         if excluded.search(usagetype) or excluded.search(token_type):
                             continue
-                        for unit, pattern in cache_res.items():
+                        for unit, pattern in dimension_res.items():
                             if pattern.search(usagetype) or pattern.search(token_type):
                                 record[unit].add(rate)
+                                break
 
     return {
         "sources": sources,
@@ -169,7 +191,7 @@ def digest_offer_files(offers: list[dict[str, Any]]) -> dict[str, Any]:
         "models": {
             model: {
                 "token_dimension_count": record["token_dimension_count"],
-                **{unit: sorted(record[unit]) for unit in CACHE_UNIT_PATTERNS},
+                **{unit: sorted(record[unit]) for unit in DIMENSION_PATTERNS},
             }
             for model, record in sorted(models.items())
         },
@@ -201,8 +223,8 @@ def load_digest() -> dict[str, Any]:
         return json.load(fh)
 
 
-def published_cache_rates(digest: dict[str, Any], model: str, unit: str) -> list[str]:
-    """The per-token rates the digest records for one model and one cache unit.
+def published_rates(digest: dict[str, Any], model: str, unit: str) -> list[str]:
+    """The per-token rates the digest records for one model and one unit.
 
     Raises ``KeyError`` for a model the digest does not describe, deliberately:
     a recorded basis naming a model AWS's price list does not carry is not a

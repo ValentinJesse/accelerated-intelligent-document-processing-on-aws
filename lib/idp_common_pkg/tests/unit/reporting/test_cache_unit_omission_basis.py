@@ -61,7 +61,7 @@ from idp_common.metering_units import (
 from .bedrock_cache_dimension_digest import (
     digest_offer_files,
     load_digest,
-    published_cache_rates,
+    published_rates,
 )
 
 #: The two units this register is about. Not every token unit: a Bedrock entry
@@ -96,6 +96,24 @@ def _shipped_bedrock_units() -> dict[str, set[str]]:
         for entry in raw["pricing"]
         if entry["name"].startswith(BEDROCK_PREFIX)
     }
+
+
+def _shipped_input_rate(pricing_key: str) -> str:
+    """The entry's own per-input-token rate, formatted as the digest formats one.
+
+    Used to tie a recorded ``price_list_model`` to the entry citing it. Every one
+    of these entries prices ``inputTokens`` — an entry that did not would be a
+    different and simpler failure, refused by ``test_pricing_lookup.py`` — so
+    ``KeyError`` here is a real fault rather than a case to tolerate.
+    """
+    with open(_PRICING_PATH) as handle:
+        raw = yaml.safe_load(handle)
+    for entry in raw["pricing"]:
+        if entry["name"] == pricing_key:
+            for unit in entry.get("units") or []:
+                if unit["name"] == "inputTokens":
+                    return f"{float(unit['price']):.6g}"
+    raise KeyError(f"{pricing_key} has no inputTokens rate in {_PRICING_PATH}")
 
 
 def _omissions() -> set[tuple[str, str]]:
@@ -397,7 +415,20 @@ def test_the_digest_extraction_reads_both_dimension_spellings():
         "points only"
     )
 
+    assert nova["inputTokens"] == [], (
+        "a cache-read dimension was classified as an input one as well. "
+        "'cache-read-input-token-count' normalises to a string containing "
+        "'inputtoken', so the classification has to be first-hit-wins — this is "
+        "the error that put inputTokens at 5,580 published products instead of "
+        "4,909 in the sibling digest for #1212"
+    )
+
     plain = digest["models"]["Toy Plain"]
+    assert plain["inputTokens"] == ["1e-07"], (
+        "a plain input dimension was not classified, so the identity check that "
+        "ties a recorded price-list model to its pricing entry has nothing to "
+        "compare against"
+    )
     assert plain["cacheReadInputTokens"] == []
     assert plain["token_dimension_count"] == 1, (
         "token_dimension_count is what makes an empty cache list readable as a "
@@ -412,13 +443,21 @@ def test_the_digest_extraction_reads_both_dimension_spellings():
 def test_priced_by_aws_matches_the_published_price_list(entry: CacheUnitOmission):
     """``priced_by_aws`` is a reading of the offer files, so read them.
 
-    ``published_cache_rates`` raises ``KeyError`` for a model the digest does not
+    ``published_rates`` raises ``KeyError`` for a model the digest does not
     describe, and that is deliberate: a basis naming a model AWS's price list does
     not carry is an unread claim, not a weaker one, and the empty list it would
-    otherwise return reads as "no cache dimension". The price-list spelling is the
-    easy thing to get wrong — ``nvidia.nemotron-nano-12b-v2`` is published as
-    ``NVIDIA Nemotron Nano 2 VL``, while ``NVIDIA Nemotron Nano 2`` is the 9B text
-    model.
+    otherwise return reads as "no cache dimension".
+
+    ⚠️ **Naming the digest a model is not enough, and the gap is measured.** The
+    price-list spelling is the easy thing to get wrong —
+    ``nvidia.nemotron-nano-12b-v2`` is published as ``NVIDIA Nemotron Nano 2 VL``,
+    while ``NVIDIA Nemotron Nano 2`` is the 9B **text** model and a different
+    product — and substituting one for the other left this assertion green,
+    because neither publishes a cache dimension and both carry 208 token-priced
+    dimensions. So the identity is tied down through a number the pricing entry
+    already states: its own ``inputTokens`` rate has to be one AWS publishes for
+    the model the basis names. On those two models the input rates are disjoint
+    ($0.20–$0.31/MTok against $0.06–$0.09), so the substitution now fails.
     """
     digest = load_digest()
     assert entry.price_list_model in digest["models"], (
@@ -432,7 +471,19 @@ def test_priced_by_aws_matches_the_published_price_list(entry: CacheUnitOmission
         f"the digest found no token-priced dimension at all for "
         f"{entry.price_list_model!r}, so it cannot support a claim either way"
     )
-    rates = published_cache_rates(digest, entry.price_list_model, entry.unit)
+    entry_input_rate = _shipped_input_rate(entry.pricing_key)
+    published_input_rates = published_rates(
+        digest, entry.price_list_model, "inputTokens"
+    )
+    assert entry_input_rate in published_input_rates, (
+        f"{entry.pricing_key} charges {entry_input_rate} per input token, which is "
+        f"not among the rates AWS publishes for {entry.price_list_model!r} "
+        f"({published_input_rates}). Either the basis names the wrong price-list "
+        "model, or this row's rates are no longer any band AWS publishes — both "
+        "make the cache claim beside it unreadable"
+    )
+
+    rates = published_rates(digest, entry.price_list_model, entry.unit)
     chargeable = any(float(rate) > 0 for rate in rates)
     assert chargeable == entry.priced_by_aws, (
         f"{entry.pricing_key}:{entry.unit} records priced_by_aws="
