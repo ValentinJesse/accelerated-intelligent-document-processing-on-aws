@@ -61,10 +61,11 @@ conditions, not just at whether the gate's name is present.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from packaging.specifiers import SpecifierSet
@@ -972,18 +973,70 @@ def test_cfn_lint_is_pinned_consistently() -> None:
         )
 
 
+def _lint_debt_module():
+    """``scripts/check_lint_debt.py``, loaded by path.
+
+    By path rather than by import, because ``scripts`` is not a package here.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_check_lint_debt_under_test", REPO_ROOT / "scripts" / "check_lint_debt.py"
+    )
+    assert spec and spec.loader, "scripts/check_lint_debt.py is not loadable"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _declared_version(marker: str) -> str:
+    """The value of a ``NAME := value`` pin declared in the ``Makefile``.
+
+    A trailing comment is stripped, because ``NC := \\033[0m  # No Color`` is the
+    house style for these declarations and a pin written the same way would
+    otherwise compare as ``"1.2.3 # bumped"`` and never match anything.
+    """
+    makefile = MAKEFILE.read_text()
+    match = re.search(rf"^{re.escape(marker)}\s*:?=\s*(.*)$", makefile, re.MULTILINE)
+    assert match, f"{marker} is no longer declared in the Makefile"
+    return match.group(1).split("#", 1)[0].strip()
+
+
 @pytest.mark.unit
 def test_ruff_is_pinned_consistently() -> None:
-    """The two CIs must pin the same ``ruff``, and the pin must be installable here.
+    """The ``Makefile`` and both CIs must pin one ``ruff``, and it must be installable.
 
     ``ruff``'s findings are version-dependent, and ``make check-lint-debt``
     compares a recorded per-file finding count against a live measurement — so
     two CI systems on different ``ruff`` releases would disagree about whether
     the baseline is current, and the disagreement would look like a code defect.
     ``lib/idp_common_pkg/pyproject.toml`` supplies ``ruff`` locally as a range, so
-    the CI pin has to fall inside it or a contributor's ``make lint`` and CI are
+    the pin has to fall inside it or a contributor's ``make lint`` and CI are
     running different linters by construction.
+
+    ⚠️ **The ``Makefile`` is the side this was missing.** Both CIs pinned ruff
+    while the ``Makefile`` declared nothing and its lint recipes invoked whatever
+    ``ruff`` was first on ``PATH``, so the local gate and the CI gate were the
+    same measurement only by coincidence (issue #1381). The two versions in play
+    did agree on the tree at the time — the defect is that nothing constructed
+    that agreement, and ``ruff format`` output changes between releases as a diff
+    on a file nobody touched, which is the hardest failure shape to attribute.
+    ``RUFF_VERSION`` is now the single source of truth and this asserts the other
+    three places agree with it: the two CI configs, and the lookup in
+    ``scripts/check_lint_debt.py`` that names the pin when a count was measured
+    under a different linter.
+
+    A declared pin that nothing installs is not a pin, so the ``Makefile`` is
+    also asserted to *use* ``$(RUFF_VERSION)`` in its install recipes and to
+    report a mismatch at every ruff invocation. That is the direction a mutation
+    gets through: deleting the ``ruff==$(RUFF_VERSION)`` from ``setup`` leaves a
+    declaration, a comment and three agreeing CI configs all in place.
     """
+    version = _declared_version("RUFF_VERSION")
+    assert re.fullmatch(r"[0-9][0-9A-Za-z.\-]*", version), (
+        f"RUFF_VERSION is {version!r}, which is not a version literal. The "
+        f"comparisons below are exact string matches, so a variable reference or "
+        f"a range here would make every one of them vacuous."
+    )
+
     pins = {}
     for label, text in _pinned_tool_sources():
         found = re.findall(r"ruff==([0-9][0-9A-Za-z.\-]*)", text)
@@ -996,15 +1049,214 @@ def test_ruff_is_pinned_consistently() -> None:
         "`make check-lint-debt` would then reach different verdicts depending on "
         "which CI a change was merged through."
     )
-    version = next(iter(pins.values()))
+
+    # Exact equality, not containment: `ruff==0.15.130` contains `0.15.13`, so a
+    # substring test would accept a pin two minor releases away.
+    drifted = {label: pin for label, pin in pins.items() if pin != version}
+    assert not drifted, (
+        f"these CI configs pin a ruff version other than the Makefile's "
+        f"RUFF_VERSION ({version}): {drifted}. CI would then run a different "
+        f"linter than `make lint` does locally, and a formatting difference "
+        f"between the two arrives as a diff on a file the change never touched."
+    )
+
+    # Counted over _uncommented(), which drops `echo` lines. The version note's
+    # own remedy line reads `pip install 'ruff==$(RUFF_VERSION)'` inside an echo,
+    # so a raw count is 3 and `>= 2` then passes with BOTH real installs intact
+    # or ONE of them deleted — a count pinned against a number a sentence can
+    # satisfy. Measured: dropping the `setup` install survived this assertion
+    # until the echo lines came out of it.
+    installs = re.findall(
+        r"ruff==\$\(RUFF_VERSION\)", _uncommented(MAKEFILE.read_text())
+    )
+    assert len(installs) >= 2, (
+        f"the Makefile installs `ruff==$(RUFF_VERSION)` in {len(installs)} "
+        f"place(s). Both `setup` and `setup-venv` must install the pin, or an "
+        f"environment built through this Makefile gets whatever the pyproject "
+        f"range resolves to on the day and the declaration above is decoration."
+    )
+
+    for target in ("ruff-lint", "format", "lint-cicd"):
+        assert "$(ruff_version_note)" in _recipe(target), (
+            f"`{target}` invokes ruff without the version note. The recipes call "
+            f"ruff as a bare command, so the pin is advisory at invocation time — "
+            f"a mismatch between the installed ruff and RUFF_VERSION is reported "
+            f"rather than enforced, and removing the report makes it silent, "
+            f"which is the state issue #1381 describes."
+        )
+
+    # The note must compare against the MARKER, not against a copy of its value.
+    # A literal here reports correctly today and then reports nothing — or
+    # reports on every run — from the first bump onwards, which is the same
+    # coincidental-agreement defect one level down.
+    note = re.search(
+        r"^define ruff_version_note$(.*?)^endef$",
+        MAKEFILE.read_text(),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert note, "the Makefile no longer defines the ruff_version_note recipe"
+    # _uncommented() again, and for the third time in this test it is the echo
+    # lines that matter: the note's own remedy line reads `pip install
+    # 'ruff==$(RUFF_VERSION)'`, so a body-wide substring search finds the marker
+    # whether the COMPARISON uses it or a hardcoded copy of its value. Measured:
+    # rewriting the comparison as `!= "0.15.13"` survived until this dropped the
+    # echoes.
+    comparison = _uncommented(note.group(1))
+    assert "$(RUFF_VERSION)" in comparison, (
+        f"the ruff_version_note recipe compares the running ruff against "
+        f"something other than $(RUFF_VERSION):\n{comparison.strip()}\n"
+        f"A copy of today's value reports correctly until the pin is bumped and "
+        f"then reports on every run, or on none."
+    )
+
+    # CALLED, not grepped for. A textual check that the lookup mentions
+    # RUFF_VERSION passes on a lookup that raises or returns None — which is the
+    # exact state it was in, reading a file the pin had moved out of. Asserting
+    # the returned value is the only form that distinguishes the two.
+    assert _lint_debt_module()._ci_ruff_pin() == version, (
+        f"scripts/check_lint_debt.py's _ci_ruff_pin() returns "
+        f"{_lint_debt_module()._ci_ruff_pin()!r}, not RUFF_VERSION ({version}). "
+        f"It previously read the pin out of a CI workflow file, the pin moved "
+        f"into a composite action, and the lookup silently resolved to None — so "
+        f"`make check-lint-debt` reported a finding-count mismatch measured "
+        f"under a different linter with no hint that was the cause."
+    )
 
     pyproject = (REPO_ROOT / "lib" / "idp_common_pkg" / "pyproject.toml").read_text()
     specifier = re.search(r'"ruff([^"]*)"', pyproject)
     assert specifier, "lib/idp_common_pkg/pyproject.toml no longer declares ruff"
     assert Version(version) in SpecifierSet(specifier.group(1)), (
-        f"CI pins ruff=={version}, which is outside the range "
+        f"RUFF_VERSION is {version}, which is outside the range "
         f"{specifier.group(1)!r} that lib/idp_common_pkg installs locally. A "
         "developer's `make lint` would then run a different linter than CI."
+    )
+
+
+@pytest.mark.unit
+def test_the_lint_debt_pin_lookup_follows_the_marker(tmp_path: Path) -> None:
+    """``_ci_ruff_pin()`` must FOLLOW ``RUFF_VERSION``, not agree with it today.
+
+    Comparing the lookup's answer to the marker's current value cannot tell a
+    lookup that reads the ``Makefile`` apart from one that returns a copy of
+    today's value — both are correct until the pin is bumped, and the second then
+    reports a stale version while claiming to name the pin. That is the same
+    coincidental-agreement shape as the defect in #1381 itself, so it is measured
+    the only way that distinguishes them: point the module at a throwaway tree
+    declaring a *different* version and require the lookup to change its answer.
+    """
+    module = _lint_debt_module()
+    (tmp_path / "Makefile").write_text(
+        "# throwaway tree for this assertion only\nRUFF_VERSION := 9.99.99\n"
+    )
+    module.REPO_ROOT = tmp_path
+    assert module._ci_ruff_pin() == "9.99.99", (
+        f"_ci_ruff_pin() returned {module._ci_ruff_pin()!r} for a tree whose "
+        f"Makefile declares RUFF_VERSION := 9.99.99, so it is not reading the "
+        f"marker. A lookup that hardcodes the version names a stale pin from the "
+        f"first bump onwards, which is worse than naming none."
+    )
+
+
+#: The file classes that *execute* a ruff install, for the closure check below.
+#: Globs rather than a file list, so a second composite action or a new setup
+#: script is covered the day it is added — a third location that disagrees with
+#: the pin is the way this defect comes back, and it comes back in a file nobody
+#: thought to name.
+#:
+#: ``*.sh`` is every tracked shell script in the tree rather than
+#: ``scripts/setup/*.sh``, because the directory a script sits in is not what
+#: makes it an install surface: a measured probe put an unpinned
+#: ``pip3 install ruff`` in ``scripts/install_dev_tools.sh`` and the narrower
+#: glob did not read it.
+RUFF_INSTALL_SURFACE_GLOBS = (
+    "Makefile",
+    "make/*.mk",
+    ".gitlab-ci.yml",
+    ".github/workflows/*.y*ml",
+    ".github/actions/*/action.yml",
+    "*.sh",
+)
+
+
+def _install_surface_files() -> list[str]:
+    """Repo-relative paths matching :data:`RUFF_INSTALL_SURFACE_GLOBS`.
+
+    Discovered through ``git ls-files``, including files not yet committed
+    (``--others --exclude-standard``), for the two reasons that idiom exists
+    elsewhere in this repository: a filesystem walk reads build output, a sibling
+    worktree and ``.venv``, producing findings CI cannot reproduce; and a universe
+    restricted to *committed* files changes its answer at ``git add`` time, so a
+    newly written setup script would be judged only after it was already in.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    return [
+        path
+        for path in tracked
+        if any(PurePosixPath(path).match(glob) for glob in RUFF_INSTALL_SURFACE_GLOBS)
+    ]
+
+
+@pytest.mark.unit
+def test_every_executing_ruff_install_pins_the_version() -> None:
+    """Closure: nothing that *runs* a ruff install may leave it unpinned.
+
+    Comparing the ``Makefile`` to the two CI configs cannot see a fourth place.
+    ``scripts/setup/dev_setup_ubuntu.sh`` was exactly that — a
+    ``pip3 install virtualenv typer ruff`` with no pin, building the environment
+    a developer then runs ``make lint`` in, with every pin assertion above green
+    because that file is in none of them.
+
+    So the universe is derived from :data:`RUFF_INSTALL_SURFACE_GLOBS`, at every
+    depth, and every member that installs ruff must pin ``RUFF_VERSION``.
+
+    Two boundaries, stated so a green run is not over-read. ``echo``'d lines are
+    dropped by :func:`_uncommented`, so a script *telling a human* to
+    ``pip install ... ruff`` is not covered — nor are the equivalent lines in
+    ``docs/``. Those are instructions rather than installs, and they leave
+    ``cfn-lint`` unpinned in the same breath, so pinning one linter there and not
+    the other would be a half-measure dressed as a gate. And the check reads
+    files, not what a shell would do, so an install assembled from a variable is
+    invisible to it.
+    """
+    version = _declared_version("RUFF_VERSION")
+    # Boundary-anchored, not a substring: `ruff==0.15.13` IS a prefix of
+    # `ruff==0.15.130`, so the obvious `f"ruff=={version}" in line` accepts a pin
+    # a release away from the one it claims to be checking. Measured: that form
+    # passed `'ruff==0.15.130'` in the Ubuntu setup script.
+    pinned = re.compile(
+        rf"ruff==(?:{re.escape(version)}|\$\(RUFF_VERSION\))(?![\w.\-])"
+    )
+    checked, unpinned = [], []
+    for relative in _install_surface_files():
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            continue
+        for line in _uncommented(path.read_text()).splitlines():
+            if not re.search(r"\b(pip|pip3|uv pip)\b.*\binstall\b", line):
+                continue
+            if not re.search(r"(?<![\w.-])ruff(?![\w.-])", line):
+                continue
+            checked.append(relative)
+            if not pinned.search(line):
+                unpinned.append(f"{relative}: {line.strip()}")
+
+    assert len(checked) >= 4, (
+        f"only {len(checked)} ruff install line(s) were found ({checked}), which "
+        f"is fewer than the Makefile's two plus one per CI config. The globs or "
+        f"the line patterns have stopped matching and this check would pass "
+        f"vacuously — the failure mode it exists to prevent."
+    )
+    assert not unpinned, (
+        f"these lines install ruff without pinning RUFF_VERSION ({version}): "
+        f"{unpinned}. Whatever they install is what `ruff check` and "
+        f"`ruff format` then measure, and findings and formatting are both "
+        f"properties of the linter version."
     )
 
 

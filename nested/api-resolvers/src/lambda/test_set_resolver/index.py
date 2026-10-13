@@ -10,7 +10,10 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from idp_common.api_adapter import ResourceNotFound  # type: ignore
+from idp_common.api_adapter import (  # type: ignore
+    ResourceAccessDenied,
+    ResourceNotFound,
+)
 from idp_common.config_scope import (  # type: ignore
     ScopeLookupError,
     caller_email_from_claims,
@@ -821,7 +824,15 @@ def _enforce_selection_scope(event, object_keys):
                 "Rejecting addDocumentsToTestSetByKey: a selected document is "
                 "missing, unfinished, or outside the caller's scope"
             )
-            raise PermissionError(_SELECTION_REFUSED)
+            # Per-object, so it is raised as ResourceAccessDenied: the caller holds
+            # Admin or Author (the dispatcher's floor admitted them) and it is the
+            # DOCUMENTS they selected that are refused. The dispatcher labels it
+            # `authzControl: "resource"`, which is what lets a consumer tell this
+            # apart from a group refusal — the same 403/Unauthorized carried both
+            # meanings, and the live RBAC matrix reported this check working as a
+            # group-check failure (issue #1308). Status, errorType and message are
+            # unchanged.
+            raise ResourceAccessDenied(_SELECTION_REFUSED)
 
 
 def add_documents_to_test_set_by_key(args, event=None):

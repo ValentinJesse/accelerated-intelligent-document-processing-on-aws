@@ -727,9 +727,62 @@ server faults is masked by them, and a caller probing for reachable resources
 inflates the fault signal instead of the authorization-denial signal. Refusals and
 faults have to be separable to be alarmable.
 
-So, for any refusal you add: raise `PermissionError` for an authorization refusal,
-`ValueError` for a bad argument, and `ResourceNotFound` for an object that does not
-exist — a not-found raised as a `ValueError` answers 400, which is the inverse of
+#### Which control refused — `errors[0].authzControl`
+
+Every authorization refusal arrives as **403** with `errorType: "Unauthorized"`, and
+two controls that answer opposite questions produce it:
+
+| Question | Control | Label |
+|---|---|---|
+| "do this caller's **groups** admit this operation?" | the field-level floor in `authz.py` — including an undeclared field and an `IAM_ONLY` operation | `api-group-floor` |
+| "may this caller reach the **object** they named?" | a per-object control inside a resolver: the bucket allow-list, the write-once key rule, a chat session they do not own, a document selection that is unfinished or out of their configuration scope | `resource` |
+| neither is established | a resolver refusal that did not declare which control it was — every resolver's own group check is in this category today | `resolver` |
+| an invocation asserted its own `identity` | `normalize_event`, reachable only with `lambda:InvokeFunction` on the dispatcher | `unverified-identity` |
+
+The two were indistinguishable in the response, which made one shape carry two
+opposite verdicts about the group check. The live RBAC matrix drives every operation
+with deliberately bogus arguments, so it provokes the second while asserting the
+first, and eight cells of one run reported three per-object controls working
+correctly as group-authorization failures — publishing `RBAC dynamic — FAIL ❌` for a
+release whose authorization was fine
+([#1308](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1308)).
+
+`authzControl` names the control, and it is **additive**: the status, the
+`errorType` and the message are unchanged, and a consumer that does not read the
+field sees exactly what it saw before. The label is attributed from **control flow**
+and the exception **class**, never from the message — ⚠️ the message cannot carry
+this. Resolver group refusals are worded `Unauthorized: <op> requires <groups>
+group`, but so are several per-object ones (`Unauthorized: session not found for
+this user.`, `Unauthorized: your configuration scope could not be verified`) and one
+that is not an authorization refusal at all (`Unauthorized: uploads are not
+configured for this deployment.`), so matching on prose classifies by the sentence a
+resolver author happened to write.
+
+**To declare a per-object refusal, raise `ResourceAccessDenied`**
+(`idp_common.api_adapter`, a `PermissionError` subclass, so every mapping that keyed
+on `PermissionError` still applies). It is recognised by **class name** across the
+invoke boundary like `ResourceNotFound`, so a resolver with no `idp_common` layer may
+declare its own class of that name — the read-path copy of the S3 helper does. Keep
+the `Unauthorized` message prefix, which is what maps the refusal to 403 rather than
+500 on a dispatcher that predates the class.
+
+⚠️ **An unlabelled refusal is read as the strict verdict, not the lenient one.** A
+403 that is not positively attributed to a per-object control is treated as a group
+refusal by every consumer, so forgetting to raise the class costs a visible failure
+rather than a silent pass. The polarity has to be this way round: defaulting to
+`resource` would let a genuine group-check regression inside a resolver read as a
+known coverage gap. Two kinds of refusal are therefore still unattributed **by
+design** — a resolver's own group check, which is a group decision, and the per-object
+controls the live matrix cannot currently reach (`key_scope`'s refusals, the
+config-version scope refusals in the reprocess, upload and list paths, and the
+in-band `{success:false,error:{type:"Unauthorized"}}` 200 the configuration and sync
+resolvers return, which the dispatcher passes through and never sees).
+
+So, for any refusal you add: raise `PermissionError` for an authorization refusal
+about the caller's groups — or `ResourceAccessDenied`, its subclass, when the
+decision is about the **object** the caller named, so the refusal carries the label
+the section above describes — `ValueError` for a bad argument, and
+`ResourceNotFound` for an object that does not exist — a not-found raised as a `ValueError` answers 400, which is the inverse of
 the convention and is not caught by the reintroduction guard (it matches only a bare
 `Exception`). Do not let a catch-all re-wrap any of the three.
 Log a denial at **WARNING** with a "Denied"/"Forbidden"/"Rejecting" verb and no
