@@ -66,7 +66,7 @@ def handler(event, context):
         logger.info(f"Preparing to delete {len(object_keys)} documents: {object_keys}")
 
         deleted_count = 0
-        failed_count = 0
+        failures: List[str] = []
 
         # Delete each document using the shared idp_common implementation
         for object_key in object_keys:
@@ -84,20 +84,36 @@ def handler(event, context):
                 deleted_count += 1
                 logger.info(f"Successfully deleted document: {object_key}")
             else:
-                failed_count += 1
-                logger.error(
-                    f"Failed to delete document {object_key}: {result.get('errors', [])}"
-                )
+                errors = result.get("errors", [])
+                failures.append(f"{object_key}: {'; '.join(str(e) for e in errors)}")
+                logger.error(f"Failed to delete document {object_key}: {errors}")
 
         logger.info(
-            f"Completed deletion: {deleted_count} successful, {failed_count} failed"
+            f"Completed deletion: {deleted_count} successful, {len(failures)} failed"
         )
-        # `failed_count == 0`, not `deleted_count > 0 or ...`: the UI sends the whole
-        # multi-select here, and the old expression answered True whenever *any* document
-        # was removed — so a selection of ten where one document's tracking row could not
-        # be cleared reported a complete delete. The per-document errors are already in
-        # the log; this boolean is the only thing the caller sees (#1238).
-        return failed_count == 0
+
+        # ⚠️ **A failed delete RAISES; it does not return a falsy value.** Returning
+        # `failed_count == 0` was an HTTP 200 whose body was `false`, and nothing
+        # between here and the user looked at it: the dispatcher returns a 200 for any
+        # value a resolver yields, and the UI only logged the result at debug level. So
+        # a delete that cleared a document's version rows, could not clear its list row
+        # and kept the document record answered "OK" to the browser, with the two
+        # underlying faults reaching only the resolver's own log (#1366). A raise is the
+        # only outcome the transport distinguishes — the dispatcher maps it to a non-200
+        # carrying this message, which the UI surfaces.
+        #
+        # The loop above still attempts every document before this point, so one
+        # document's failure does not abandon the rest of the selection, and the message
+        # names each one that failed and why rather than a bare count: the cause is
+        # usually a deployment-level fault (a missing permission, a rejected
+        # expression) that is identical for every document and actionable only if it is
+        # said out loud. The operation is Admin/Author-gated.
+        if failures:
+            raise RuntimeError(
+                f"Deleted {deleted_count} of {len(object_keys)} document(s); "
+                f"{len(failures)} failed — " + " | ".join(failures)
+            )
+        return True
 
     except Exception as e:
         logger.error(f"Error in delete_document resolver: {str(e)}", exc_info=True)
