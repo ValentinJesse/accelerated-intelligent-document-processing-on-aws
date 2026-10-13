@@ -146,6 +146,52 @@ _PACKAGED_SOURCE_RE = re.compile(
     re.MULTILINE,
 )
 
+#: CodeBuild's property naming the buildspec a container image build runs.
+#:
+#: Reading it is what puts a container-built Lambda's source tree in the packaged set
+#: at all. A `PackageType: Image` function declares no `CodeUri`: its template carries
+#: an `ImageUri` naming an ECR tag, and no template key anywhere in this repository
+#: names the directory such an image is built from — `DockerContext` appears in none
+#: of them, because SAM does not drive these builds. The build does name them, in the
+#: buildspec the CodeBuild project points at, which exports one `FUNCTION_<name>`
+#: variable per source tree before looping over them.
+#:
+#: Before this, `patterns/unified/template.yaml` declared 16 image-built functions and
+#: one `CodeUri` function, so 15 of the 16 source trees under `patterns/unified/src/`
+#: were invisible here and a `test_*.py` beside one of those handlers satisfied both
+#: halves of :func:`is_test_only_path` — the premise that makes the test-shape
+#: heuristic safe, absent for the trees it was most needed on (#1389).
+#:
+#: The buildspec is resolved from this property rather than found by globbing, which is
+#: what `patterns/unified/tests/test_expected_images_match_the_buildspec.py` does and
+#: for the same reason: the sibling files `buildspec-bda.yml` and
+#: `buildspec-pipeline.yml` carry `export FUNCTION_` lines of their own, so a glob
+#: reads a different and wrong set, and retargeting the project moves this reader
+#: with it.
+_BUILDSPEC_KEY = "BuildSpec"
+
+_BUILDSPEC_RE = re.compile(
+    rf"^\s*{_BUILDSPEC_KEY}:\s*(?P<value>[^\s#]+)\s*$",
+    re.MULTILINE,
+)
+
+#: `BuildSpec` scalars that name no file on disk: a block-scalar introducer (the value
+#: is an inline buildspec document, which names no source directory of its own), a
+#: short-form intrinsic, a flow collection, or a remote location.
+_UNRESOLVABLE_VALUE_PREFIXES = ("|", ">", "&", "*", "!", "{", "[", "s3://", "arn:")
+
+#: The shell assignment a container buildspec uses to name one image's source tree.
+#:
+#: Deliberately unanchored. These lines are YAML **list items** — `- export
+#: FUNCTION_ocr="patterns/unified/src/ocr_function"`, with the `-` before `export` —
+#: so a pattern anchored to the start of a line, or to leading whitespace followed by
+#: `export`, matches none of them and reports zero, which looks exactly like the key
+#: being absent. It is applied to the command strings of a parsed buildspec rather
+#: than to raw lines, so a commented-out export is not read as a live one.
+_FUNCTION_EXPORT_RE = re.compile(
+    r'export\s+FUNCTION_[A-Za-z0-9_]+="(?P<path>[^"]+)"',
+)
+
 #: File suffixes worth opening when looking for a template.
 _TEMPLATE_SUFFIXES = (".yaml", ".yml", ".json", ".template")
 
@@ -165,6 +211,173 @@ def _repo_relative(base, value):
     return "/".join(parts) or None
 
 
+def _resolve_candidates(value, base):
+    """The two places a build-relative path can mean, repository root first.
+
+    A CodeBuild project's source is a zip whose root is not always this
+    repository's root. `patterns/unified/template.yaml` names
+    `patterns/unified/buildspec.yml`, repository-relative, because its zip holds the
+    whole tree; `feature-platform/idp-data-generator/template.yaml` names a bare
+    `buildspec.yml` sitting beside it, because its zip root is that directory. Both
+    spellings are live in this tree, so both are tried and whichever exists wins.
+    """
+    candidates = []
+    for candidate in (_repo_relative("", value), _repo_relative(base, value)):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _yaml_module():
+    """PyYAML, or None if it is not installed.
+
+    Imported lazily so this module still imports on a stdlib-only interpreter:
+    `scripts/srt/run.py` and `scripts/security/curate_results.py` both import it at
+    start-up, and a hard dependency here would turn a missing distribution into a
+    crash in the SRT wrapper instead of into the fail-closed "cannot tell" answer
+    :func:`packaged_source_dirs` already has for every other unknown.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    return yaml
+
+
+def _buildspec_commands(text):
+    """Every command string in every phase of a buildspec, or None if unreadable.
+
+    A buildspec carries no CloudFormation intrinsics, so `yaml.safe_load` is the
+    right parser and no custom loader is involved — the same reasoning
+    `patterns/unified/tests/test_expected_images_match_the_buildspec.py` states for
+    reading the same file.
+    """
+    yaml_module = _yaml_module()
+    if yaml_module is None:
+        return None
+    try:
+        document = yaml_module.safe_load(text)
+    except yaml_module.YAMLError:
+        return None
+    if not isinstance(document, dict):
+        return None
+
+    phases = document.get("phases")
+    if not isinstance(phases, dict):
+        return []
+
+    commands = []
+    for phase in phases.values():
+        if not isinstance(phase, dict):
+            continue
+        for command in phase.get("commands") or []:
+            if isinstance(command, str):
+                commands.append(command)
+    return commands
+
+
+def _buildspec_refs(text):
+    """The `BuildSpec` values in a template that name a file rather than a document.
+
+    An inline buildspec — the `BuildSpec: |` form, which three templates here use —
+    is a document, not a path. It names no source directory of its own, so there is
+    nothing for this reader to resolve and its absence from the result is not a
+    failure to establish anything.
+    """
+    values = []
+    for match in _BUILDSPEC_RE.finditer(text):
+        value = match.group("value").strip().strip("'\"")
+        if not value or value.startswith(_UNRESOLVABLE_VALUE_PREFIXES):
+            continue
+        if "${" in value:
+            continue
+        values.append(value)
+    return values
+
+
+def _function_source_dirs(root, buildspec_rel, text):
+    """Source trees a buildspec's `export FUNCTION_*` lines name, or None if unread.
+
+    None means the buildspec could not be parsed, which is "cannot establish the
+    packaged set" and never "nothing ships". An empty set is a different answer and a
+    legitimate one: a build whose context is the zip root, such as the data
+    generator's, names its inputs in a Dockerfile rather than in a variable here.
+    """
+    commands = _buildspec_commands(text)
+    if commands is None:
+        return None
+
+    base = Path(buildspec_rel).parent.as_posix()
+    found = set()
+    for command in commands:
+        for match in _FUNCTION_EXPORT_RE.finditer(command):
+            value = match.group("path")
+            # A path assembled from another shell variable names nothing this
+            # reader can resolve, so there is nothing to add.
+            if "$" in value:
+                continue
+            for candidate in _resolve_candidates(value, base):
+                if (root / candidate).is_dir():
+                    found.add(candidate)
+                    break
+    return found
+
+
+def _image_build_source_dirs(project_root, tracked, template_rel, text):
+    """Source trees the image builds this template declares are built from.
+
+    None if a `BuildSpec` names a file that cannot be found or parsed. That is the
+    honest answer rather than an empty one — the directories a container image ships
+    would then be unknown — and :func:`packaged_source_dirs` propagates it as its own
+    None, so every finding keeps gating.
+    """
+    root = Path(project_root)
+    base = Path(template_rel).parent.as_posix()
+    found = set()
+
+    for value in _buildspec_refs(text):
+        buildspec_rel = next(
+            (
+                candidate
+                for candidate in _resolve_candidates(value, base)
+                if candidate in tracked and (root / candidate).is_file()
+            ),
+            None,
+        )
+        if buildspec_rel is None:
+            print(
+                f"⚠️  Warning: {template_rel} points its container build at "
+                f"'{value}', which is not a tracked file in this checkout, so the "
+                "source trees its images are built from are unknown; treating every "
+                "finding as shipped."
+            )
+            return None
+
+        try:
+            buildspec_text = (root / buildspec_rel).read_text(
+                encoding="utf-8", errors="ignore"
+            )
+        except OSError as e:
+            print(
+                f"⚠️  Warning: could not read {buildspec_rel} ({e}), so the source "
+                "trees its images are built from are unknown; treating every finding "
+                "as shipped."
+            )
+            return None
+
+        dirs = _function_source_dirs(root, buildspec_rel, buildspec_text)
+        if dirs is None:
+            print(
+                f"⚠️  Warning: could not parse {buildspec_rel} as YAML (or PyYAML is "
+                "missing), so the source trees its images are built from are "
+                "unknown; treating every finding as shipped."
+            )
+            return None
+        found |= dirs
+
+    return found
+
+
 def packaged_source_dirs(project_root):
     """Directories a deployment artifact is built from, or None if unknown.
 
@@ -179,9 +392,16 @@ def packaged_source_dirs(project_root):
     directory sitting beside a handler is packaged with it and runs in a customer's
     account. Deciding on shape alone demoted 99 such files.
 
-    Returns None when the answer cannot be established — git unavailable, or no
-    template found. Callers must read that as "cannot tell" and keep gating, never
-    as "nothing ships".
+    Two kinds of source are read, because the two packaging types name their trees in
+    different places. A `Zip` function names its directory in the template, under
+    :data:`_PACKAGED_SOURCE_KEYS`. An `Image` function names an ECR tag and nothing
+    else, so its tree is read from the buildspec its CodeBuild project points at —
+    see :data:`_BUILDSPEC_KEY`. A container build copies its context whole, exactly
+    as `sam build` copies a `CodeUri` tree, so the two sources answer one question.
+
+    Returns None when the answer cannot be established — git unavailable, no template
+    found, or a build pointing at a buildspec this checkout cannot read. Callers must
+    read that as "cannot tell" and keep gating, never as "nothing ships".
     """
     tracked = tracked_files(project_root)
     if tracked is None:
@@ -210,6 +430,11 @@ def packaged_source_dirs(project_root):
             resolved = _repo_relative(base, value)
             if resolved and (root / resolved).is_dir():
                 found.add(resolved)
+
+        image_dirs = _image_build_source_dirs(root, tracked, rel, text)
+        if image_dirs is None:
+            return None
+        found |= image_dirs
 
     if not templates:
         print(
