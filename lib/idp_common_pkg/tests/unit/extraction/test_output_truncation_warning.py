@@ -206,6 +206,41 @@ class TestTheStopReasonIsRead:
         assert result.parsing_succeeded
         assert result.output_truncated is False
 
+    def test_the_log_names_the_section_and_the_stop_reason(self, caplog):
+        """The extraction log is the operator-facing half of this detection.
+
+        Asserted because a random-sample mutation that turned the whole log
+        branch off survived the suite: a warning nothing reads back is
+        indistinguishable from no warning at all.
+
+        ⚠️ The identifiers come from ``SectionInfo``, which carries **no**
+        ``section_id`` — so a ``getattr(section_info, "section_id", None)`` here
+        would log ``None`` on every call, which is what the pre-existing
+        ``_simple_mode_input_preflight`` log does. The class label and the result
+        URI are real fields and the URI contains the section id.
+        """
+        info = _section_info()
+        assert not hasattr(info, "section_id"), (
+            "SectionInfo has grown a section_id: log it directly instead of the URI"
+        )
+        svc = _svc()
+        with caplog.at_level("WARNING", logger="idp_common.extraction.service"):
+            _invoke(svc, COMPLETE_JSON, "max_tokens")
+        lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        hit = [ln for ln in lines if "output token ceiling" in ln]
+        assert hit, lines
+        assert info.class_label in hit[0]
+        assert info.output_uri in hit[0]
+        assert "stopReason=max_tokens" in hit[0]
+
+    def test_nothing_is_logged_for_a_finished_response(self, caplog):
+        svc = _svc()
+        with caplog.at_level("WARNING", logger="idp_common.extraction.service"):
+            _invoke(svc, COMPLETE_JSON, "end_turn")
+        assert not [
+            r for r in caplog.records if "output token ceiling" in r.getMessage()
+        ]
+
     def test_the_repair_readers_verdict_still_stands_on_its_own(self):
         """The pre-existing path: unparseable text, an ordinary stop reason."""
         svc = _svc()

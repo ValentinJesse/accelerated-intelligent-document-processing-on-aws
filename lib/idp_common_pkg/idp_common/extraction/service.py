@@ -6283,14 +6283,16 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             # sources are ORed rather than assigned: whichever notices first wins.
             output_truncated = is_output_token_truncation(response_with_metering)
             if output_truncated:
+                raw_response = response_with_metering.get("response")
                 logger.warning(
-                    "Section %s: extraction response stopped at the model's output "
-                    "token ceiling (stopReason=%s) — the result is truncated and "
-                    "any list in it is incomplete.",
-                    getattr(section_info, "section_id", None),
-                    (response_with_metering.get("response") or {}).get("stopReason")
-                    if isinstance(response_with_metering.get("response"), dict)
+                    "Extraction response for %s stopped at the model's output token "
+                    "ceiling (stopReason=%s) — the result is truncated and any list "
+                    "in it is incomplete. Section result: %s",
+                    section_info.class_label,
+                    raw_response.get("stopReason")
+                    if isinstance(raw_response, dict)
                     else None,
+                    section_info.output_uri,
                 )
             output_repaired = False
             repair_method = None
