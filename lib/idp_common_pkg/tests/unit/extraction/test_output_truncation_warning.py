@@ -515,6 +515,109 @@ class TestAStopReasonIsNotACompletenessCheck:
         )
 
 
+class TestTheAffectedListAcrossSchemaShapes:
+    """What ``details["truncated_list_fields"]`` says for each list shape.
+
+    The field is a convenience for the reader, not the detection — the issue
+    fires on the truncation itself — so the property worth pinning is that it
+    never **asserts** something false: it names only top-level arrays that
+    actually came back with content.
+    """
+
+    @staticmethod
+    def _issue(schema: dict, fields: dict):
+        svc = _svc()
+        svc._class_schema = schema
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields=fields,
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+                output_truncated=True,
+            ),
+        )
+        issues = [i for i in section.processing_issues if i.code == CODE]
+        assert len(issues) == 1, _codes(section.processing_issues)
+        return issues[0]
+
+    def test_a_declared_list_that_came_back_empty_is_not_named(self):
+        """An empty list is ``extraction_incomplete``'s case, not a truncated one."""
+        issue = self._issue(SCHEMA, {"Account Number": "1", "Transactions": []})
+        assert issue.details["truncated_list_fields"] == []
+        assert "Affected list field(s)" not in issue.message
+        # ...and the truncation is still reported, which is the point: the output
+        # was cut off whether or not a list came back with rows in it.
+        assert issue.severity == "warning"
+
+    def test_a_declared_list_absent_from_the_response_is_not_named(self):
+        issue = self._issue(SCHEMA, {"Account Number": "1"})
+        assert issue.details["truncated_list_fields"] == []
+
+    def test_a_list_nested_under_an_object_property_is_not_named(self):
+        """``array_fields`` is top-level only, so a nested list is not claimed.
+
+        The issue still fires. Naming it would need the same descent
+        ``_object_list_targets`` does for the row check, and claiming a field the
+        reader cannot find in the result is worse than naming none.
+        """
+        schema = {
+            "type": "object",
+            "properties": {
+                "Detail": {
+                    "type": "object",
+                    "properties": {"Transactions": {"type": "array", "items": ROW}},
+                }
+            },
+        }
+        issue = self._issue(schema, {"Detail": {"Transactions": _rows(43)}})
+        assert issue.details["truncated_list_fields"] == []
+        assert "Affected list field(s)" not in issue.message
+
+    def test_a_multi_instance_wrapper_names_the_wrapper(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "instances": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"Transactions": {"type": "array", "items": ROW}},
+                    },
+                }
+            },
+        }
+        issue = self._issue(schema, {"instances": [{"Transactions": _rows(43)}]})
+        assert issue.details["truncated_list_fields"] == ["instances"]
+
+    def test_two_lists_with_rows_are_both_named(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "Deposits": {"type": "array", "items": ROW},
+                "Withdrawals": {"type": "array", "items": ROW},
+                "Fees": {"type": "array", "items": ROW},
+            },
+        }
+        issue = self._issue(
+            schema,
+            {"Deposits": _rows(5), "Withdrawals": _rows(3), "Fees": []},
+        )
+        assert issue.details["truncated_list_fields"] == ["Deposits", "Withdrawals"]
+        assert "Fees" not in issue.message
+
+    def test_a_class_with_no_list_fields_at_all_is_still_reported(self):
+        """A truncated form has lost scalars, and this is the only signal for it."""
+        schema = {
+            "type": "object",
+            "properties": {"Account Number": {"type": "string"}},
+        }
+        issue = self._issue(schema, {"Account Number": "1"})
+        assert issue.details["truncated_list_fields"] == []
+        assert "cut off before it finished" in issue.message
+
+
 class TestReachability:
     """⚠️ Treat this as a Simple-mode signal, and here is why.
 
