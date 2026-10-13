@@ -41,15 +41,21 @@ default:
 #
 # The cost of the split, stated plainly: the Python environment is now built in
 # four jobs instead of one, so the pipeline burns MORE runner minutes than it did
-# to finish in less wall-clock time. Each job installs only what it needs — only
-# `unit_tests` gets away without Node, and `ui_tests` skips the Python packages —
-# which keeps that bill down, but it is a real trade, not a free win.
+# to finish in less wall-clock time. Each job installs only what it needs —
+# `ui_tests` skips the Python packages entirely — which keeps that bill down, but
+# it is a real trade, not a free win.
 #
 # ⚠️ Trimming a toolchain out of a job is NOT the free saving it looks like, and
-# the way to find out is to read the SUITES rather than the `script:` block.
-# `package_tests` was written without Node on the reasoning that pytest does not
-# need it, and went red: `scripts/tests/test_pyright_config.py` runs basedpyright
-# live, so a suite whose name says nothing about types reaches an npm package.
+# the way to find out is to read the SUITES rather than the `script:` block. Twice
+# over, in opposite directions. `package_tests` was written without Node on the
+# reasoning that pytest does not need it, and went red: `test_pyright_config.py`
+# runs basedpyright live, so a suite whose name says nothing about types reaches an
+# npm package. And the two jobs that run `scripts/tests` were written without the
+# UI's npm dependencies, which did NOT go red — `test_ui_test_discovery.py` skipped
+# the three assertions that need them and the job exited 0, so the calibration of
+# that module's literals ran on developer machines and in neither CI (#1390). A
+# missing toolchain is the cheap failure; a toolchain whose absence is answered
+# with a skip is the expensive one.
 stages:
   - fast_checks
   - deployment_validation
@@ -107,11 +113,15 @@ stages:
   # Fail the build if any first-party package came from an index, not source.
   - python3 scripts/check_first_party_deps.py
 
-# Node 22.14.0, pinned. Only the jobs that need it install it; `unit_tests` does
-# not. `package_tests` does, for two test modules in `scripts/tests` that its script
-# block does not show: test_pyright_config.py runs basedpyright, an npm package, and
-# test_ux_recorder.py runs the recorder's cursor-overlay JavaScript under node, and
-# fails in CI rather than skipping when node is missing.
+# Node 22.14.0, pinned. Only the jobs that need it install it — the four
+# `fast_checks` gate jobs, and the five AWS-facing ones below do not. Only
+# `ui_tests` needs it for a reason its own `script:` block shows. The two that
+# run `scripts/tests` — `unit_tests` and `package_tests` — need it for three
+# modules in there: test_pyright_config.py runs
+# basedpyright, an npm package; test_ux_recorder.py runs the recorder's
+# cursor-overlay JavaScript under node; and test_ui_test_discovery.py consults the
+# installed Vitest. All three fail in CI rather than skipping when their toolchain
+# is missing, which is deliberate — see the npm lines in those jobs.
 #
 # Pick the tarball matching the runner arch: the size:2xlarge pool is arm64, and a
 # hardcoded x64 binary fails with "Syntax error: ')' unexpected".
@@ -272,6 +282,15 @@ unit_tests:
     - size:2xlarge
     - arch:arm64
 
+  # For the UI dependencies the `scripts` suite needs — see the npm line in
+  # before_script. Same key and path as the other three jobs that declare it.
+  cache:
+    key:
+      files:
+        - src/ui/package-lock.json
+    paths:
+      - src/ui/node_modules/
+
   before_script:
     - *python_setup
     # ⚠️ Node and the pinned cfn-lint are load-bearing here, and neither is visible
@@ -290,6 +309,15 @@ unit_tests:
     # assertions in `lib/idp_sdk/tests/unit/` would otherwise run against is whatever
     # that open range resolves to. Keep in step with CFN_LINT_VERSION.
     - pip install 'cfn-lint==1.51.0'
+    # The UI's npm dependencies, needed here for the same reason as the two above
+    # and discoverable the same way: `make coverage-all-cicd` below re-runs the
+    # `scripts` suite in order to measure it, and
+    # `scripts/tests/test_ui_test_discovery.py` calibrates its hand-written copies
+    # of Vitest's naming convention against the installed Vitest. Those three
+    # assertions used to skip wherever the UI dependencies were absent, which was
+    # every job but `ui_tests` (#1390); the module now fails instead, so this job
+    # needs them to pass as well as to check anything.
+    - cd src/ui && npm ci --prefer-offline --no-audit && cd ../..
 
   script:
     # SKIP_INSTALL=1: idp_common[test] already installed via uv above (avoids a
@@ -347,6 +375,22 @@ package_tests:
     - size:2xlarge
     - arch:arm64
 
+  # Same key and same path as `static_checks` and `ui_tests`, so the `npm ci` in
+  # before_script restores from whatever those two last pushed for this lockfile.
+  # The install is kept anyway rather than relying on the cache alone: a cache is
+  # a performance assumption, not a guarantee — the first pipeline after a
+  # lockfile change has no entry for the new key at all, and within one pipeline
+  # these jobs run in parallel so nothing orders this one after a producer. With
+  # `npm ci` the dependencies are there unconditionally and the cache only decides
+  # whether it takes 10 seconds or 60; without it, the suites below would go back
+  # to skipping on a cold key, which is the failure this is fixing.
+  cache:
+    key:
+      files:
+        - src/ui/package-lock.json
+    paths:
+      - src/ui/node_modules/
+
   before_script:
     - *python_setup
     # ⚠️ Node and basedpyright ARE needed here, which is not obvious from the
@@ -372,6 +416,19 @@ package_tests:
     # those assertions measuring the same linter `make cfn-lint` uses rather than
     # coinciding with it by luck. Keep in step with CFN_LINT_VERSION.
     - pip install 'cfn-lint==1.51.0'
+    # ⚠️ A THIRD toolchain this job's `script:` block does not show, and the same
+    # lesson as the two above. `scripts/tests/test_ui_test_discovery.py` checks its
+    # hand-written copies of Vitest's naming convention against the installed
+    # Vitest — `vitest list --filesOnly`, `defaultInclude`, and the expanded
+    # extension set against picomatch — and those three need the UI's npm
+    # dependencies, which were installed only in `ui_tests`. So they SKIPPED here,
+    # on both platforms, and a skip is not a failure: the job exited 0 and the
+    # literals that are the *input* to that module's gate assertions were
+    # calibrated against nothing but a developer's machine (#1390). The module now
+    # fails rather than skips when it finds them missing under CI, so this line is
+    # load-bearing for the job staying green as well as for the check meaning
+    # anything.
+    - cd src/ui && npm ci --prefer-offline --no-audit && cd ../..
 
   script:
     - make test-packages-cicd
