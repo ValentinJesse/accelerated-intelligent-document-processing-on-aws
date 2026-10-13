@@ -168,6 +168,30 @@ class Tree(NamedTuple):
     #: the flag is not what protects those files -- `scripts/coverage_all.py` is, through
     #: :func:`coverage_all.subprocess_coverage_env`.
     #:
+    #: ⚠️ **Read that as a statement about subprocess instrumentation, not as a general
+    #: claim that the worker count cannot move a figure.** It can, for a file whose
+    #: branches depend on **process-global** state, because the worker count decides how
+    #: the tests are partitioned into processes and `--dist load` makes the partition vary
+    #: run to run. The live instance was credential resolution: `boto3.DEFAULT_SESSION`
+    #: caches the credentials the first bare `boto3.client(...)` in a process resolved, so
+    #: a later `monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")` is ignored and a
+    #: `try: ...get_caller_identity() / except:` branch is covered or not according to
+    #: which test ran first in that worker. Measured on `idp_feature_sdk`, 461 tests and 0
+    #: skips in every cell: `pack.py` came out 99.44% or 100.00% from one run to the next
+    #: at a fixed `-n 4`. What removes it is neutralising the AWS environment rather than
+    #: pinning the worker count -- `coverage_all.hermetic_aws_env`, under which the same
+    #: file measured 100.00% at every worker count tried. Issue #1377.
+    #:
+    #: ⚠️ **A capability difference is a third thing again, and `serial` does not help
+    #: with it either.** An absent tool changes the *test set*, not the schedule: with no
+    #: AWS SAM CLI on `PATH` the autouse fixture in `lib/idp_feature_sdk/tests/conftest.py`
+    #: skips every test that would shell out to `sam`, and that tree measures `437 passed,
+    #: 24 skipped` for 97.15% instead of `461 passed` for 99.94% -- reproduced exactly, to
+    #: the hundredth on each of the three files that move, by removing `sam` from `PATH`
+    #: on a machine that has it. So a baseline recorded where a tool is installed is
+    #: **unreachable** where it is not, and the conditions a figure was measured under are
+    #: part of the figure.
+    #:
     #: What this flag is for, then, is cost and caution: it keeps a tree on the
     #: measurement conditions its recorded baseline was taken under. `scripts` stays
     #: serial because its recorded figures come from a serial run and whether the
