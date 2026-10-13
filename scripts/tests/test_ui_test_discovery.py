@@ -72,20 +72,30 @@ reported: the convention is the thing being held, not every file that might
 contain an assertion.
 
 ⚠️ And the third: **the three calibrations below need Node and the UI's npm
-dependencies, and neither CI's package-test job installs them**, so there they
-skip while the gate assertions run. The practical consequence is one specific
-hole, measured: narrowing the ``include`` *and* :data:`TEST_EXTENSIONS` to the
-same shorter list leaves this module green in CI, because the universe and the
-pattern were narrowed together. That takes a coordinated edit in two files, which
-is a far more visible act than a one-line glob change — which is the trade being
-made here rather than a gap nobody noticed. Everything that catches a change to
-the config *alone* runs with no Node at all.
+dependencies, so where those are absent they cannot run at all.** Every job in
+either CI that runs this suite installs them — ``scripts/tests/
+test_ci_gate_parity.py`` asserts that for both platforms — and :func:`_require_node`
+*fails* rather than skipping when it finds them missing under ``CI``. A
+calibration that reports a skip is indistinguishable from one that passed, and
+the exit code is 0 either way, which is how these three came to run on developer
+machines and in no CI job at all (#1390). Off CI the guard still skips, because
+there an absent ``src/ui/node_modules`` means an unbuilt UI rather than a broken
+job.
+
+Running them matters because the literals they calibrate are the *input* to the
+gate assertions above, and nothing else in the repository holds those literals to
+anything. Narrowing the ``include`` *and* :data:`TEST_EXTENSIONS` to the same
+shorter list narrows the universe and the pattern together, so only ``vitest list
+--filesOnly`` is left to object; a Vitest upgrade that broadens its own convention
+has the same shape, with the hand-written expansion here staying where it was
+while the tree acquires a spelling it no longer covers.
 """
 
 from __future__ import annotations
 
 import functools
 import glob as globlib
+import importlib.util
 import json
 import os
 import re
@@ -168,6 +178,13 @@ DISCOVERY_NARROWING_OPTIONS = (
     "--changed",
     "--related",
 )
+
+#: Whether this is a CI run, which decides whether an absent Node toolchain is a
+#: skip or a failure — see :func:`_require_node`. Both platforms set ``CI``; the
+#: other two are named as well so that a runner which sets only its own variable
+#: is still recognised. Same rule, and the same reason, as ``IN_CI`` in
+#: ``scripts/tests/test_ux_recorder.py``.
+IN_CI = bool(os.getenv("CI") or os.getenv("GITLAB_CI") or os.getenv("GITHUB_ACTIONS"))
 
 pytestmark = pytest.mark.unit
 
@@ -517,15 +534,62 @@ def _node(script: str) -> str:
 
 
 def _require_node() -> None:
-    if shutil.which("node") is None or not (NODE_MODULES / "vitest").is_dir():
-        pytest.skip(
-            "src/ui/node_modules/vitest or node is absent, so Vitest cannot be "
-            "consulted. This skips the CALIBRATION of the literals and the glob "
-            "expansion in this module — not the gate, whose assertions above run "
-            "with no Node at all. Neither CI's package-test job installs the UI's "
-            "npm dependencies, so these three skip there and run in `ui_tests` "
-            "and locally."
+    """Node and the UI's npm dependencies, or stop — loudly in CI, quietly off it.
+
+    Both arms are load-bearing and neither can be dropped for the other.
+
+    **The failing arm** is the remedy for #1390. These three calibrations are the
+    only thing holding this module's hand-written literals to the installed
+    Vitest, and for as long as their absence was *always* a skip they ran on
+    developer machines and in no CI job at all: `node` was on the runner for
+    basedpyright, `src/ui/node_modules` was installed in a different job, so the
+    second clause was true, three tests reported as skipped, and the job exited 0
+    — which is the same thing it does when they pass. Every CI job that runs this
+    suite now installs the UI's dependencies, and
+    ``scripts/tests/test_ci_gate_parity.py::test_every_ci_job_running_this_suite_installs_the_ui_deps``
+    is what keeps that true on both platforms, so under ``CI`` a missing
+    toolchain is a broken job configuration and is reported as one rather than
+    waited out.
+
+    **The skipping arm** is why the check is not simply deleted. Off CI an absent
+    ``src/ui/node_modules`` means a checkout whose UI has not been built, which is
+    ordinary and is nobody's bug; failing there would make `make test` red for a
+    developer working on Python, and a suite that is red by default is a suite
+    nobody reads.
+    """
+    absent = [
+        name
+        for name, present in (
+            ("node (not on PATH)", shutil.which("node") is not None),
+            (
+                # Spelled out rather than derived from NODE_MODULES: a path
+                # relative_to(REPO_ROOT) raises for anything outside the tree, and
+                # this message is built on the one path where nothing may go wrong.
+                "src/ui/node_modules/vitest (run `npm ci` in src/ui)",
+                (NODE_MODULES / "vitest").is_dir(),
+            ),
         )
+        if not present
+    ]
+    if not absent:
+        return
+    reason = (
+        f"Vitest cannot be consulted: {', '.join(absent)}. This is the "
+        "CALIBRATION of the literals and the glob expansion in this module — not "
+        "the gate, whose assertions above run with no Node at all."
+    )
+    if IN_CI:
+        pytest.fail(
+            f"{reason}\n\nIn CI this is a job-configuration failure rather than a "
+            "reason to skip. Every job that runs this suite is required to install "
+            "the UI's npm dependencies (see "
+            "test_ci_gate_parity.py::test_every_ci_job_running_this_suite_installs_"
+            "the_ui_deps), because a calibration that reports a skip cannot be told "
+            "apart from one that passed and the job exits 0 either way — which is "
+            "how these three ran nowhere but a developer's machine (#1390). Give "
+            "the job the dependencies; do not relax this back to a skip."
+        )
+    pytest.skip(reason)
 
 
 def test_the_naming_convention_is_vitests_own() -> None:
@@ -615,3 +679,140 @@ def test_the_collected_set_is_the_one_vitest_reports() -> None:
         f"  only Vitest: {sorted(reported - _collected())}\n"
         f"  only here  : {sorted(_collected() - reported)}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# the guard's own three outcomes, which nothing else in the repository measures
+# --------------------------------------------------------------------------- #
+def _require_node_outcome(
+    monkeypatch: pytest.MonkeyPatch, *, in_ci: bool, node_modules: Path
+) -> type[BaseException] | None:
+    """Run :func:`_require_node` against ``node_modules`` and name the outcome.
+
+    ``None`` means it returned normally and the calibration would go ahead. A skip
+    and a failure are both *exceptions* in pytest, so catching is the only way to
+    read which one the guard chose without the surrounding test inheriting it.
+    """
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/node")
+    monkeypatch.setattr(f"{__name__}.NODE_MODULES", node_modules)
+    monkeypatch.setattr(f"{__name__}.IN_CI", in_ci)
+    try:
+        _require_node()
+    except BaseException as outcome:  # noqa: BLE001 - the outcome is the result
+        return type(outcome)
+    return None
+
+
+def test_an_absent_toolchain_fails_in_ci_and_only_skips_off_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """All three outcomes of :func:`_require_node`; each one protects the others.
+
+    This is the assertion that makes the #1390 fix hold. The CI configuration can
+    be given the UI's dependencies — and
+    ``test_ci_gate_parity.py::test_every_ci_job_running_this_suite_installs_the_ui_deps``
+    keeps them there — but if this guard is relaxed back to an unconditional
+    ``pytest.skip`` the three calibrations stop running again, in a way no exit
+    code anywhere reports: the configuration would still be correct and the
+    assertions would still be reported as skipped. A diff deleting the ``IN_CI``
+    arm reads like tidying up.
+
+    The other direction matters too, and is the reason the fix is not simply
+    "always fail": on a developer machine with no built UI the guard must skip, or
+    ``make test`` is red for every Python-only change and the suite becomes
+    something to ignore.
+
+    ``shutil.which`` is monkeypatched to report node as present so that the
+    outcome is decided by ``IN_CI`` alone, on a machine with node and on one
+    without.
+    """
+    empty = tmp_path / "node_modules"
+    empty.mkdir()
+    installed = tmp_path / "installed"
+    (installed / "vitest").mkdir(parents=True)
+
+    # The arm that is NOT about CI at all, and the one a reader is least likely to
+    # think of asking for: with the toolchain actually present the guard has to
+    # stand aside, or the three calibrations skip everywhere — including the jobs
+    # that were just given the dependencies — while every exit code stays 0. A
+    # mutant widening what the guard counts as "absent" survives the whole gate set
+    # without this; that is measured, not hypothetical.
+    assert (
+        _require_node_outcome(monkeypatch, in_ci=True, node_modules=installed) is None
+    ), (
+        "with node on PATH and vitest installed, _require_node() did not stand "
+        "aside — so the three calibrations below it would skip (off CI) or fail (on "
+        "CI) in a tree that has everything they need. Whatever it is counting as "
+        "missing, it is not missing."
+    )
+
+    assert (
+        _require_node_outcome(monkeypatch, in_ci=True, node_modules=empty)
+        is pytest.fail.Exception
+    ), (
+        "with the UI's npm dependencies missing under CI, _require_node() did not "
+        "FAIL. A skip there is indistinguishable from a pass — the job exits 0 "
+        "either way — which is how these three calibrations ran on developer "
+        "machines and in neither CI (#1390). Every CI job that runs this suite "
+        "installs the dependencies, so their absence in CI is a broken job, not a "
+        "reason to stand down."
+    )
+    assert (
+        _require_node_outcome(monkeypatch, in_ci=False, node_modules=empty)
+        is pytest.skip.Exception
+    ), (
+        "off CI, _require_node() did not SKIP. An unbuilt src/ui is the ordinary "
+        "state of a checkout someone is changing Python in; failing there makes "
+        "`make test` red by default, and a suite that is red by default is one "
+        "nobody reads."
+    )
+
+
+def _module_with_env(monkeypatch: pytest.MonkeyPatch, **environ: str | None):
+    """This file, imported afresh under ``environ``, as a throwaway module.
+
+    A fresh module object rather than :func:`importlib.reload`, which would mutate
+    the one every other test in this file is running inside.
+    """
+    for name, value in environ.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    spec = importlib.util.spec_from_file_location(
+        f"{__name__}__probe", Path(__file__).resolve()
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_in_ci_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """:data:`IN_CI` is derived, not a constant somebody can pin to ``False``.
+
+    The test above monkeypatches ``IN_CI``, which is what lets it read both arms of
+    the guard on any machine — and it means a diff replacing the derivation with
+    ``IN_CI = False`` passes it. That mutant leaves the whole of this module's
+    protection intact-looking and turns the calibrations back into unconditional
+    skips in CI, which is the #1390 defect restored exactly. Measured as a
+    surviving mutant, which is why this exists.
+
+    So the derivation is exercised against a patched environment, each variable on
+    its own: all three unset must read False, and each one present on its own must
+    read True. Naming them individually is the point — a runner that sets only its
+    own variable is the case a single ``CI`` check misses.
+    """
+    unset = dict.fromkeys(("CI", "GITLAB_CI", "GITHUB_ACTIONS"))
+    assert _module_with_env(monkeypatch, **unset).IN_CI is False, (
+        "IN_CI is True with CI, GITLAB_CI and GITHUB_ACTIONS all unset, so the "
+        "guard would FAIL on a developer machine with no built UI rather than "
+        "skipping — which makes `make test` red by default"
+    )
+    for name in unset:
+        probe = _module_with_env(monkeypatch, **{**unset, name: "true"})
+        assert probe.IN_CI is True, (
+            f"IN_CI is False with {name}=true in the environment, so in a CI job "
+            "that sets it the three calibrations would SKIP rather than fail when "
+            "the UI's npm dependencies are missing — and a skip exits 0 (#1390)"
+        )
