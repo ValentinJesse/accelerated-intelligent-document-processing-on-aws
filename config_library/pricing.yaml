@@ -93,19 +93,34 @@
 # `bedrock.client.CACHEPOINT_SUPPORTED_MODELS` and not an implicit cacher, so a
 # cache-read token can never be metered for it and there is no rate to miss.
 #
+# ⚠️ That enumeration is NOT the set of entries in this file, and the difference is
+# why the guard below exists as well. This file doubles as the list of model ids
+# configuration validation accepts (reason 1 above), so an entry here is selectable
+# by a custom config even when no template enum and no shipped preset names it —
+# which was true of three of the eleven entries omitting cache units, and they were
+# covered by nothing. `test_cache_unit_omission_basis.py` therefore derives its
+# universe from THIS FILE: every `bedrock/` entry that omits a cache unit must
+# record its basis, per entry and per unit, in
+# `idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS`. See issue #1206.
+#
 # Two consequences worth knowing before you edit a row:
 #   * Do NOT copy cache rates from a regional profile onto a bare model id to
 #     "fill a gap". The bare `amazon.nova-*-v1:0` entries are the GovCloud ids
 #     (see template.yaml's model parameter descriptions); their omission of cache
 #     units is a deliberate, asserted decision, not an oversight, and pricing them
 #     from the commercial `us.` profiles would assert a GovCloud rate nobody has
-#     verified.
-#   * A missing unit on an entry that DOES exist resolves to $0.00, not to an
-#     error — see `_get_unit_cost`. That is why the allowlist has to prove the unit
-#     is unreachable rather than merely unpublished: an unpriced-but-reachable unit
-#     understates spend silently. Historically the same gap resolved to the
-#     fresh-input price instead, up to 10x too high, which is what put four
-#     published cost figures out by an unknown factor (issues #926 and #966).
+#     verified. AWS's own published GovCloud rate, cited and dated, is the thing
+#     to use if a rate is needed.
+#   * A missing unit on an entry that DOES exist resolves to $0.00 only when a
+#     declaration in `idp_common.metering_units` says that unit costs nothing;
+#     otherwise it resolves to a NULL cost with a WARNING naming the entry (issues
+#     #1212 and #1206). For the two cache units the declaration is per entry, so
+#     omitting one from a NEW row reports rather than zeroes it. That is why a
+#     basis has to show the unit is either unpriced by AWS or unreachable in code
+#     rather than merely undocumented: an unpriced-but-reachable unit understates
+#     spend silently. Historically the same gap resolved to the fresh-input price
+#     instead, up to 10x too high, which is what put four published cost figures
+#     out by an unknown factor (issues #926 and #966).
 # =============================================================================
 
 pricing:
@@ -232,12 +247,27 @@ pricing:
   # selectable resolves the rate from this table by model id, so deleting the
   # entry would silently re-price historical runs at zero. Rates are frozen as
   # of the EOL date and will not change again.
+  #
+  # The cache-read rate is $0.625/MTok, a quarter of input, read from the
+  # AmazonBedrock offer file version 20261010182242 (published 2026-10-10,
+  # retrieved 2026-10-13) where it is identical in all three regions this model
+  # was served from (us-east-1, us-east-2, us-west-2). It is here rather than
+  # omitted for the retrospective reason above: an omitted unit is priced at
+  # $0.00, so a stored metering row carrying cache reads on this model would
+  # report as free against a rate AWS does publish.
+  # There is no cacheWriteInputTokens rate because AWS publishes no standard-tier
+  # cache-write dimension for this model at all; the flex and priority tiers,
+  # which this project never invokes, publish one at exactly $0.0000000000.
+  # That omission's basis is recorded per unit in
+  # idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS.
   - name: bedrock/us.amazon.nova-premier-v1:0
     units:
       - name: inputTokens
         price: "2.5E-6"
       - name: outputTokens
         price: "1.25E-5"
+      - name: cacheReadInputTokens
+        price: "6.25E-7"
 
   # ---------------------------------------------------------------------------
   # Amazon Bedrock Models - Anthropic Claude (US)
@@ -366,17 +396,36 @@ pricing:
         price: "4.125E-6"
 
   # GovCloud cross-region inference profile for the same underlying model as
-  # bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 above — no separate
-  # GovCloud per-token pricing is published, so this mirrors the commercial
-  # us. rate. No cacheReadInputTokens/cacheWriteInputTokens units: verified
-  # live against us-gov-west-1 that cachePoint does not reduce input tokens
-  # through this inference profile (repeated identical prompt still reports
-  # cacheReadInputTokens=0), so GovCloud Claude calls should always be costed
-  # as a full cache miss.
+  # bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 above. The rates below
+  # are the commercial us-west-2 band.
   #
-  # Omitting a unit from an entry that otherwise exists means "not chargeable for
-  # this service", and _get_unit_cost returns $0.00 for it. That only became true
-  # with the GitHub issue #926 fix: the old substring lookup matched the absent
+  # ⚠️ GOVCLOUD RATES ARE PUBLISHED AND ARE HIGHER THAN THESE — read before
+  # trusting a GovCloud cost report. The AmazonBedrockFoundationModels offer file
+  # version 20261012084008 (published 2026-10-12, retrieved 2026-10-13) prices
+  # this model identically in us-gov-west-1 and us-gov-east-1 at $3.60/MTok input
+  # and $18.00/MTok output, against the $3.30 / $16.50 below, so a GovCloud cost
+  # report built from this row is 8.3% BELOW truth on both token axes. Changing
+  # the rates changes every reported GovCloud cost and belongs in its own change;
+  # the figures are recorded here so the gap is known rather than discovered.
+  #
+  # No cacheReadInputTokens/cacheWriteInputTokens units: verified live against
+  # us-gov-west-1 that cachePoint does not reduce input tokens through this
+  # inference profile (repeated identical prompt still reports
+  # cacheReadInputTokens=0), so GovCloud Claude calls should always be costed as a
+  # full cache miss. Note what that is and is not a claim about — AWS DOES publish
+  # both cache dimensions for this model in both GovCloud regions (cache read
+  # $0.36/MTok, 5-minute cache write $4.50/MTok), so the omission rests on the
+  # measured behaviour of the profile and on this id being absent from
+  # bedrock.client.CACHEPOINT_SUPPORTED_MODELS, not on the units being free. That
+  # basis is recorded per unit in
+  # idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS, which records it as a
+  # priced dimension — so a cache read metered here is reported as unpriced rather
+  # than billed at $0.00 if the profile ever starts honouring cache points.
+  #
+  # Omitting a unit from an entry that otherwise exists resolves to $0.00 only
+  # when a declaration in idp_common.metering_units says the unit costs nothing;
+  # anything else is reported as a NULL cost (issues #1212 and #1206). Before the
+  # GitHub issue #926 fix the old substring lookup matched the absent
   # "cacheReadInputTokens" against this row's "inputTokens" price, so the omission
   # bought a 10x cache-read rate rather than the intended zero.
   - name: bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0
@@ -391,10 +440,28 @@ pricing:
   # above never match at cost-calc time: save_reporting_data._get_unit_cost
   # resolves by EXACT key, and "bedrock/amazon.nova-pro-v1:0" is a different key
   # from "bedrock/us.amazon.nova-pro-v1:0". Without these rows a bare GovCloud
-  # Nova call would be reported as UNPRICED (NULL cost). No separate GovCloud
-  # per-token pricing is published, so these mirror the commercial us. rates.
-  # Cache units omitted for the same reason as the us-gov Claude entry above
-  # (GovCloud caching unverified).
+  # Nova call would be reported as UNPRICED (NULL cost). The rates are the
+  # commercial us-east-1 band.
+  #
+  # ⚠️ GOVCLOUD RATES ARE PUBLISHED AND ARE HIGHER THAN THESE, as on the us-gov
+  # Claude row above. The AmazonBedrock offer file version 20261010182242
+  # (published 2026-10-10, retrieved 2026-10-13) prices us-gov-west-1 Nova Pro at
+  # $0.96/MTok input and $3.84/MTok output, and Nova Lite at $0.072 / $0.288,
+  # against the $0.80 / $3.20 and $0.06 / $0.24 below — so a GovCloud cost report
+  # from these rows is 16.7% BELOW truth on both token axes. Recorded rather than
+  # corrected here: changing them changes every reported GovCloud cost and belongs
+  # in its own change.
+  #
+  # Cache units omitted, and the basis is per unit in
+  # idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS rather than inherited from
+  # the us-gov Claude row. The two units differ: AWS publishes a cache-WRITE
+  # dimension for every Nova model at exactly $0.0000000000, so omitting it hides
+  # nothing; it publishes a real cache-READ rate ($0.24/MTok in us-gov-west-1,
+  # $0.20/MTok in us-east-1 for Pro), so omitting that is justified only by the
+  # bare id being absent from bedrock.client.CACHEPOINT_SUPPORTED_MODELS — no
+  # cachePoint is ever sent to it and Nova does not cache implicitly, so no cache
+  # read can be metered against this key. A cache read that does turn up is
+  # reported as unpriced rather than billed at $0.00.
   - name: bedrock/amazon.nova-pro-v1:0
     units:
       - name: inputTokens
