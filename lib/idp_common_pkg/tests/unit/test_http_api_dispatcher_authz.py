@@ -1096,7 +1096,11 @@ def test_every_403_the_dispatcher_can_return_carries_a_label(idx, monkeypatch):
             f"a 403 with no recognised control label: {_error(p)}"
         )
     # Non-vacuity: the probes must cover more than one value, or "they all carry a
-    # label" would be satisfied by a constant.
+    # label" would be satisfied by a constant. ⚠️ Three, not four: these probes do
+    # not reach `normalize_event`'s refusal, which is driven and asserted
+    # separately in test_the_unverified_identity_refusal_is_labelled_at_its_own_site.
+    # Requiring four here would be the wrong fix — a probe that ALSO provoked that
+    # path would make this test's failure message ambiguous between four causes.
     assert len({_refusal_control(p) for p in probes}) >= 3
 
 
@@ -1156,3 +1160,40 @@ def test_an_unknown_control_still_denies_rather_than_502ing(idx, monkeypatch, ca
     assert _error(resp)["errorType"] == "Unauthorized"
     assert _refusal_control(resp) == idx.AUTHZ_CONTROL_RESOLVER_UNSPECIFIED
     assert any("Unknown authz control" in r.message for r in caplog.records)
+
+
+def test_the_unverified_identity_refusal_is_labelled_at_its_own_site(idx, manifest):
+    """The fourth label, driven through the handler like the other three.
+
+    An independent review measured this gap: relabelling that one call site as
+    ``resource`` survived every suite, because the three probes in
+    ``test_every_403_the_dispatcher_can_return_carries_a_label`` cover the other
+    three values and that test only requires three distinct ones. The practical
+    risk was nil — the live matrix never provokes this path, and ``resource``
+    cannot turn any cell into a pass — but an unasserted label is one that can be
+    changed with no test failing, which is the whole shape of #1308.
+
+    The refusal comes from ``normalize_event``, not from ``authz``: an invocation
+    that asserts its own ``identity`` rather than presenting one the transport
+    verified. It is neither a group decision nor an object one, so it gets a label
+    of its own.
+    """
+    group_scoped = sorted(f for f, p in manifest.items() if isinstance(p, list))
+    assert group_scoped, "no group-scoped operation in the manifest — probe is broken"
+    field = group_scoped[0]
+
+    resp = idx.handler(
+        {
+            "arguments": {},
+            "identity": {
+                "claims": {"cognito:groups": list(manifest[field])},
+                "username": "self@example.com",
+            },
+            "info": {"fieldName": field},
+        }
+    )
+
+    assert resp["statusCode"] == 403
+    assert _error(resp)["errorType"] == "Unauthorized"
+    assert _refusal_control(resp) == idx.AUTHZ_CONTROL_UNVERIFIED_IDENTITY
+    assert _refusal_control(resp) != idx.AUTHZ_CONTROL_RESOURCE

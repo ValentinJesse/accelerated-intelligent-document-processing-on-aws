@@ -541,7 +541,15 @@ def _ops_with_a_per_object_control() -> dict:
 
 def test_the_population_at_risk_is_not_empty():
     """An empty derived mapping parametrises to zero cases, which pytest reports as
-    a collected-nothing pass rather than a failure. Assert it on its own."""
+    a collected-nothing pass rather than a failure. Assert it on its own.
+
+    The floor is 15 and the tree currently yields **31** (19 group-restricted, 12
+    `ANY`/`ANY_GROUP`), so the parametrisation below is broader than the floor. No
+    figure is written into the assertion beyond the floor: the count moves whenever
+    an operation gains one of the three flags, and a literal here would go stale
+    within days — which is what the repository's own documented-counts guard exists
+    to prevent.
+    """
     at_risk = _ops_with_a_per_object_control()
     assert len(at_risk) >= 15, (
         f"only {len(at_risk)} operations declare a per-object control; the "
@@ -800,6 +808,71 @@ def test_nothing_in_the_dispatcher_process_calls_the_s3_helper():
             "process, where the two declarations of ResourceAccessDenied are "
             "DIFFERENT classes and `except ResourceAccessDenied` would miss one"
         )
+
+
+# The complement of the list above: refusal sites this change deliberately leaves
+# UNATTRIBUTED, each asserted to still raise the unattributed class. An independent
+# review measured the gap — relabelling the test-set resolver's scope-lookup refusal
+# as the per-object class survived every suite — so the prose claim had nothing
+# holding it.
+#
+# Why these must not be relabelled, which is the same question in each case: none is
+# a decision about an object the caller named.
+#
+#   * a scope that could not be EVALUATED (no UsersTable wired, no email claim, a
+#     failed query) is a fail-closed refusal about the deployment, and the resolvers
+#     spell it with one shared message;
+#   * no resolvable caller identity at all is a refusal about the principal;
+#   * an empty set of wired bucket names is a template fault.
+#
+# Relabelling one cannot create a false pass — the per-object label only ever moves
+# a verdict from FAIL to ERROR, both blocking — but it would move a real fault out of
+# the row a reader looks at first, and it would make the documented boundary false.
+_UNATTRIBUTED_REFUSAL_SITES = (
+    ("test_set_resolver/index.py", "_caller_config_scope", "scope cannot be evaluated"),
+    (
+        "get_agent_chat_messages_resolver/index.py",
+        "handler",
+        "no resolvable caller identity",
+    ),
+)
+
+
+def test_the_unattributed_site_list_is_not_empty():
+    assert len(_UNATTRIBUTED_REFUSAL_SITES) >= 2
+
+
+@pytest.mark.parametrize(
+    "relative,function,why",
+    _UNATTRIBUTED_REFUSAL_SITES,
+    ids=[f"{r.split('/')[0]}:{f}" for r, f, _ in _UNATTRIBUTED_REFUSAL_SITES],
+)
+def test_a_deliberately_unattributed_refusal_stays_unattributed(
+    relative, function, why
+):
+    raised = _raised_names(_RESOLVERS / relative, function)
+
+    assert "PermissionError" in raised, (
+        f"{relative}:{function} ({why}) no longer raises the unattributed class; "
+        f"raised {sorted(raised)}"
+    )
+
+
+def test_the_empty_allow_list_refusal_stays_unattributed():
+    """The one in the shared S3 helper. Its sibling — a bucket outside the
+    allow-list — IS per-object and is in the converted list above, so this function
+    raises both classes and the assertion has to name the one that must still be
+    there."""
+    raised = _raised_names(
+        _REPO / "lib" / "idp_common_pkg" / "idp_common/s3_targets.py",
+        "assert_bucket_allowed",
+    )
+
+    assert raised == {"PermissionError", "ResourceAccessDenied"}, (
+        "the empty-allow-list branch is a template fault rather than a decision "
+        f"about a bucket the caller named, and must stay unattributed; raised "
+        f"{sorted(raised)}"
+    )
 
 
 def test_the_vendored_copy_of_the_s3_helper_declares_it_too():

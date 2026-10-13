@@ -778,9 +778,11 @@ config-version scope refusals in the reprocess, upload and list paths, and the
 in-band `{success:false,error:{type:"Unauthorized"}}` 200 the configuration and sync
 resolvers return, which the dispatcher passes through and never sees).
 
-So, for any refusal you add: raise `PermissionError` for an authorization refusal,
-`ValueError` for a bad argument, and `ResourceNotFound` for an object that does not
-exist — a not-found raised as a `ValueError` answers 400, which is the inverse of
+So, for any refusal you add: raise `PermissionError` for an authorization refusal
+about the caller's groups — or `ResourceAccessDenied`, its subclass, when the
+decision is about the **object** the caller named, so the refusal carries the label
+the section above describes — `ValueError` for a bad argument, and
+`ResourceNotFound` for an object that does not exist — a not-found raised as a `ValueError` answers 400, which is the inverse of
 the convention and is not caught by the reintroduction guard (it matches only a bare
 `Exception`). Do not let a catch-all re-wrap any of the three.
 Log a denial at **WARNING** with a "Denied"/"Forbidden"/"Rejecting" verb and no

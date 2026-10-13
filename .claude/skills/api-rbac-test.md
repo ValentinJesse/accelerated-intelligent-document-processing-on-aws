@@ -344,11 +344,13 @@ on an operation, so it declares `assigned_by:` in the register; the static scann
    a 5xx is usually a resolver raising a bare `Exception` for a validation refusal
    (see `GAP-SEC-INCONCLUSIVE-5XX`) and is fixed by giving that refusal a
    `ValueError`, not by widening anything here.
-0.5. **Which control refused?** Read `authzControl` in the report's **Control**
-   column before anything else. `resource` means the group floor admitted the caller
-   and a per-object control answered — not an RBAC regression, and the remedy is the
-   operation's argument (see above). `api-group-floor` on an allowed role is the
-   real thing. An empty column means this run could not attribute refusals at all.
+
+   **Then: which control refused?** Read `authzControl` in the report's
+   **Control** column before anything else below. `resource` means the group floor
+   admitted the caller and a per-object control answered — not an RBAC regression,
+   and the remedy is the operation's argument (see above). `api-group-floor` on an
+   allowed role is the real thing. An empty column means this run could not
+   attribute refusals at all, so every verdict in it is the pre-`authzControl` one.
 1. **In-band denial not recognized?** If the op denies via `{success:false,
    error:{type:Unauthorized}}` (200), confirm `classify()`/`_denied()` treat
    in-band `Unauthorized` as denied. (Config & sync resolvers use this.)
