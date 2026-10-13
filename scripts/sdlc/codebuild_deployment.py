@@ -1736,6 +1736,231 @@ def test_step13_permission_boundaries(stack_name):
         return {"success": False, "error": f"Permission-boundary check failed: {e}"}
 
 
+def test_step15_config_prefix_mappings(stack_name):
+    """Verify a config prefix mapping actually routes a document at ingest.
+
+    This is the one layer the offline suites structurally cannot reach. The
+    precedence rules are exhaustively covered as a pure function, and each Lambda's
+    wiring is covered with the resolver stubbed -- but the thing that failed in
+    practice was the COMPOSITION: a mapping as the API stores it, against the key an
+    upload actually creates, resolved by the real ingest Lambda. A deployment whose
+    three mappings were all saved without a trailing slash resolved every upload by
+    its own tag with no mapping applied, and every layer was individually correct.
+
+    What this asserts, per conflict mode, with and without an upload tag:
+
+      bob1/ (mapping)  untagged -> the mapping's profile
+                       tagged   -> the mapping's profile, tag overridden
+      bob2/ (metadata) tagged   -> the tag's profile, mapping deferred
+      bob3/ (reject)   tagged   -> the document is FAILED, with a reason
+
+    Reads the tracking row rather than waiting for extraction: resolution happens in
+    `queue_sender` when the object lands, so the provenance fields are the thing
+    under test and they are written seconds after upload. That keeps this step cheap
+    enough for the parallel pool while still exercising a real S3 event, a real
+    DynamoDB mapping item and the real resolver.
+
+    Mappings are written through `PrefixMappingStore` -- the same code path
+    `putConfigPrefixMapping` uses -- so this needs no Cognito token. Cleans up its
+    mappings, objects and tracking rows on the way out, including on failure, so a
+    reject mapping cannot be left behind to fail an unrelated step.
+    """
+    print("Step 15: Testing config prefix mappings end to end...")
+
+    from idp_common.config.prefix_mappings import PrefixMappingStore
+
+    outputs = _stack_outputs(stack_name)
+    input_bucket = outputs.get("S3InputBucketName")
+    tracking_table = outputs.get("TrackingTableName")
+    if not input_bucket or not tracking_table:
+        return {
+            "success": False,
+            "error": "stack outputs lack S3InputBucketName or TrackingTableName",
+        }
+
+    cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
+    config_table = None
+    for page in cf.get_paginator("list_stack_resources").paginate(StackName=stack_name):
+        for r in page.get("StackResourceSummaries", []):
+            if (
+                r.get("ResourceType") == "AWS::DynamoDB::Table"
+                and r.get("LogicalResourceId") == "ConfigurationTable"
+            ):
+                config_table = r.get("PhysicalResourceId")
+    if not config_table:
+        return {"success": False, "error": "could not locate the ConfigurationTable"}
+
+    s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
+    ddb = boto3.client("dynamodb", config=_THROTTLE_RETRY_CONFIG)
+    store = PrefixMappingStore(
+        boto3.resource("dynamodb", config=_THROTTLE_RETRY_CONFIG).Table(config_table)
+    )
+
+    run = f"cpm-{int(time.time())}"
+    # ⚠️ The two profiles must DIFFER, and the mapping's must EXIST.
+    #
+    # If they were the same name the resolver would see agreement rather than a
+    # conflict -- deliberately not a conflict -- so `metadata` precedence would
+    # resolve to `prefix-mapping` and this step would assert its way to a false
+    # pass. And if the MAPPING's profile did not exist the resolver would flag it
+    # unresolvable and fall through, which looks the same from the tracking row as
+    # a mapping that never matched: the exact confusion this step exists to detect.
+    #
+    # So the mapping gets a per-run profile created here, and the tag gets
+    # `default`, which every deployment has. The tag's profile is not existence-
+    # checked by the resolver (only the mapping's is), but using a real one keeps
+    # the `metadata`-precedence document processable rather than leaving a
+    # deliberately-broken workflow behind on a shared stack.
+    mapped_profile = f"{run}-mapped"
+    tagged_profile = "default"
+    prefixes = {}
+    uploaded = []
+    created_profile = False
+
+    def _row(key, attempts=30):
+        """The tracking row for one key, once ingest has written it."""
+        for _ in range(attempts):
+            item = ddb.get_item(
+                TableName=tracking_table,
+                Key={"PK": {"S": f"doc#{key}"}, "SK": {"S": "none"}},
+            ).get("Item")
+            if item and ("ConfigSource" in item or "ObjectStatus" in item):
+                return item
+            time.sleep(4)
+        return None
+
+    try:
+        sample = os.path.join("samples", "lending_package.pdf")
+        if not os.path.exists(sample):
+            return {"success": False, "error": f"missing sample document {sample}"}
+        with open(sample, "rb") as fh:
+            body = fh.read()
+
+        # A real second profile, through the product's own path.
+        cmd = (
+            f"idp-cli config-upload --stack-name {stack_name} "
+            f"--config-file config_library/unified/lending-package-sample/config.yaml "
+            f"--config-version {mapped_profile}"
+        )
+        run_command(cmd)
+        created_profile = True
+        print(f"  created profile {mapped_profile}")
+
+        for n, mode in enumerate(["mapping", "metadata", "reject"], start=1):
+            prefix = f"{run}-bob{n}/"
+            prefixes[prefix] = mode
+            store.put(
+                prefix,
+                mapped_profile,
+                metadata_precedence=mode,
+                description=f"integration step 15 ({mode})",
+                actor="codebuild@integration",
+            )
+        print(f"  created 3 mappings under {run}-bob1..3/")
+
+        # One untagged and one tagged upload per prefix.
+        for prefix, mode in prefixes.items():
+            for name, metadata in (
+                ("untagged.pdf", {}),
+                ("tagged.pdf", {"config-version": tagged_profile}),
+            ):
+                key = f"{prefix}{name}"
+                kwargs = {"Bucket": input_bucket, "Key": key, "Body": body}
+                if metadata:
+                    kwargs["Metadata"] = metadata
+                s3.put_object(**kwargs)
+                uploaded.append(key)
+        print(f"  uploaded {len(uploaded)} documents")
+
+        failures = []
+        for prefix, mode in prefixes.items():
+            for name in ("untagged.pdf", "tagged.pdf"):
+                key = f"{prefix}{name}"
+                item = _row(key)
+                if not item:
+                    failures.append(f"{key}: no tracking row appeared")
+                    continue
+                source = (item.get("ConfigSource") or {}).get("S")
+                recorded_prefix = (item.get("ConfigMappingPrefix") or {}).get("S")
+                status = (item.get("ObjectStatus") or {}).get("S")
+                reason = (item.get("ConfigAssignmentError") or {}).get("S")
+
+                tagged = name == "tagged.pdf"
+                if mode == "reject" and tagged:
+                    # The one combination that must NOT process.
+                    if source != "rejected" or status != "FAILED" or not reason:
+                        failures.append(
+                            f"{key}: a reject mapping should fail the document with "
+                            f"a reason, got source={source!r} status={status!r} "
+                            f"reason={reason!r}"
+                        )
+                elif mode == "metadata" and tagged:
+                    if source != "metadata":
+                        failures.append(
+                            f"{key}: the mapping should have deferred to the "
+                            f"upload's tag, got source={source!r}"
+                        )
+                    elif recorded_prefix != prefix:
+                        failures.append(
+                            f"{key}: the mapping prefix must be recorded even when "
+                            f"the mapping LOSES, got {recorded_prefix!r}"
+                        )
+                else:
+                    # Every other combination: the mapping decided.
+                    if source != "prefix-mapping":
+                        failures.append(
+                            f"{key}: expected the mapping to apply "
+                            f"({mode}, tagged={tagged}), got source={source!r} "
+                            f"prefix={recorded_prefix!r} -- a mapping saved without "
+                            f"its trailing slash matches nothing and looks like this"
+                        )
+                    elif recorded_prefix != prefix:
+                        failures.append(
+                            f"{key}: wrong mapping recorded, {recorded_prefix!r}"
+                        )
+
+        if failures:
+            return {
+                "success": False,
+                "error": "config prefix mapping routing is wrong: "
+                + "; ".join(failures),
+            }
+
+        print("  ✓ all 6 combinations routed as configured")
+        return {"success": True}
+
+    except Exception as e:
+        return {"success": False, "error": f"Config prefix mapping check failed: {e}"}
+    finally:
+        # Order matters: drop the mappings FIRST so a reject rule cannot catch an
+        # unrelated upload while the rest of the cleanup runs.
+        for prefix in prefixes:
+            try:
+                store.delete(prefix)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️  could not delete mapping {prefix}: {e}")
+        for key in uploaded:
+            try:
+                s3.delete_object(Bucket=input_bucket, Key=key)
+                ddb.delete_item(
+                    TableName=tracking_table,
+                    Key={"PK": {"S": f"doc#{key}"}, "SK": {"S": "none"}},
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️  could not clean up {key}: {e}")
+        # Last, and only after the mappings are gone: `deleteConfigVersion` refuses
+        # while a mapping still names the profile, which is a guard this feature
+        # adds and which this cleanup order respects rather than fights.
+        if created_profile:
+            try:
+                ddb.delete_item(
+                    TableName=config_table,
+                    Key={"Configuration": {"S": f"Config#{mapped_profile}"}},
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️  could not delete profile {mapped_profile}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Step 14: pipeline hooks (preprocessing / postprocessing)
 # ---------------------------------------------------------------------------
@@ -2906,6 +3131,210 @@ def _find_marker_in_tracking(stack_name, outputs):
     return None
 
 
+# EICAR, assembled at runtime rather than written as one literal.
+#
+# Split so this source file does not itself contain the signature: a repository
+# checkout, a CI artifact and a developer laptop all get scanned by endpoint
+# tools, and a file carrying the intact string is quarantined by them — which
+# would break the checkout rather than test anything. The scanner under test sees
+# the joined bytes, which is all that matters.
+# ⚠️ Two NAMED fragments joined by `+`, not adjacent string literals.
+# `ruff format` folds adjacent literals into one, which silently reassembled
+# the intact signature in this file — the split has to survive the formatter,
+# and a variable reference is the only form that does.
+_EICAR_HEAD = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-"
+_EICAR_TAIL = "ANTIVIRUS-TEST-FILE!$H+H*"
+_EICAR = _EICAR_HEAD + _EICAR_TAIL
+
+
+def test_step15_malware_gate(stack_name):
+    """Step 15: the malware-scanning ingest gate refuses a known-bad upload.
+
+    Uses EICAR — the industry-standard harmless probe every scanner recognises,
+    and the one GuardDuty's own documentation uses in its THREATS_FOUND example.
+    Nothing malicious is involved: the file is an ASCII string.
+
+    What this asserts, in order of what it would catch:
+
+    1. The document reaches **QUARANTINED**. That is the gate working.
+    2. **No Step Functions execution exists for it.** This is the property the
+       whole design is for, and it is the one a status check alone would miss: a
+       document could be marked QUARANTINED *after* being processed and the
+       status would look identical.
+    3. The verdict is **recorded on the row** (threat name included), because the
+       UI reads it from there and a quarantine nobody can explain is not usable.
+    4. The object is **still in the input bucket**, carrying GuardDuty's tag.
+       Deliberate: the sample is evidence, and this pins the documented
+       disposition rather than a silent delete.
+
+    ⚠️ **This step is allowed to be slow and is allowed to be inconclusive.**
+    GuardDuty's scan latency is not under our control and has no SLA, so a
+    verdict that has not arrived within the budget is reported as a WARNING
+    rather than a failure — the alternative is a suite that goes red on
+    somebody else's queue depth. A verdict that arrives and says the wrong thing
+    IS a failure.
+    """
+    import time
+
+    print("Step 15: Testing the malware-scanning ingest gate (EICAR)...")
+
+    # The deploy's mode is overridable (IDP_INTEGRATION_MALWARE_MODE), so this
+    # step has to agree with it rather than assume CREATE_PLAN. Reported as a
+    # skip, not a pass: with the gate off the upload below would be processed
+    # normally, and asserting QUARANTINED against a stack that is not gating
+    # would fail for a reason that is not a defect.
+    malware_mode = os.environ.get("IDP_INTEGRATION_MALWARE_MODE", "CREATE_PLAN")
+    if malware_mode == "DISABLED":
+        print(
+            "  ⏭️  SKIPPED: the stack was deployed with MalwareScanning=DISABLED, "
+            "so there is no gate to exercise."
+        )
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "MalwareScanning=DISABLED for this deploy",
+        }
+
+    outputs = _stack_outputs(stack_name)
+    input_bucket = outputs.get("S3InputBucketName") or outputs.get("InputBucketName")
+    if not input_bucket:
+        cf = boto3.client("cloudformation")
+        input_bucket = cf.describe_stack_resource(
+            StackName=stack_name, LogicalResourceId="InputBucket"
+        )["StackResourceDetail"]["PhysicalResourceId"]
+
+    s3 = boto3.client("s3")
+    ddb = boto3.client("dynamodb")
+    sfn = boto3.client("stepfunctions")
+    cf = boto3.client("cloudformation")
+    table_name = cf.describe_stack_resource(
+        StackName=stack_name, LogicalResourceId="TrackingTable"
+    )["StackResourceDetail"]["PhysicalResourceId"]
+
+    key = f"malware-gate-test-{int(time.time())}.txt"
+    s3.put_object(Bucket=input_bucket, Key=key, Body=_EICAR.encode("ascii"))
+    print(f"  uploaded s3://{input_bucket}/{key}")
+
+    # Budget: GuardDuty normally returns in well under a minute, but the scan is
+    # asynchronous with no published latency guarantee.
+    # Read FIRST, then check the clock — a plain `while time.time() < deadline`
+    # does zero iterations if the budget has already gone, and would then report
+    # "no tracking row" without ever having looked. That is the one distinction
+    # this step's own error messages claim to make ("never ingested" against
+    # "verdict still coming"), so getting it backwards here would make the step
+    # lie about which it saw.
+    deadline = time.time() + 15 * 60
+    item = None
+    status = None
+    while True:
+        got = ddb.get_item(
+            TableName=table_name,
+            Key={"PK": {"S": f"doc#{key}"}, "SK": {"S": "none"}},
+        ).get("Item")
+        if got:
+            item = got
+            status = (got.get("ObjectStatus") or {}).get("S")
+            if status not in (None, "MALWARE_SCANNING"):
+                break
+        if time.time() >= deadline:
+            break
+        time.sleep(10)
+
+    if item is None:
+        return {
+            "success": False,
+            "error": (
+                f"No tracking row for {key} after upload — the gate did not even "
+                "record the document, so ingest is broken rather than the scan"
+            ),
+        }
+
+    if status == "MALWARE_SCANNING":
+        # Inconclusive, not wrong: see the docstring.
+        return {
+            "success": True,
+            "warning": (
+                f"{key} was still MALWARE_SCANNING after 15 min — no GuardDuty "
+                "verdict arrived in the budget. The gate held the document "
+                "(nothing was processed), but the verdict path is unverified. "
+                "Check the malware-verdict DLQ and the QueueSender log."
+            ),
+        }
+
+    if status != "QUARANTINED":
+        return {
+            "success": False,
+            "error": (
+                f"EICAR upload reached status {status!r}, expected QUARANTINED. "
+                "A known-bad file was not refused by the gate."
+            ),
+        }
+
+    # The property a status check cannot give us: nothing ran.
+    if (item.get("WorkflowExecutionArn") or {}).get("S"):
+        return {
+            "success": False,
+            "error": (
+                f"{key} is QUARANTINED but carries WorkflowExecutionArn="
+                f"{item['WorkflowExecutionArn']['S']!r} — a workflow ran for a "
+                "document the gate refused, so its bytes reached the pipeline"
+            ),
+        }
+    sm_arn = outputs.get("StateMachineArn")
+    if sm_arn:
+        running = sfn.list_executions(stateMachineArn=sm_arn, maxResults=100).get(
+            "executions", []
+        )
+        if any(key in (e.get("name") or "") for e in running):
+            return {
+                "success": False,
+                "error": f"a Step Functions execution exists naming {key}",
+            }
+
+    result = (item.get("MalwareScanResult") or {}).get("S")
+    threat = (item.get("MalwareScanThreat") or {}).get("S")
+    if result != "THREATS_FOUND":
+        return {
+            "success": False,
+            "error": (
+                f"{key} is QUARANTINED but MalwareScanResult={result!r}; the UI "
+                "reads the verdict from the row, so a quarantine with no recorded "
+                "reason cannot be explained to a reviewer"
+            ),
+        }
+    if not threat:
+        return {
+            "success": False,
+            "error": f"{key} records no MalwareScanThreat; expected a threat name",
+        }
+
+    # Documented disposition: the object stays, tagged, as evidence.
+    try:
+        tags = {
+            t["Key"]: t["Value"]
+            for t in s3.get_object_tagging(Bucket=input_bucket, Key=key).get(
+                "TagSet", []
+            )
+        }
+    except Exception as e:  # noqa: BLE001
+        return {
+            "success": False,
+            "error": f"quarantined object {key} is no longer readable: {e}",
+        }
+    scan_tag = tags.get("GuardDutyMalwareScanStatus")
+    if scan_tag != "THREATS_FOUND":
+        return {
+            "success": False,
+            "error": (
+                f"object tag GuardDutyMalwareScanStatus={scan_tag!r}, expected "
+                "THREATS_FOUND"
+            ),
+        }
+
+    print(f"  ✅ QUARANTINED, threat={threat!r}, no execution, object tagged")
+    return {"success": True, "detail": f"threat={threat}"}
+
+
 # Single source of truth for the smoke-test suite: (func, step, name,
 # description). The parallel runner, the success summary, and the AI
 # failure-analysis prompt are all derived from this list — add or remove a
@@ -2983,6 +3412,18 @@ PARALLEL_TEST_STEPS = [
         "Permission boundaries",
         "IAM permissions boundaries attached to deployed roles",
     ),
+    # Step 15: the composition no offline suite can see -- a mapping as the API
+    # stores it, against the key an upload creates, resolved by the real ingest
+    # Lambda. Reads tracking-row provenance rather than waiting for extraction, so
+    # it is cheap enough for the parallel pool; creates and deletes its own
+    # profile, mappings and documents, so it does not mutate shared stack state
+    # other steps depend on.
+    (
+        test_step15_config_prefix_mappings,
+        "Step 15",
+        "Config prefix mappings",
+        "Config prefix mapping routing at ingest (all three conflict modes)",
+    ),
     # Step 14: pipeline hooks. Safe in the parallel pool — it registers its hook
     # in its OWN config version and never activates it, so the other steps
     # (which use `default` or their own versions) are unaffected. It does create
@@ -3005,8 +3446,53 @@ SEQUENTIAL_TEST_STEPS = [
         "API RBAC",
         "API RBAC authorization tests (static scan + dynamic matrix)",
     ),
+    # Step 15 is sequential for a different reason from Step 12: it is not a
+    # stack-wide mutation, it is just slow and bursty. It waits on an external
+    # scan for up to 15 minutes, and running it alongside the parallel pool would
+    # add its wait to the pool's wall clock for no benefit — the pool is
+    # fail-fast, and a document held at the gate is not a failure.
+    (
+        test_step15_malware_gate,
+        "Step 15",
+        "Malware gate",
+        "Malware-scanning ingest gate refuses a known-bad (EICAR) upload",
+    ),
 ]
 ALL_TEST_STEPS = PARALLEL_TEST_STEPS + SEQUENTIAL_TEST_STEPS
+
+
+#: The malware-scanning modes the integration deploy accepts.
+_INTEGRATION_MALWARE_MODES = ("CREATE_PLAN", "GATE_ONLY", "DISABLED")
+
+
+def _integration_malware_mode():
+    """The ``MalwareScanning`` mode for the primary integration deploy.
+
+    Separate from the deploy function, and pure, so it is testable without
+    reaching an AWS call: the validation has to run before the deploy, and a
+    test that drove the deploy to reach it would make real IAM calls.
+
+    Defaults to ``CREATE_PLAN`` so the nightly suite exercises the gate. The
+    override exists because the two ways `CREATE_PLAN` fails are both outside
+    this template and both fail the WHOLE suite rather than step 15: the
+    deployment role needs `guardduty:*` applied out of band, and the account
+    needs a free slot against the 25-plan-per-Region quota. Either missing gives
+    a stack ``CREATE_FAILED`` before any test runs, and with the mode hardcoded
+    there was no way to get a pipeline green again without a code change.
+    """
+    mode = os.environ.get("IDP_INTEGRATION_MALWARE_MODE", "CREATE_PLAN")
+    if mode not in _INTEGRATION_MALWARE_MODES:
+        raise ValueError(
+            f"IDP_INTEGRATION_MALWARE_MODE must be one of "
+            f"{', '.join(_INTEGRATION_MALWARE_MODES)}, got {mode!r}"
+        )
+    if mode != "CREATE_PLAN":
+        print(
+            f"⚠️  MalwareScanning={mode} (from IDP_INTEGRATION_MALWARE_MODE). "
+            f"The malware gate step will report a skip rather than exercising "
+            f"GuardDuty."
+        )
+    return mode
 
 
 def _deploy_primary_stack_attempt(stack_name, admin_email, template_url):
@@ -3030,7 +3516,50 @@ def _deploy_primary_stack_attempt(stack_name, admin_email, template_url):
     print("Step 1: Deploying stack...")
     cmd = f"idp-cli deploy --stack-name {stack_name} --template-url {template_url} --admin-email {admin_email} --wait"
     cmd += f" --role-arn {role_arn}"
-    cmd += f" --parameters PermissionsBoundaryArn={permissions_boundary_arn}"
+    # MalwareScanning on the PRIMARY stack rather than as its own variant probe,
+    # which is a deliberate choice about what gets tested.
+    #
+    # A variant probe deploys and feature-smokes; it would prove the GuardDuty
+    # plan and the EventBridge rule exist. What it could not prove is the thing
+    # the gate actually risks: that every document still reaches COMPLETED with
+    # the gate in the path. The gate withholds the SQS message for EVERY upload,
+    # so a defect in it does not degrade one feature — it stalls ingest. Putting
+    # it on the primary stack means the whole functional suite, every document it
+    # processes and every status it asserts, runs through the gate, and a stall
+    # fails those tests rather than passing a smoke check.
+    #
+    # Cost of this choice, stated: every integration document now waits for a
+    # real GuardDuty scan before processing, and the stack consumes one of the 25
+    # protected buckets allowed per account per Region. Left fail-closed
+    # (AllowUnscannableDocuments defaults false) so an unscannable sample fails
+    # the suite loudly instead of being quietly admitted.
+    #
+    # ⚠️ **Each run consumes one of the 25 Malware Protection plans allowed per
+    # account per Region.** Deletion is tied to the stack delete, so the normal
+    # teardown path releases the slot — but an orphaned stack from a cancelled
+    # run keeps its plan. If the quota is reached, the symptom is a deploy
+    # failing with `MalwareProtectionPlanLimitExceeded` on the
+    # `MalwareProtectionPlan` resource. The failed-stack reaper handles the
+    # cleanup; if the quota needs an immediate workaround, deleting leftover
+    # test stacks (or switching one run to `GATE_ONLY` against a plan the
+    # account already has) frees a slot.
+    #
+    # ⚠️ **Overridable from the environment, because the two ways this fails are
+    # both outside the template and both fail the WHOLE suite rather than step
+    # 15.** `CREATE_PLAN` needs `guardduty:*` on the deployment role — the
+    # `IDP-Cloudformation-Service-Role` change in this repository has to have
+    # been applied to the CI account out of band — and it needs a free slot
+    # against the 25-plan quota. Either missing gives a stack `CREATE_FAILED`
+    # before any test runs, and with the mode hardcoded there is no way to get a
+    # pipeline green again without a code change. `IDP_INTEGRATION_MALWARE_MODE`
+    # lets an operator drop to `GATE_ONLY` or `DISABLED` for a run; the default
+    # stays `CREATE_PLAN` so the gate is exercised unless somebody decides
+    # otherwise.
+    malware_mode = _integration_malware_mode()
+    cmd += (
+        f" --parameters PermissionsBoundaryArn={permissions_boundary_arn}"
+        f" MalwareScanning={malware_mode}"
+    )
     # Full nested-stack creation can legitimately run long; don't let the default
     # test-command timeout kill a healthy in-progress deploy. check=False so a
     # rollback is captured (with cf_events) and classified rather than raising.

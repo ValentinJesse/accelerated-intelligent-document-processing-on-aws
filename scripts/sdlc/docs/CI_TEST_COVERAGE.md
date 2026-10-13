@@ -161,7 +161,9 @@ not need it, and went red: `scripts/tests/test_pyright_config.py` runs basedpyri
 resolve the first-party packages instead of merely looking right — so a suite whose
 name says nothing about types reaches an npm package. The fix is to give the job
 the tool, not to let the probe skip when it is missing, which is the whole reason
-that check is a live probe.
+that check is a live probe. `scripts/tests/test_ux_recorder.py` needs Node in the
+same job on its own account: it runs the recorder's cursor-overlay JavaScript under
+`node`, and fails in CI rather than skipping when `node` is missing.
 
 ### The GitHub side runs the same two security gates
 
@@ -435,10 +437,10 @@ Notes:
 
 ## Test Execution Strategy
 
-### Parallel Execution (Steps 3-11, 13, 14)
-- **11 tests run concurrently** to minimize pipeline runtime (Step 13, the
-  read-only permissions-boundary check, and Step 14, the pipeline-hook test,
-  join the parallel pool)
+### Parallel Execution (Steps 3-11, 13, 14, 15)
+- **12 tests run concurrently** to minimize pipeline runtime (Step 13, the
+  read-only permissions-boundary check, Step 14, the pipeline-hook test, and
+  Step 15, the config-prefix-mapping routing check, join the parallel pool)
 - **Fail-fast enabled**: If any test fails, remaining tests are cancelled and cleanup begins
 - **Expected runtime**: ~25-35 minutes (vs 60+ minutes sequential)
 
@@ -837,6 +839,40 @@ The persisted-marker assertion therefore checks the **postprocessing** marker,
 which is correctly the final value; `preprocessing` is proven to have run by its
 own `invoked` count.
 
+### Step 15: Config Prefix Mapping Routing ⚡ *Parallel*
+**What it tests**: that a [config prefix mapping](../../../docs/configuration-profiles.md#prefix-mappings-assigning-a-profile-by-where-a-document-lands)
+actually routes a document at ingest, across all three conflict modes, with and
+without an upload tag.
+- **Why it exists**: this is the one layer the offline suites structurally cannot
+  reach. The precedence rules are exhaustively covered as a pure function with no
+  AWS, and each Lambda's wiring is covered with the resolver stubbed out — but what
+  failed in practice was the **composition**: a mapping as the API stores it,
+  against the key an upload actually creates, resolved by the real ingest Lambda.
+  A deployment whose three mappings were saved without a trailing slash resolved
+  every upload by its own tag with no mapping applied, and every layer was
+  individually correct. On the document list that is indistinguishable from "the
+  mapping deferred to the upload", so the conflict mode looked broken when it had
+  never been reached.
+- **Verification** (six combinations, three mappings):
+  - `mapping` precedence: an untagged upload **and** a tagged one both resolve to
+    the mapping's profile, with `ConfigSource: prefix-mapping`
+  - `metadata` precedence: a tagged upload resolves to the tag's profile with
+    `ConfigSource: metadata`, and the mapping prefix is **still recorded** — the
+    field that distinguishes "a mapping deferred" from "no mapping matched"
+  - `reject`: a tagged upload is written `FAILED` with a reason on the row, and no
+    workflow starts
+- **Cost**: reads the tracking row rather than waiting for extraction, since
+  resolution happens in `queue_sender` when the object lands. That is what keeps
+  it cheap enough for the parallel pool.
+- **Isolation**: creates its own run-scoped Configuration Profile and three
+  run-scoped prefixes, and removes the mappings **before** the profile in its
+  `finally` — `deleteConfigVersion` refuses while a mapping still names the
+  profile, which is a guard the feature adds and this cleanup respects rather than
+  fights. Dropping the mappings first also stops a `reject` rule catching an
+  unrelated upload while the rest of the cleanup runs.
+
+---
+
 #### Validating Step 14 without a pipeline round-trip
 
 A pipeline round-trip is ~70 minutes, so debug the hook **outside** it. Deploy the
@@ -880,6 +916,70 @@ Two gotchas the same technique surfaced, worth knowing before writing any hook:
   the 50MB direct-upload limit.
 
 ---
+
+### Step 15: Malware-Scanning Ingest Gate 🔒 *Sequential*
+**What it tests**: that the optional [malware-scanning ingest
+gate](../../../docs/malware-scanning.md) refuses a known-bad upload — and, more
+importantly, that it refuses it *before* the pipeline reads it.
+- **Why it exists, and why it is on the primary stack rather than a variant
+  probe**: the primary stack now deploys with `MalwareScanning=CREATE_PLAN`, so
+  **every document every other step processes passes through the gate**. That is
+  the coverage that matters: the gate withholds the SQS message for every upload,
+  so a defect in it does not degrade one feature, it stalls ingest — and a
+  variant probe that deploys and smoke-tests could only prove the GuardDuty plan
+  and the EventBridge rule exist. The whole functional suite reaching `COMPLETED`
+  is the assertion that the gate admits correctly; this step is the assertion that
+  it also *refuses*.
+- **Verification**:
+  - the document reaches **`QUARANTINED`**
+  - **no Step Functions execution exists for it** — checked both on the tracking
+    row's `WorkflowExecutionArn` and against `list_executions`. This is the
+    property a status check alone cannot give: a document could be marked
+    QUARANTINED *after* being processed and the status would look identical
+  - the verdict is on the row (`MalwareScanResult=THREATS_FOUND` plus a threat
+    name), because the UI reads it from there and a quarantine nobody can explain
+    is not usable
+  - the object is **still in the input bucket**, tagged
+    `GuardDutyMalwareScanStatus=THREATS_FOUND` — the documented disposition, so
+    this pins it rather than a silent delete
+
+**Test Document**: an EICAR probe uploaded by the step. EICAR is the
+industry-standard harmless test signature every scanner recognises, and the one
+GuardDuty's own documentation uses in its `THREATS_FOUND` example; nothing
+malicious is involved. ⚠️ The signature is **assembled from two string fragments**
+in `codebuild_deployment.py` so this repository does not contain it intact —
+endpoint tooling on a developer machine or a CI worker quarantines a file that
+does, which would break the checkout rather than test anything.
+`scripts/sdlc/tests/test_malware_gate_step.py` asserts both that the probe is the
+real signature and that no source file holds it whole.
+
+**Duration**: typically under two minutes; budgeted at 15.
+⚠️ **This step can report success with a WARNING, and that is deliberate.**
+GuardDuty's scan latency has no SLA and is not ours to control, so a verdict that
+has not arrived inside the budget is reported as inconclusive rather than failed —
+the alternative is a suite that goes red on somebody else's queue depth, which
+gets ignored, which costs more than the coverage. A verdict that arrives and says
+the wrong thing IS a failure. When it warns, read the malware-verdict dead-letter
+queue and the QueueSender log.
+
+**Execution**: sequential, for a different reason from Step 12. Step 12 is
+sequential because it mutates stack-wide auth; this one is simply slow and bursty,
+and adding its wait to the fail-fast parallel pool's wall clock buys nothing —
+a document held at the gate is not a failure.
+
+**Implementation**: `test_step15_malware_gate` in
+`scripts/sdlc/codebuild_deployment.py`. Its own verdict logic — which is the part
+that could pass vacuously, since "no verdict yet" is a success — is unit-tested
+offline in `scripts/sdlc/tests/test_malware_gate_step.py` against a faked AWS.
+
+**Not covered here**: throughput. The gate's failure mode under concurrency is
+documents accumulating in `MALWARE_SCANNING`, which one upload cannot show.
+`scripts/malware_gate_burst.py` pushes a few hundred documents through at once
+and asserts that nothing is stuck, no benign document was quarantined and
+admission is not serialised. It is kept **out** of the nightly deliberately:
+admitting a few hundred documents starts a few hundred Step Functions executions
+and the Bedrock calls behind them, which is real money for a property that does
+not change nightly. Run it for a release check or after changing the gate.
 
 ## Additional Deployment Tests: the deployment-variant probe framework
 
