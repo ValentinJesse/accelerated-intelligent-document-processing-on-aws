@@ -424,9 +424,19 @@ def is_input_token_overflow(error: BaseException) -> bool:
 #: ``stopReason`` values that mean the model stopped because it ran out of OUTPUT
 #: budget rather than because it finished answering.
 #:
-#: ``max_tokens`` is Bedrock Converse. ``incomplete`` and ``max_output_tokens`` are
-#: what ``bedrock.openai_responses`` maps the OpenAI Responses ``status`` onto, so
-#: the matcher holds across model families rather than only for Anthropic models.
+#: Two of the three are reachable today and the third is defensive; be precise
+#: about which, because the set decides what counts as data loss:
+#:
+#: * ``max_tokens`` — Bedrock Converse.
+#: * ``incomplete`` — what ``bedrock.openai_responses.translate_response`` puts in
+#:   ``stopReason``, which is the Responses API's ``status`` verbatim.
+#: * ``max_output_tokens`` — the Responses API's own ``incomplete_details.reason``
+#:   spelling for the same condition. **Nothing in this repository writes it into
+#:   ``stopReason``**: the adapter maps ``status``, and the reason is read
+#:   separately by ``_incomplete_reason``. It is kept so a response that surfaces
+#:   the reason directly is matched rather than read as a clean stop, which is the
+#:   safe direction for a completeness signal — but it is not evidence that the
+#:   adapter maps it, and no test can drive it end to end.
 OUTPUT_TRUNCATION_STOP_REASONS = ("max_tokens", "max_output_tokens", "incomplete")
 
 
@@ -443,6 +453,14 @@ def is_output_token_truncation(response: object) -> bool:
     returns (``{"response": ..., "metering": ...}``) or the bare Converse response,
     because callers hold one or the other and a matcher that silently answers
     ``False`` for the wrong shape is worse than no matcher.
+
+    Against the three inline copies this replaced it is a **strict widening**, not
+    an exact equivalent, on one shape: ``{"response": None, "stopReason": ...}``
+    answered ``False`` there (the ``isinstance`` guard rejected ``None`` and the
+    comparison never reached the envelope) and answers ``True`` here. ``invoke_model``
+    does not produce that shape, so nothing changes in practice; it is called a
+    widening rather than a no-op because the direction matters — the new answer is
+    the one that reports a truncation.
 
     ⚠️ A ``False`` here is **not** evidence that the output is complete. A model
     that abbreviates a long list on its own stops with ``end_turn`` and a

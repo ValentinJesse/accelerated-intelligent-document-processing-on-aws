@@ -3742,7 +3742,15 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             )
         ]
         if empty_lists:
-            fields_str = ", ".join(empty_lists)
+            # `map(str, ...)` because these names come from the class SCHEMA, not
+            # from the response: a schema read straight from YAML can carry a bare
+            # numeric key, which arrives as an `int`, and this function runs with
+            # no enclosing `try` (`_save_results` calls it directly), so a
+            # `TypeError` out of the join would cost the section its whole
+            # processing-issue list and fail the save. Same reason as the
+            # equivalent join in the truncation block below; fixed in both rather
+            # than in the one that happened to be new.
+            fields_str = ", ".join(str(name) for name in empty_lists)
             rec = (
                 " This document has large/tabular fields; Advanced (agentic) "
                 "extraction with table parsing is recommended for it."
@@ -3794,18 +3802,59 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
         # the cause, that one counts the rows — and suppressing either would remove
         # evidence from a report that has room for both.
         if metadata.get("output_truncated"):
-            affected = [name for name in array_fields if extracted_fields.get(name)]
-            rec = (
-                " Simple extraction returns one response per section, so a section "
-                "whose answer does not fit in one response loses the tail; use "
-                "Advanced (agentic) extraction, which shards the section across "
-                "requests, or split the document."
-                if not is_agentic
-                else " Reduce the rows a single shard is asked for "
-                "(extraction.agentic max_pages_per_shard) or split the document."
+            # Top-level declared arrays that came back holding rows. NOT "the lists
+            # that were truncated", and the name says so: a response is cut at ONE
+            # point, so every list emitted before the cut is complete and nothing
+            # here can tell a reader which one was interrupted. `extracted_fields`
+            # insertion order would, but `_filter_extracted_to_schema` and
+            # `_apply_missing_field_handling` rewrite the dict in between, so that
+            # order is not safe to lean on. Naming the wrong field is worse than
+            # naming none, so this reports presence and leaves the inference to the
+            # reader. `isinstance` rather than truthiness, so a declared array that
+            # came back as a string is not reported as a list; `map(str, ...)`
+            # because a schema read straight from YAML can carry a non-string
+            # property name (a bare `2024`) and this function runs with no
+            # enclosing `try` — a raise here would cost the section its whole
+            # processing-issue list.
+            present = [
+                str(name)
+                for name in array_fields
+                if isinstance(extracted_fields.get(name), list)
+                and extracted_fields.get(name)
+            ]
+            # Advanced mode does not exist for the OpenAI Responses families:
+            # `_invoke_extraction_model` raises `ValueError` for `agentic.enabled`
+            # with one of those models. Recommending it to a deployment that cannot
+            # select it is advice that breaks the run — and `incomplete`, the stop
+            # reason those models report, is exactly the one that brings a reader
+            # here.
+            resolved_model = str(
+                self._pending_extraction_model or self.config.extraction.model or ""
             )
+            can_use_agentic = not is_openai_responses_model(resolved_model)
+            if is_agentic:
+                rec = (
+                    " Reduce the rows a single shard is asked for "
+                    "(extraction.agentic max_pages_per_shard) or split the document."
+                )
+            else:
+                rec = (
+                    " Simple extraction returns one response per section, so a "
+                    "section whose answer does not fit in one response loses the "
+                    "tail; "
+                )
+                rec += (
+                    "use Advanced (agentic) extraction, which shards the section "
+                    "across requests, or split the document."
+                    if can_use_agentic
+                    else "split the document, or process it with a model that "
+                    "supports Advanced (agentic) extraction, which shards the "
+                    "section across requests."
+                )
             lists_clause = (
-                f" Affected list field(s): {', '.join(affected)}." if affected else ""
+                f" List field(s) in the partial result: {', '.join(present)}."
+                if present
+                else ""
             )
             issues.append(
                 ProcessingIssue(
@@ -3832,10 +3881,14 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
                     ),
                     section_id=section_id,
                     details={
-                        "truncated_list_fields": affected,
+                        # Present, not truncated — see the comment above the
+                        # comprehension. A key named for the stronger claim would
+                        # be read as the stronger claim.
+                        "list_fields_present": present,
                         "output_repaired": bool(metadata.get("output_repaired")),
                         "repair_method": metadata.get("repair_method"),
                         "agentic": is_agentic,
+                        "advanced_mode_available": can_use_agentic,
                     },
                 )
             )

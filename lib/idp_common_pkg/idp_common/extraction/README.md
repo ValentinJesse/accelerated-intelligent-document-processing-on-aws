@@ -2407,8 +2407,10 @@ signals make both loud without changing what is extracted:
   list; every other one above is an estimate. Set from two sources, ORed, in
   `_invoke_extraction_model`: the response's own `stopReason`
   (`utils.bedrock_utils.is_output_token_truncation` — `max_tokens` on Converse, plus the
-  `incomplete` / `max_output_tokens` values `bedrock.openai_responses` maps the OpenAI
-  Responses `status` onto, so it holds across model families), and
+  `incomplete` that `bedrock.openai_responses.translate_response` carries over verbatim
+  from the OpenAI Responses `status`, so it holds across model families; the third member
+  of that tuple, `max_output_tokens`, is that API's `incomplete_details.reason` spelling
+  and is defensive — nothing here writes it into `stopReason`), and
   `repair_truncated_json`'s `was_truncated` on the parse-failure branch. The OR direction
   matters: a ceiling can be hit where the text still parses — a complete JSON object
   followed by cut-off commentary, or a repair that succeeds — and the `except` branch is
@@ -2442,10 +2444,19 @@ signals make both loud without changing what is extracted:
   Advanced-mode wording is exercised by handing `_save_results` a result with the flag
   set, which is a direct call rather than a flow, and
   `test_output_truncation_warning.py::TestReachability` fails if an Advanced-mode setter is
-  ever added — so this note has to be rewritten rather than quietly becoming false. On that
-  path the shard runtime's own completeness checks and `minItems` are the guards, and a
-  shard whose own response is cut off fails at the agent's tool boundary instead of
-  returning a short list.
+  ever added — so this note has to be rewritten rather than quietly becoming false.
+
+  What covers that path instead is **a hard failure, not a check**. On a `max_tokens` stop
+  the strands event loop raises `MaxTokensReachedException`; nothing in the ladder retries
+  or swallows it (`MaxTokensReachedException` is in no retry list and matches no message
+  needle, so `async_exponential_backoff_retry` makes one attempt and re-raises), both of
+  `_invoke_agent_for_extraction`'s translators decline it, and `runtime.py`'s
+  `asyncio.gather` over the shards passes no `return_exceptions` — so one truncated shard
+  fails the section rather than merging the survivors into a short list. Note this is **not**
+  the agent's tool boundary, which is a different control for a different cause (`minItems`
+  enforcement on `extraction_tool`'s input). And `minItems` is an opt-in that **no shipped
+  preset declares** — `grep -rn minItems config_library/` finds nothing — so it guards a
+  deployment only once a config author has set it.
 - `ExtractionOutputIncomplete` — the section's list came back under half the rows its own
   OCR text evidences, and `extraction.row_shortfall_action` is `fail` (opt-in; see the trade
   above). Raised by `_fail_on_row_shortfall`, which is the **last statement of

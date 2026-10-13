@@ -37,6 +37,11 @@ from unittest.mock import patch
 
 import pytest
 
+from idp_common.bedrock.openai_responses import (
+    _RESPONSES_API_MODELS,
+    is_openai_responses_model,
+    translate_response,
+)
 from idp_common.config.models import IDPConfig
 from idp_common.discovery.rules_discovery import RulesDiscovery
 from idp_common.extraction.service import (
@@ -291,7 +296,7 @@ class TestTheFindingReachesTheSection:
         issue = next(i for i in section.processing_issues if i.code == CODE)
         assert issue.severity == "warning"
         assert issue.stage == "extraction"
-        assert issue.details["truncated_list_fields"] == ["Transactions"]
+        assert issue.details["list_fields_present"] == ["Transactions"]
         # The section it belongs to. A random-sample mutation that dropped this
         # attribution survived the suite, which is how it came to be asserted:
         # an issue with no section is one the UI cannot place on a multi-section
@@ -515,13 +520,17 @@ class TestAStopReasonIsNotACompletenessCheck:
         )
 
 
-class TestTheAffectedListAcrossSchemaShapes:
-    """What ``details["truncated_list_fields"]`` says for each list shape.
+class TestTheListFieldsPresentAcrossSchemaShapes:
+    """What ``details["list_fields_present"]`` says for each list shape.
 
     The field is a convenience for the reader, not the detection — the issue
-    fires on the truncation itself — so the property worth pinning is that it
-    never **asserts** something false: it names only top-level arrays that
-    actually came back with content.
+    fires on the truncation itself — and the property worth pinning is that it
+    does not **assert** more than it knows. A response is cut at one point, so
+    every list emitted before the cut is complete and nothing here can say which
+    one was interrupted; reporting presence is the strongest true statement
+    available. The key and the message clause are named for that, which is a
+    correction: both previously said "truncated" and "affected", which on a
+    multi-list class pointed a reader at a field that was complete.
     """
 
     @staticmethod
@@ -545,15 +554,15 @@ class TestTheAffectedListAcrossSchemaShapes:
     def test_a_declared_list_that_came_back_empty_is_not_named(self):
         """An empty list is ``extraction_incomplete``'s case, not a truncated one."""
         issue = self._issue(SCHEMA, {"Account Number": "1", "Transactions": []})
-        assert issue.details["truncated_list_fields"] == []
-        assert "Affected list field(s)" not in issue.message
+        assert issue.details["list_fields_present"] == []
+        assert "List field(s) in the partial result" not in issue.message
         # ...and the truncation is still reported, which is the point: the output
         # was cut off whether or not a list came back with rows in it.
         assert issue.severity == "warning"
 
     def test_a_declared_list_absent_from_the_response_is_not_named(self):
         issue = self._issue(SCHEMA, {"Account Number": "1"})
-        assert issue.details["truncated_list_fields"] == []
+        assert issue.details["list_fields_present"] == []
 
     def test_a_list_nested_under_an_object_property_is_not_named(self):
         """``array_fields`` is top-level only, so a nested list is not claimed.
@@ -572,8 +581,8 @@ class TestTheAffectedListAcrossSchemaShapes:
             },
         }
         issue = self._issue(schema, {"Detail": {"Transactions": _rows(43)}})
-        assert issue.details["truncated_list_fields"] == []
-        assert "Affected list field(s)" not in issue.message
+        assert issue.details["list_fields_present"] == []
+        assert "List field(s) in the partial result" not in issue.message
 
     def test_a_multi_instance_wrapper_names_the_wrapper(self):
         schema = {
@@ -589,9 +598,15 @@ class TestTheAffectedListAcrossSchemaShapes:
             },
         }
         issue = self._issue(schema, {"instances": [{"Transactions": _rows(43)}]})
-        assert issue.details["truncated_list_fields"] == ["instances"]
+        assert issue.details["list_fields_present"] == ["instances"]
 
-    def test_two_lists_with_rows_are_both_named(self):
+    def test_a_complete_sibling_list_is_reported_as_present_not_as_truncated(self):
+        """The wording correction, measured on the shape that exposed it.
+
+        ``Deposits`` here is complete — 400 rows — and ``Withdrawals`` is the short
+        one. Both are reported, because the check cannot tell them apart; what it
+        must not do is call the complete one truncated or affected.
+        """
         schema = {
             "type": "object",
             "properties": {
@@ -602,10 +617,58 @@ class TestTheAffectedListAcrossSchemaShapes:
         }
         issue = self._issue(
             schema,
-            {"Deposits": _rows(5), "Withdrawals": _rows(3), "Fees": []},
+            {"Deposits": _rows(400), "Withdrawals": _rows(5), "Fees": []},
         )
-        assert issue.details["truncated_list_fields"] == ["Deposits", "Withdrawals"]
+        assert issue.details["list_fields_present"] == ["Deposits", "Withdrawals"]
+        assert "List field(s) in the partial result: Deposits, Withdrawals." in (
+            issue.message
+        )
+        for overclaim in ("Affected list", "truncated list field", "were truncated"):
+            assert overclaim not in issue.message, overclaim
         assert "Fees" not in issue.message
+
+    def test_a_declared_array_that_came_back_as_a_string_is_not_called_a_list(self):
+        issue = self._issue(SCHEMA, {"Account Number": "1", "Transactions": "n/a"})
+        assert issue.details["list_fields_present"] == []
+
+    def test_a_non_string_schema_property_name_does_not_cost_the_issue_list(self):
+        """``_build_extraction_issues`` runs with no enclosing ``try``.
+
+        A schema read straight from YAML can carry a bare numeric key, which
+        arrives as an ``int``. These names come from the **schema**, so they reach
+        the joins regardless of what the response holds, and an unguarded
+        ``str.join`` over one raises ``TypeError`` — which, with no enclosing
+        ``try`` in ``_save_results``, costs the section its whole processing-issue
+        list and fails the save.
+
+        Driven through the builder directly rather than through ``_save_results``,
+        because ``ExtractionResult.extracted_fields`` is typed ``dict[str, Any]``
+        and pydantic refuses a non-string key — so the response side cannot carry
+        one and the schema side is the whole exposure. Both joins are covered here:
+        the pre-existing empty-list one (an ``int`` name is never a key in the
+        response, so it lands there) and the truncation one.
+        """
+        svc = _svc()
+        svc._class_schema = {
+            "type": "object",
+            "properties": {2024: {"type": "array", "items": ROW}},
+        }
+        issues = svc._build_extraction_issues(
+            extracted_fields={"2024": _rows(5)},
+            metadata={"output_truncated": True},
+            section_id="1",
+        )
+        codes = _codes(issues)
+        # Nothing raised, and both issues were produced rather than the list being
+        # lost. The empty-list issue names the field, because an `int` schema name
+        # is never a key in the response and so reads as an absent list; the
+        # truncation issue claims nothing, for the same reason.
+        assert CODE in codes, codes
+        assert "extraction_incomplete" in codes, codes
+        empty = next(i for i in issues if i.code == "extraction_incomplete")
+        assert "2024" in empty.message
+        truncated = next(i for i in issues if i.code == CODE)
+        assert truncated.details["list_fields_present"] == []
 
     def test_a_class_with_no_list_fields_at_all_is_still_reported(self):
         """A truncated form has lost scalars, and this is the only signal for it."""
@@ -614,8 +677,154 @@ class TestTheAffectedListAcrossSchemaShapes:
             "properties": {"Account Number": {"type": "string"}},
         }
         issue = self._issue(schema, {"Account Number": "1"})
-        assert issue.details["truncated_list_fields"] == []
+        assert issue.details["list_fields_present"] == []
         assert "cut off before it finished" in issue.message
+
+
+class TestTheRemedyIsAvailableToTheDeploymentItIsGivenTo:
+    """Do not recommend a mode the configured model cannot be run in.
+
+    ``_invoke_extraction_model`` raises ``ValueError`` for ``agentic.enabled`` with
+    an OpenAI Responses model, so "use Advanced (agentic) extraction" is advice
+    that breaks the run for that family — and ``incomplete``, the stop reason those
+    models report, is precisely the one that brings a reader to this issue.
+
+    The model set is read from the authority
+    (``bedrock.openai_responses._RESPONSES_API_MODELS``) rather than written out,
+    so a model added there is exercised here without an edit.
+    """
+
+    MODELS = sorted(_RESPONSES_API_MODELS)
+
+    def test_the_model_set_is_not_empty(self):
+        assert len(self.MODELS) > 0
+
+    @staticmethod
+    def _issue_for(model: str):
+        cfg = IDPConfig(
+            **{
+                "extraction": {
+                    "mode": "simple",
+                    "agentic": {"enabled": False},
+                    "model": model,
+                }
+            }
+        )
+        svc = ExtractionService(config=cfg)
+        svc._reset_context()
+        svc._class_schema = SCHEMA
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+                output_truncated=True,
+            ),
+        )
+        return next(i for i in section.processing_issues if i.code == CODE)
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_advanced_is_not_recommended_to_a_model_that_cannot_run_it(self, model):
+        assert is_openai_responses_model(model), (
+            "the authority no longer calls this a Responses model; re-derive the set"
+        )
+        issue = self._issue_for(model)
+        assert "use Advanced (agentic) extraction" not in issue.message
+        assert "split the document" in issue.message
+        assert issue.details["advanced_mode_available"] is False
+
+    def test_advanced_is_still_recommended_where_it_is_available(self):
+        issue = self._issue_for("us.anthropic.claude-sonnet-5")
+        assert "use Advanced (agentic) extraction" in issue.message
+        assert issue.details["advanced_mode_available"] is True
+
+    def test_the_refusal_this_avoids_is_real(self):
+        """The ``ValueError`` the recommendation would have walked a reader into."""
+        cfg = IDPConfig(
+            **{
+                "extraction": {
+                    "mode": "advanced",
+                    "agentic": {"enabled": True},
+                    "model": self.MODELS[0],
+                }
+            }
+        )
+        svc = ExtractionService(config=cfg)
+        svc._reset_context()
+        svc._class_schema = SCHEMA
+        with pytest.raises(ValueError):
+            with patch(
+                "idp_common.extraction.service.bedrock.invoke_model",
+                return_value=_response(COMPLETE_JSON, "end_turn"),
+            ):
+                svc._invoke_extraction_model(
+                    content=[{"text": "p"}],
+                    system_prompt="sys",
+                    section_info=_section_info(),
+                )
+
+
+class TestTheOpenAIAdapterReachesTheMatcher:
+    """The ``incomplete`` member, driven through the real adapter.
+
+    Without this the member is only ever asserted against itself: the matcher test
+    is parametrized over the same tuple the matcher reads, and
+    ``TestOneVocabulary`` is a structural check on the literal. Neither would
+    notice that nothing in the tree produces the value.
+    """
+
+    def test_an_incomplete_responses_payload_translates_to_a_truncation(self):
+        payload = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": COMPLETE_JSON}],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+        envelope = translate_response(payload, "openai.gpt-5.5", "Extraction")
+        assert envelope["response"]["stopReason"] == "incomplete"
+        assert is_output_token_truncation(envelope) is True
+
+    def test_a_completed_responses_payload_does_not(self):
+        payload = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": COMPLETE_JSON}],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+        envelope = translate_response(payload, "openai.gpt-5.5", "Extraction")
+        assert is_output_token_truncation(envelope) is False
+
+    def test_the_adapter_maps_status_and_not_the_incomplete_reason(self):
+        """Why ``max_output_tokens`` is documented as defensive rather than mapped.
+
+        The payload above carries ``incomplete_details.reason ==
+        "max_output_tokens"`` and the translated ``stopReason`` is ``incomplete``,
+        so the reason spelling is not what arrives. A document claiming the adapter
+        maps it would be wrong, which is what this pins.
+        """
+        payload = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        assert (
+            translate_response(payload, "openai.gpt-5.5", "Extraction")["response"][
+                "stopReason"
+            ]
+            != "max_output_tokens"
+        )
 
 
 class TestReachability:
