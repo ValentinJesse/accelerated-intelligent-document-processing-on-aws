@@ -19,6 +19,14 @@ run the way a developer runs it, a git hook run the way git runs it — and the 
 a subprocess is collected only if that process starts coverage for itself.
 :func:`subprocess_coverage_env` is the whole of that wiring, and every pytest invocation
 this script makes goes through it.
+
+⚠️ **The figures are only reproducible if the AWS environment is neutralised**, so every
+invocation goes through :func:`hermetic_aws_env` as well. A suite that can resolve real
+credentials measures different lines from one that cannot, and because botocore caches the
+credentials it first resolved onto a process-global session, *which test ran first in a
+worker process* decides the answer — so the figure moved run to run at a fixed worker
+count on a developer machine and not at all on a runner, which has nothing to resolve.
+That reasoning is written out at :data:`HERMETIC_AWS_UNSET`, with the measurement.
 """
 
 from __future__ import annotations
@@ -49,6 +57,64 @@ _spec.loader.exec_module(_ccd)
 #: out. Keeping that true means this file is reached only through the environment variable
 #: below.
 SUBPROCESS_RC = REPO_ROOT / "scripts" / "coverage_subprocess.rc"
+
+#: Every AWS environment variable :data:`HERMETIC_AWS` removes, and the three it pins.
+#:
+#: This is the one pytest invocation in the repository that did not go through
+#: `$(PYTEST_HERMETIC)`, because it is made from Python rather than from a `make` recipe,
+#: and `scripts/tests/test_offline_suites_are_hermetic.py` scopes its "every line goes
+#: through the wrapper" check to the `test-packages-cicd` recipe — so this caller sat
+#: outside the universe of the control rather than being carved out of it. Nobody decided
+#: it should be unprotected; the question was never asked about it.
+#:
+#: **Leaving it out made the coverage figures it produces nondeterministic**, which is
+#: worse here than a failing suite would be, because the figures are a ratchet's input and
+#: `--write` records them permanently. `boto3.DEFAULT_SESSION` is created by the first bare
+#: `boto3.client(...)` in a process and **caches the credentials it resolved**, so a
+#: `monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")` applied after that point is ignored
+#: by every later client in the same process. Whether a `try: boto3...get_caller_identity()
+#: / except:` branch is covered therefore depends on which test ran *first in its process*
+#: — and xdist's `--dist load` partition of tests across workers varies with the worker
+#: count and run to run. Measured on `idp_feature_sdk` (461 tests, 0 errors, 0 skips in
+#: every cell): `pack.py` at 99.44% or 100.00% from one run to the next at a fixed `-n 4`,
+#: and under this neutralisation 100.00% at every worker count tried. Issue #1377.
+#:
+#: Spelled out here and **derived from the makefile in the test**, not parsed at run time:
+#: `test_offline_suites_are_hermetic.py` reads `HERMETIC_AWS` out of
+#: `make/hermetic_aws.mk` and fails if this mapping stops covering it, so the two cannot
+#: drift while both stay green.
+HERMETIC_AWS_UNSET = (
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+)
+
+#: The sources no amount of unsetting reaches: the shared config files, and IMDS.
+HERMETIC_AWS_SET = {
+    "AWS_CONFIG_FILE": "/dev/null",
+    "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+    "AWS_EC2_METADATA_DISABLED": "true",
+}
+
+
+def hermetic_aws_env(env: dict[str, str]) -> dict[str, str]:
+    """``env`` with the ambient AWS environment neutralised, as ``HERMETIC_AWS`` does.
+
+    Mutates and returns ``env`` so it composes with
+    :func:`subprocess_coverage_env` in either order.
+    """
+    for name in HERMETIC_AWS_UNSET:
+        env.pop(name, None)
+    env.update(HERMETIC_AWS_SET)
+    return env
 
 
 def subprocess_coverage_env(
@@ -124,7 +190,9 @@ def run(tree, python: str, parallel: bool) -> tuple[str, int, float | None]:
     # absolutely: `--cov=<tree.cov>` is resolved by pytest-cov against this cwd, and a
     # child does not have this cwd.
     source = cwd if tree.cov == "." else cwd / tree.cov
-    result = subprocess.run(cmd, cwd=cwd, env=subprocess_coverage_env(cwd, source))
+    result = subprocess.run(
+        cmd, cwd=cwd, env=hermetic_aws_env(subprocess_coverage_env(cwd, source))
+    )
     total = None
     if report.is_file():
         try:

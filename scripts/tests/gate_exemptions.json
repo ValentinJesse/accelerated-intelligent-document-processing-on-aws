@@ -2817,6 +2817,48 @@
         1362
       ],
       "reason": "Discovered by name, on EXPECTED_. The set replaced an `endswith(\"RetryAbandonedOutOfTime\")` match, which accepted any prefix, so a renamed metric passed as compliant. Measured rather than assumed, because the first version of this reason said these names are already plotted and that is false: searching every .yaml/.yml/.json in the tree, NONE of these three appears -- they are new in #1362 and nothing reads them yet (the sibling BedrockMaxRetriesExceeded is on the Bedrock Retries widget in patterns/unified/template.yaml, and BedrockServiceOutageAlarm keys on BedrockServiceUnavailable/BedrockThrottles/BedrockQuotaLimitErrors). What makes exactness the point is therefore forward-looking: these are the strings an operator will have to point a widget or an alarm at, a rename is invisible to a suffix match, and the per-ladder prefix is what distinguishes which ladder gave up. The judgement is that these three names are the right vocabulary, which is not computable from this tree; whether a name is PLOTTED is computable and is deliberately not asserted, since requiring it would block the first change that introduces a metric. The closure runs in both directions at every gate site: one of these must appear, and a name in neither this set nor EXPECTED_FAILURE_METRICS may not. A reviewer should check that by renaming one metric in client.py and watching the test fail."
+    },
+    "benchmarks/tests/test_processing_issues_recorded.py::STAGES_EXCLUDED_FROM_RESULT_JSON": {
+      "kind": "enforced-universe",
+      "memberKind": "the `stage` string of a ProcessingIssue, as declared in idp_common/document_failure.py",
+      "turnsOff": "nothing in a gate. It names the processing-issue stages whose issues reach the section's DynamoDB record and NOT the section result.json that analyze.score_processing_issues reads, so the benchmark harness cannot see them. Membership is a fact about where the pipeline writes, not a decision to skip anything, and the test compares `STAGES - SITE_STAGES` against it for EQUALITY in both directions.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "benchmarks/tests/test_processing_issues_recorded.py",
+      "issues": [
+        1378
+      ],
+      "reason": "rule_validation and postprocessing build their issues through document_failure.record_section_failure from handlers in patterns/unified/src/, after extraction and assessment have written the section result.json, and nothing rewrites that file afterwards. So a stage in this list is one the harness is structurally blind to, and the whole point of registering it is that the blindness is written down instead of discovered again -- #1378 is itself an instance of a check firing into a field nobody read. The closure is an equality with no authored inventory on either side: the left-hand set is every stage whose only ProcessingIssue construction is the document_failure pass-through, derived by AST, and the right is this list, so a sixth stage lands in the left and fails rather than being silently unread. What a reviewer should check is that the equality is real -- add a *_STAGE constant to document_failure.py and watch test_every_declared_stage_is_either_covered_or_a_named_boundary fail. The reason this is not an exemption is that there is no gate here for it to excuse: nothing in this repository asserts the harness sees every stage, because measurement says it does not, and an assertion to the contrary is the defect rather than the fix."
+    },
+    "benchmarks/tests/test_processing_issues_recorded.py::CODES_EXCLUDED_FROM_RESULT_JSON": {
+      "kind": "enforced-universe",
+      "memberKind": "the `code` string of a ProcessingIssue, as declared in idp_common/assessment/degradation.py",
+      "turnsOff": "nothing in a gate. Same boundary as STAGES_EXCLUDED_FROM_RESULT_JSON one level finer: these are assessment-STAGE codes, so the stage list cannot reach them, and they are the half that costs something. The test compares this against the *_CODE constants degradation.py declares for EQUALITY.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "benchmarks/tests/test_processing_issues_recorded.py",
+      "issues": [
+        1378
+      ],
+      "reason": "assessment_failed_confidence_unavailable and assessment_skipped_confidence_unavailable are ERROR severity on a document that COMPLETES -- not failing it is the entire purpose of the degrade/skip path -- so unlike the failure-path codes there is no ObjectStatus to fall back on and a section that came back with no confidence scores at all reads in summary.json as processing_issues 0, success true. degradation.py's own docstring says that path 'deliberately does not rewrite that file', and all five skip_section_no_confidence call sites in assessment/service.py return before the result.json write. It is live where it matters: over the committed results/v0.6.11/*/summary.json rows, resolved.assessment is separate on 4192 rows against 516 integrated and 257 off, and the skip sites are on the standalone path. Two things make this more than a note. The equality means a third code declared in degradation.py fails. And the premise is COMPUTED rather than restated -- test_the_premise_behind_that_boundary_is_computed_not_asserted greps degradation.py for an S3 write and fails if one appears, with the same probe proving non-vacuous against extraction/service.py, and test_every_skip_site_returns_before_the_result_json_write checks the five call sites still return. So the day the pipeline starts writing these into result.json, this entry fails instead of under-reporting forever."
+    },
+    "benchmarks/tests/test_processing_issues_recorded.py::INVENTED_CODES": {
+      "kind": "fixture",
+      "memberKind": "a ProcessingIssue `code` string that no service in this repository emits",
+      "turnsOff": "nothing. It is the NEGATIVE CONTROL for the property #1378 is about: three codes nobody has written, fed through the real writer and reader to prove the recorder tallies on each issue's own values rather than recognising a list of known types. A member being in it is what makes it a test input, not what excuses it from anything.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "non-vacuity",
+      "ratchetEvidence": "benchmarks/tests/test_processing_issues_recorded.py",
+      "issues": [
+        1378
+      ],
+      "reason": "Discovered through the prose route, on a comment explaining that a recognition rule 'would let codes through' -- which reads to the matcher as an exemption rationale and is the exact opposite. The three members are chosen so that no rule a recorder might plausibly carry admits any of them: one has a real stage prefix so an exact-code allowlist rejects it, one has no prefix any service uses so a prefix rule rejects it, one has a stage that is not a pipeline stage. That spread is measured rather than guessed: a single invented code spelled extraction_... left a recorder filtering on startswith(('extraction_', 'assessment_', 'classification_')) passing the entire suite, which is this issue's own defect one level up. The ratchet is that each member is asserted ABSENT from the AST-derived universe of real codes, so if a service ever adopts one of these names the negative control stops being negative and the test fails rather than becoming vacuous; the file also asserts the derived universe is non-empty, because an empty parametrisation collects as a pytest SKIP with a green exit. Registered rather than reworded, because rewording a comment to slip past discovery is the failure this registry exists to prevent."
     }
   }
 }
