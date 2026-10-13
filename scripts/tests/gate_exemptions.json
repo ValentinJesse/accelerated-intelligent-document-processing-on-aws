@@ -2756,6 +2756,49 @@
         1366
       ],
       "reason": "Not computable from this tree: it is a property of the DynamoDB API, which documents the two operations oppositely. Query -- 'A FilterExpression does not allow key attributes. You cannot define a filter expression based on a partition key or a sort key' -- so the call is refused with ValidationException on every attempt. Scan -- 'With Scan, you can specify any attributes in a filter expression, including partition key and sort key attributes' -- so it is correct there. Guarding both would mean an exemption for every legitimate filtered scan in the repository, and the first thing a reviewer would learn is to add one. Measured: lifting the exclusion reports 11 sites, all of them scans, including nested/api-resolvers/src/lambda/test_results_resolver/index.py:1677, which was mistaken for a fourth instance of #1366 and is not one. test_the_scan_exclusion_is_not_shielding_nothing asserts the exclusion still shields at least one such site, so it cannot go dead and pre-approve whatever next occupies the name. The count is reported rather than pinned to equality: writing a new legitimate filtered scan is a correct thing to do and must not turn this gate red."
+    },
+    "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py::BUDGET_UNBOUNDED_BEDROCK_LADDERS": {
+      "kind": "exemption",
+      "memberKind": "a `<module path>::<function>` in idp_common that both sleeps and invokes a Bedrock call, and is deliberately not bounded by the invocation budget",
+      "turnsOff": "the invocation-budget closure in test_invocation_budget_guard.py for one named function. Without the entry, `test_every_sleeping_bedrock_caller_is_enforced_or_registered` fails on it, which is what it is doing today for its single member.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py",
+      "issues": [
+        1362
+      ],
+      "reason": "One member: rule_validation/z3/rule_translator.py::_invoke_bedrock. It is a real unbounded Bedrock ladder -- 2 application attempts over botocore's defaults at a default 60 s read timeout is nominally 601 s, inside a ConfigurationResolverFunction capped at 120 s -- and it is excluded rather than fixed because bounding it is not the same edit as the other four. Its client is built with `boto3.client(\"bedrock-runtime\")` and NO botocore Config at all, so the fix has to choose a read timeout for work nobody has measured, which is a product decision; and no handler on its call path publishes a deadline, so the gate would be inert there today even if added. Writing a reason that would be false of a second member is the defect this registry exists to catch, so the entry is per function and the module is not exempted. Three ratchets apply and all three are in the owning test: membership is DERIVED from the whole package by a predicate deliberately unlike the one that selects the enforced modules (a function that calls both `sleep` and a Bedrock invoke), so a new ladder is in neither set and fails; the derivation asserts its own non-emptiness; and a registered member that no longer sleeps between Bedrock calls fails as stale rather than pre-excusing whatever next takes that name. What is NOT ratcheted is the 601 s figure itself -- it is nominal arithmetic over botocore defaults, not a measurement of that Lambda, and nothing recomputes it.",
+      "ratchetGap": "The nominal 601 s worst case quoted in the reason is arithmetic over botocore's defaults rather than a measured overrun, and no test recomputes it; if that client gains a Config the figure is stale and only the prose says so."
+    },
+    "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py::EXPECTED_FAILURE_METRICS": {
+      "kind": "enforced-universe",
+      "memberKind": "the exact name of a ladder's ordinary failed-request counter, as emitted alongside a refusal",
+      "turnsOff": "nothing. It is the complete set of failure counters a refusal site may emit, bounding what a gate site is allowed to record; a counter in neither set fails `test_every_refusal_is_observable_and_raises`.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py",
+      "issues": [
+        1362
+      ],
+      "reason": "Discovered by name, on EXPECTED_. These are the three ladders' pre-existing failure counters, and of the three exactly ONE is plotted today -- BedrockRequestsFailed, in patterns/unified/template.yaml; BedrockEmbeddingRequestsFailed and LambdaHookRequestsFailed appear in no template, dashboard or alarm. That was measured after the first version of this reason claimed all three were, which is the aggregate-reason defect this registry exists to catch, so it is stated per member here. The judgement is the same forward-looking one as for EXPECTED_REFUSAL_METRICS: a refusal is a failed request and has to be counted as one under the name that ladder already uses, whether or not a widget reads it yet. It bounds rather than excuses -- the assertion is that a gate site emits nothing outside these two sets, which is what caught a site emitting one counter twice. Whether a site emits a failure counter AT ALL is asserted behaviourally instead, by `test_a_refusal_counts_one_failed_request_not_two` and the per-ladder metric-count assertions, because one site deliberately leaves it to the enclosing handler and a structural rule could only express that as a carve-out."
+    },
+    "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py::EXPECTED_REFUSAL_METRICS": {
+      "kind": "enforced-universe",
+      "memberKind": "the exact name of a CloudWatch metric a budget-gate refusal site may emit to record that it refused",
+      "turnsOff": "nothing. It is the complete set of metric names a refusal may use, and `test_every_refusal_is_observable_and_raises` requires every gate site to emit one FROM it -- so membership is what makes a name acceptable, not what excuses it. A site emitting a name outside the set fails the same assertion.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": "lib/idp_common_pkg/tests/unit/bedrock/test_invocation_budget_guard.py",
+      "issues": [
+        1362
+      ],
+      "reason": "Discovered by name, on EXPECTED_. The set replaced an `endswith(\"RetryAbandonedOutOfTime\")` match, which accepted any prefix, so a renamed metric passed as compliant. Measured rather than assumed, because the first version of this reason said these names are already plotted and that is false: searching every .yaml/.yml/.json in the tree, NONE of these three appears -- they are new in #1362 and nothing reads them yet (the sibling BedrockMaxRetriesExceeded is on the Bedrock Retries widget in patterns/unified/template.yaml, and BedrockServiceOutageAlarm keys on BedrockServiceUnavailable/BedrockThrottles/BedrockQuotaLimitErrors). What makes exactness the point is therefore forward-looking: these are the strings an operator will have to point a widget or an alarm at, a rename is invisible to a suffix match, and the per-ladder prefix is what distinguishes which ladder gave up. The judgement is that these three names are the right vocabulary, which is not computable from this tree; whether a name is PLOTTED is computable and is deliberately not asserted, since requiring it would block the first change that introduces a metric. The closure runs in both directions at every gate site: one of these must appear, and a name in neither this set nor EXPECTED_FAILURE_METRICS may not. A reviewer should check that by renaming one metric in client.py and watching the test fail."
     }
   }
 }
