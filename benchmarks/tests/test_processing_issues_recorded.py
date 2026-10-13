@@ -1292,6 +1292,79 @@ def test_the_recorder_reads_the_same_place_the_audit_block_does():
     }
 
 
+def test_the_detail_payloads_are_written_one_line_per_issue(tmp_path):
+    """Why both keys are in ``COMPACT_PAYLOAD_KEYS``, asserted as an EFFECT.
+
+    The detail list carries issues verbatim and nothing bounds how many a document
+    has, so expanded it is the artifact: a busy 130-run grid measures at 24.8 MB and
+    409,533 lines, against an 8.8 MB largest-committed summary and the 130k-line
+    figure that constant's own comment calls a diff nobody reads. Compact is one line
+    per issue — which keeps every issue rather than capping the list, the property
+    this whole change exists for.
+
+    ``test_confidence_calibration.py`` pins the membership of the constant; this pins
+    what membership does for these two keys, which is the half a membership test
+    cannot see.
+    """
+    row = _row(
+        "c",
+        "d.pdf",
+        [
+            _section(
+                _issue("extraction_incomplete"),
+                _issue("assessment_truncated", "error"),
+            )
+        ],
+    )
+    out = tmp_path / "s"
+    aggregate.write_summary({}, [row], str(out))
+    text = (out / "summary.json").read_text()
+
+    # Round-trips exactly: compaction must not be able to change a value.
+    reread = json.loads(text)
+    assert (
+        reread["rows"][0]["processing_issue_detail"] == row["processing_issue_detail"]
+    )
+    assert len(reread["rows"][0]["processing_issue_detail"]) == 2
+
+    lines = text.splitlines()
+    detail = [ln for ln in lines if '"processing_issue_detail": [' in ln]
+    assert detail, "processing_issue_detail is not in the artifact at all"
+    # Each issue on ONE line: no line inside the list holds a bare field name.
+    assert not [ln for ln in lines if ln.strip().startswith('"root_cause":')], (
+        "an issue field is on its own line, so the detail payload is expanded — "
+        "every issue in a grid then costs ~8 lines instead of 1"
+    )
+    assert any('"stage": "extraction"' in ln and '"code":' in ln for ln in lines)
+    # And the cell block likewise.
+    assert [
+        ln
+        for ln in lines
+        if '"processing_issues": {' in ln and ln.rstrip().endswith("}")
+    ]
+
+
+def test_a_pathological_code_cannot_put_document_content_in_the_reason():
+    """The elision bound in the malformed reason, asserted as an effect.
+
+    The reason quotes the offending entry's ``code`` so it can be grepped for, and
+    elides it, because ``code`` is model output and the reason rides into a
+    committed artifact. Measured: widening the bound survived a suite that only ever
+    gave it a short code.
+    """
+    bad = {
+        "code": "x" * 500,
+        "severity": "warning",
+        "message": "m",
+        "root_cause": {"not": "a string"},
+    }
+    out = analyze.score_processing_issues([{"metadata": {"processing_issues": [bad]}}])
+    (why,) = out["processing_issues_malformed_why"]
+    assert out["processing_issues_malformed"] == 1
+    assert "x" * 60 in why, "the code is not quoted at all"
+    assert "x" * 61 not in why, f"the code is not elided: reason is {len(why)} chars"
+
+
 def test_render_tally_is_stable_and_blank_when_empty():
     assert analyze.render_tally({"b": 2, "a": 1}) == "a=1 b=2"
     assert analyze.render_tally({}) is None
