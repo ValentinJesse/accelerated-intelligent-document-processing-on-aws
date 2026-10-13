@@ -201,6 +201,31 @@ class TestTheCascade:
         )
         assert table.query.call_count >= 2, "the adjacent shards were never searched"
 
+    def test_initialeventtime_is_used_when_queuedtime_is_absent(self, rld):
+        """The fallback timestamp, which is the only route for some records.
+
+        Both halves of ``QueuedTime or InitialEventTime`` are live: a record written
+        before the queued time was recorded carries only the latter, and with the
+        fallback gone its list row is unreachable — no shard is computed, no strategy
+        runs, and the cascade returns ``False`` as though there were simply nothing to
+        delete. The shared implementation has this assertion and this copy did not,
+        which is the same asymmetry the adjacent-shard padding had.
+        """
+        table = _table()
+        table.delete_item.side_effect = [{}, {"Attributes": {"x": 1}}]
+        table.query.return_value = {"Items": [_row("fallback")]}
+
+        assert (
+            rld.delete_list_entries_robust(
+                table, KEY, {"InitialEventTime": QUEUED}
+            )
+            is True
+        )
+        assert table.query.called, "no shard was queried, so no timestamp was resolved"
+        assert (
+            table.query.call_args.kwargs["KeyConditionExpression"] is not None
+        )
+
     def test_no_metadata_means_no_strategy_runs(self, rld):
         table = _table()
         assert rld.delete_list_entries_robust(table, KEY, None) is False

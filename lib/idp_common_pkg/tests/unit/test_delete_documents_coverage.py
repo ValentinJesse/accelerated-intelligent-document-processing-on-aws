@@ -912,6 +912,14 @@ class TestDeleteSingleDocument:
         assert any("AccessDenied" in message for message in result["errors"]), (
             f"the refusal did not reach the caller: {result['errors']}"
         )
+        # ⚠️ **Which step failed is part of the answer, not decoration.** The two
+        # failures on this path leave different things behind — a list-entry failure
+        # keeps the tracking record and a purge failure does not — so both documentation
+        # tiers tell the reader to act on *which* step it was. A message that reported
+        # only the cause would make that undecidable.
+        assert any(
+            "from output bucket" in message for message in result["errors"]
+        ), f"the failing step is not identified: {result['errors']}"
 
     def test_a_partly_refused_purge_counts_only_what_went(self):
         """The count has to be what was deleted, not what was attempted.
