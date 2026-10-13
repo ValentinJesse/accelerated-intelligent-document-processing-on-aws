@@ -144,8 +144,25 @@ the top 20 together are ~35s of a 10-minute run: the cost is ~10,000 × per-test
 fixture setup, spread flat, at 62% CPU on 14 cores. It is neither CPU-bound nor
 hostage to a few slow tests. Cutting it further means sharding it across several
 *jobs*, which needs a splitter plugin and a `coverage combine` before
-`make check-coverage-debt` can read a complete report — deliberately not done
+`make check-coverage-debt-cicd` can read a complete report — deliberately not done
 here, since the measured gain over the current shape is ~5 minutes.
+
+⚠️ **The coverage producer costs this job roughly another 16 minutes, and that is
+the price of the gate reading more than one tree.** `make coverage-all-cicd` runs
+before the ratchet in the same job, because the reports pass between the two steps
+through the workspace — splitting them would need artifacts, which is the same
+obstacle as sharding above. Eight trees are measured concurrently and the wall clock
+is **not** their sum: measured at nine trees, four at a time, 979s against roughly 33
+minutes sequential. What it cannot compress is `scripts`, which declares
+`Tree.serial` and takes ~16 minutes as a single process, so that tree alone sets the
+floor on every host and the concurrency's whole job is to hide the other seven behind
+it. `COVERAGE_CICD_JOBS` is the dial, bounded in the script by `cpus // 2`, so a
+4-CPU runner takes 2 at a time rather than obeying the 4 the Makefile asks for.
+
+Read against the alternative rather than against the old number: the step this
+replaces compared **one** of nine trees and exited 0 over the other eight, so the
+~11 minutes it used to cost bought a gate that could not see a loss anywhere outside
+`lib/idp_common_pkg`.
 
 The split's cost, stated plainly: the Python environment is built in four jobs
 instead of one, so the pipeline **burns more runner minutes to finish in less
@@ -190,13 +207,13 @@ required-but-never-reported (a renamed job) or reported-but-not-required (a new
 gate).
 
 GitHub can only require job-level contexts — never individual steps — so the
-mapping from gates to contexts is decided by how the jobs are arranged. Eight of
-the ten shared gates live in `developer-tests.yml` (four jobs) and the other two in
-`security-checks.yml` (two jobs), which is how ten gates produce
+mapping from gates to contexts is decided by how the jobs are arranged. Ten of
+the twelve shared gates live in `developer-tests.yml` (four jobs) and the other two in
+`security-checks.yml` (two jobs), which is how twelve gates produce
 six requireable contexts.
 
 Splitting `developer-tests.yml` into four parallel jobs **improved** this. It used
-to be one job holding eight of the ten shared gates, which collapsed those eight
+to be one job holding ten of the twelve shared gates, which collapsed those ten
 into a single requireable context: they shared one red mark, so a required-check
 failure did not say which of them had failed. They are now four contexts, so a red
 mark names the half of the work that broke.
@@ -210,7 +227,7 @@ names all six for that reason.
 | Check context | Workflow / job | Covers |
 |---|---|---|
 | `Lint, Type Check, and Static Scans` | `developer-tests.yml` / `developer_tests` | `lint-cicd`, `typecheck`, `api-test-static`, first-party dep check, service-role permissions |
-| `Unit Tests (idp_common)` | `developer-tests.yml` / `unit_tests` | `test-cicd -C lib/idp_common_pkg`, `check-coverage-debt` |
+| `Unit Tests (idp_common)` | `developer-tests.yml` / `unit_tests` | `test-cicd -C lib/idp_common_pkg`, `coverage-all-cicd`, `check-coverage-debt-cicd` |
 | `Package and Lambda Test Suites` | `developer-tests.yml` / `package_tests` | `test-packages-cicd` |
 | `UI Unit Tests` | `developer-tests.yml` / `ui_tests` | `npx vitest run` |
 | `SRT Security Review` | `security-checks.yml` / `srt_security_review` | `srt-setup`, `srt-scan` |

@@ -2005,3 +2005,191 @@ class TestRequireAllTreesIsDerivedFromTheRegistry:
                 f"{config} runs them at {positions} for {wanted}; the ratchet must "
                 f"follow both producers or it reads whatever the workspace had."
             )
+
+
+@pytest.mark.unit
+class TestWriteMissingCannotMoveAnExistingFloor:
+    """The bounded remedy, for the one finding that needs exactly one new entry.
+
+    `check_tree` reports a tracked file the report measures and the baseline does not
+    record, and the remedy it prints is `--write` — which re-records the file set of
+    every measured tree wholesale. On a gate whose figures are host-sensitive that is
+    the wrong direction: measured on the `scripts` tree while closing #1256, one file
+    needed recording and `--write` would have raised ten existing floors with it, six
+    past the tolerance and the largest by 18.75 points, pinning CI to a figure this
+    machine produced.
+
+    So the property to hold is narrow and absolute: an existing entry is byte-identical
+    afterwards, whatever the report says about it.
+    """
+
+    def _tree_with(self, monkeypatch, tmp_path, recorded, measured, tracked):
+        tree = _fake_tree(tmp_path)
+        path = _install(
+            monkeypatch,
+            tmp_path,
+            [tree],
+            {"trees": {tree.name: {"total": 50.0, "files": dict(recorded)}}},
+        )
+        _write_tree_report(tree, measured, total=99.0)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: list(tracked))
+        return tree, path
+
+    def test_a_file_the_baseline_lacks_is_added_at_its_measured_figure(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        tree, path = self._tree_with(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0, "new.py": 97.71},
+            tracked=["pkg/old.py", "pkg/new.py"],
+        )
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        out = capsys.readouterr().out
+        files = json.loads(path.read_text())["trees"][tree.name]["files"]
+        assert files["pkg/new.py"] == 97.71, files
+        assert "pkg/new.py at 97.71%" in out, out
+
+    def test_an_existing_entry_is_untouched_even_though_the_report_measures_higher(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The direction that matters. `old.py` is recorded at 40 and measures 95 here;
+        `--write` would pin 95, which is only reachable on a machine like this one."""
+        tree, path = self._tree_with(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0, "new.py": 97.71},
+            tracked=["pkg/old.py", "pkg/new.py"],
+        )
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        capsys.readouterr()
+        recorded = json.loads(path.read_text())["trees"][tree.name]
+        assert recorded["files"]["pkg/old.py"] == 40.0, recorded
+        # And the tree's own total and conditions are not re-derived either: nothing
+        # about what was already recorded is this mode's business.
+        assert recorded["total"] == 50.0, recorded
+
+    def test_it_does_not_lower_an_existing_entry_either(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """A fall is a FINDING, never something a write mode absorbs. If this mode
+        lowered a floor it would be a way to make the ratchet's own report go away."""
+        tree, path = self._tree_with(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 90.0},
+            measured={"old.py": 10.0},
+            tracked=["pkg/old.py"],
+        )
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        capsys.readouterr()
+        files = json.loads(path.read_text())["trees"][tree.name]["files"]
+        assert files["pkg/old.py"] == 90.0, files
+        # The fall is still reported by the ordinary check, which is where it belongs.
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py"])
+        assert ccd.main() == 1
+
+    def test_nothing_missing_is_a_no_op_on_the_recorded_figures_and_idempotent(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The common case once the debt is paid, asserted in the two forms that hold.
+
+        Byte-identity against the *input* is not one of them and must not be asserted:
+        every write regenerates the file's `$comment` envelope and indentation, so a
+        hand-written or older fixture differs in bytes while recording the same figures.
+        What is true is that the recorded figures are unchanged, and that a second run
+        over the gate's own output is byte-for-byte identical — which is the property a
+        reviewer relies on, since it is what keeps a no-op from producing a diff.
+        """
+        tree, path = self._tree_with(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0},
+            tracked=["pkg/old.py"],
+        )
+        before = json.loads(path.read_text())["trees"]
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        assert "nothing missing" in capsys.readouterr().out
+        assert json.loads(path.read_text())["trees"] == before
+        first = path.read_bytes()
+        assert ccd.main() == 0
+        capsys.readouterr()
+        assert path.read_bytes() == first, "a second run produced a diff"
+
+    def test_it_refuses_an_errored_report_exactly_as_write_does(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The narrower mode must not be the loophole in the trust check. A run whose
+        workers errored measures files it never executed, so a file "missing from the
+        baseline" in such a report may simply be one whose tests did not run."""
+        tree, path = self._tree_with(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0, "new.py": 97.0},
+            tracked=["pkg/old.py", "pkg/new.py"],
+        )
+        report = ccd.report_path(tree)
+        ccd.run_record_path(report).write_text(ERRORED_RUN_RECORD, encoding="utf-8")
+        os.utime(ccd.run_record_path(report), (report.stat().st_mtime,) * 2)
+        before = path.read_bytes()
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 2
+        out = capsys.readouterr().out
+        assert path.read_bytes() == before, "it wrote despite refusing"
+        # And the refusal is the EXPLICIT one, naming the unfinished run. Two branches
+        # independently stop a bad report being recorded, so dropping the first still
+        # writes nothing and still exits 2 — it just reports the tree as "leaving its
+        # baseline untouched", which reads as an absent report rather than a refused
+        # one. The remedy differs (produce a report / re-run the suite), so the wording
+        # is the part worth pinning here; the safety is doubly held either way.
+        assert "recorded nothing" in out and "did not finish" in out, out
+        assert "leaving its baseline untouched" not in out, out
+
+    def test_passing_both_write_modes_is_refused(self, monkeypatch, tmp_path, capsys):
+        """One re-records every file of every measured tree, the other cannot change a
+        single existing figure. There is no reading of both that narrows either."""
+        _install(monkeypatch, tmp_path, [_fake_tree(tmp_path)], {"trees": {}})
+        monkeypatch.setattr(
+            sys, "argv", ["check_coverage_debt.py", "--write", "--write-missing"]
+        )
+        assert ccd.main() == 2
+        assert "Pick one" in capsys.readouterr().out
+
+    def test_it_is_refused_alongside_a_required_tree(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Same reason `--write` is: neither mode compares anything, so a precondition
+        passed with it is one nothing will evaluate."""
+        _install(monkeypatch, tmp_path, [_fake_tree(tmp_path)], {"trees": {}})
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["check_coverage_debt.py", "--write-missing", "--require-all-trees"],
+        )
+        assert ccd.main() == 2
+        assert "--require-all-trees" in capsys.readouterr().out
+
+    def test_a_tree_with_no_baseline_at_all_is_recorded_in_full(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """There is nothing to preserve, so the ordinary full record is both correct and
+        the only thing available — and recording nothing would leave the tree with no
+        baseline, which `check` reports as unratcheted."""
+        tree = _fake_tree(tmp_path)
+        path = _install(monkeypatch, tmp_path, [tree], {"trees": {}})
+        _write_tree_report(tree, {"mod.py": 88.0}, total=88.0)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        capsys.readouterr()
+        recorded = json.loads(path.read_text())["trees"][tree.name]
+        assert recorded["files"] == {"pkg/mod.py": 88.0}
+        assert recorded["total"] == 88.0

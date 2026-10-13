@@ -797,7 +797,7 @@ def check(required: tuple[str, ...] = ()) -> CheckResult:
     return CheckResult(code, problems + refusals, unchecked, checked)
 
 
-def write_baseline() -> int:
+def write_baseline(missing_only: bool = False) -> int:
     """Re-record baselines from the reports that a finished run produced.
 
     Refuses outright — writing nothing — if any report came from a run that did not
@@ -807,6 +807,23 @@ def write_baseline() -> int:
     failure message offers this command as one of two remedies. Skipping the bad tree and
     recording the rest would still leave the operator believing the baseline was
     refreshed; the remedy for an unfinished run is to run it again.
+
+    ⚠️ **``missing_only`` exists because the remedy this gate prints is otherwise wider
+    than the finding it reports.** Of the problems `check_tree` raises, one — a tracked
+    file the report measures and the baseline does not record — is fixed by adding a
+    single entry. The remedy printed for it is `--write`, which re-records the file set
+    of **every** measured tree wholesale, so the narrowest available response to one new
+    module is to accept this machine's figure for every other file in its tree. That is
+    the wrong direction on a gate whose figures are host-sensitive: a baseline recorded
+    on a more capable machine is a floor the gate's own environment cannot reach, which
+    is what `conditions` was added for. Measured on the `scripts` tree while closing
+    #1256: one file needed recording, and `--write` would have raised ten existing floors
+    with it, six past the tolerance and the largest by 18.75 points.
+
+    So ``missing_only`` adds only entries the baseline **lacks**, and by construction
+    cannot raise or lower an existing floor — asserted below rather than left to the
+    reader, because "it only adds" is exactly the kind of claim that is true of the code
+    as written and false after one edit.
     """
     trees: dict[str, dict] = {}
     measured_trees: list[str] = []
@@ -833,6 +850,27 @@ def write_baseline() -> int:
             for path, rate in sorted(measured.items())
             if path in tracked and not any(path.startswith(k) for k in NOT_MEASURED)
         }
+        if missing_only:
+            existing = recorded_now.get(tree.name)
+            if existing:
+                kept = dict(existing.get("files", {}))
+                added = {p: r for p, r in files.items() if p not in kept}
+                # The whole claim of this mode, checked rather than asserted in prose.
+                assert all(kept[p] == existing["files"][p] for p in kept), tree.name
+                merged = {**kept, **added}
+                trees[tree.name] = {**existing, "files": dict(sorted(merged.items()))}
+                if added:
+                    print(
+                        f"  + {tree.name}: {len(added)} new entr(y/ies) "
+                        + ", ".join(
+                            f"{p} at {r:.2f}%" for p, r in sorted(added.items())
+                        )
+                    )
+                else:
+                    print(f"  = {tree.name}: nothing missing, left exactly as recorded")
+                continue
+            # A tree with no baseline at all has nothing to preserve, so the ordinary
+            # full record is both correct and the only thing available.
         trees[tree.name] = {
             "total": report_total(report),
             # The conditions this figure was measured under, so a later comparison can
@@ -941,6 +979,15 @@ def main() -> int:
         help="Re-record baselines from whatever reports exist, instead of checking",
     )
     parser.add_argument(
+        "--write-missing",
+        action="store_true",
+        help=(
+            "Like --write, but ONLY adds entries the baseline lacks: it cannot raise or "
+            "lower an existing floor. The bounded remedy for the one finding that needs "
+            "one new entry, where --write would re-record the whole tree"
+        ),
+    )
+    parser.add_argument(
         "--summary", action="store_true", help="Print each tree's recorded figure"
     )
     parser.add_argument(
@@ -984,7 +1031,7 @@ def main() -> int:
             f"{', '.join(unknown)}. Known trees: {', '.join(t.name for t in TREES)}"
         )
         return 2
-    if args.require_tree and (args.summary or args.write):
+    if args.require_tree and (args.summary or args.write or args.write_missing):
         # Refused rather than ignored. Neither of those modes compares anything, so a
         # caller passing both has asserted a precondition that nothing will evaluate --
         # and an ignored assertion is the exact shape of the defect this flag exists for.
@@ -1012,8 +1059,17 @@ def main() -> int:
             )
         return 0
 
-    if args.write:
-        return write_baseline()
+    if args.write and args.write_missing:
+        # Refused rather than resolved in either direction: one re-records every file of
+        # every measured tree and the other cannot change a single existing figure, so
+        # there is no reading of both that is a narrowing of one of them.
+        print(
+            "🚫 --write re-records every measured tree wholesale and --write-missing "
+            "adds only what is absent. Pick one."
+        )
+        return 2
+    if args.write or args.write_missing:
+        return write_baseline(missing_only=args.write_missing)
 
     result = check(tuple(args.require_tree))
     code, problems, unchecked = result.code, result.problems, result.unchecked
