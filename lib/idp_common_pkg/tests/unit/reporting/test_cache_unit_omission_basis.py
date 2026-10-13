@@ -804,6 +804,60 @@ def test_an_unregistered_bedrock_entry_omitting_a_cache_unit_is_reported(unit: s
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("unit", "expected_register"),
+    [
+        ("cacheReadInputTokens", "EXPECTED_CACHE_UNIT_OMISSIONS"),
+        ("cacheWriteInputTokens", "EXPECTED_CACHE_UNIT_OMISSIONS"),
+        ("reasoningTokens", "NON_CHARGEABLE_METERING_UNITS"),
+    ],
+)
+def test_the_unpriced_warning_names_the_register_that_governs_the_unit(
+    unit: str, expected_register: str, caplog
+):
+    """The remedy an operator reads, asserted — not just the NULL they query.
+
+    This one is worth a test of its own because of how it failed. Both
+    implementations named ``NON_CHARGEABLE_METERING_UNITS`` for every unpriced
+    unit, so an operator following the message literally for a **cache** unit was
+    told to declare it free for the whole ``bedrock`` service — re-creating the
+    construct #1206 exists to remove, and silencing the warning by making it true
+    for ten other models at the same time. Nothing caught that: three mutations
+    putting the wrong register back in the message, and a fourth emptying
+    ``CACHE_UNITS`` so both degrade, all left the suite green.
+
+    The non-cache row is the control. Without it this would pass for an
+    implementation that names the cache register unconditionally, which is the
+    same defect pointing the other way.
+    """
+    import logging
+
+    from idp_common.reporting.save_reporting_data import SaveReportingData
+
+    key = "bedrock/vendor.unregistered-model-v1:0"
+    reporter = SaveReportingData("test-bucket")
+    reporter._pricing_cache = {key: {"inputTokens": 1e-6, "outputTokens": 5e-6}}
+
+    with caplog.at_level(logging.WARNING):
+        assert reporter._get_unit_cost(key, unit, 1_000_000) is None
+    message = caplog.text
+    assert expected_register in message, (
+        f"the warning for an unpriced {unit!r} does not name "
+        f"{expected_register}, so an operator is sent to the wrong declaration. "
+        f"Message: {message!r}"
+    )
+    other = (
+        "NON_CHARGEABLE_METERING_UNITS"
+        if expected_register == "EXPECTED_CACHE_UNIT_OMISSIONS"
+        else "EXPECTED_CACHE_UNIT_OMISSIONS"
+    )
+    assert other not in message, (
+        f"the warning for an unpriced {unit!r} names {other} as well, which is "
+        "the register that does NOT govern this unit"
+    )
+
+
+@pytest.mark.unit
 def test_the_product_cost_implementation_reports_an_unregistered_omission():
     """The rule asserted through its caller, not by reading that it calls it.
 

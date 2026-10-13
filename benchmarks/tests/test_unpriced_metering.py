@@ -640,6 +640,46 @@ class TestAnUndeclaredUnitIsReportedRatherThanPricedAtZero:
                 read_metering({f"Extraction/{REAL_MODEL}": {unit: 5000}})
             ).complete
 
+    def test_the_unpriced_reason_names_the_register_that_governs_the_unit(
+        self, read_metering, monkeypatch
+    ):
+        """The harness half of the same check — the text, not just the verdict.
+
+        Both implementations used to name ``NON_CHARGEABLE_METERING_UNITS`` for
+        every unpriced unit, including the two cache ones, which told the reader
+        to declare a cache unit free for the whole ``bedrock`` service — the
+        construct #1206 removes. The non-cache row is the control: without it this
+        would pass for an implementation that names the cache register
+        unconditionally.
+        """
+        key = "bedrock/vendor.unregistered-model-v1:0"
+        monkeypatch.setitem(
+            lib.PRICING, key, {"inputTokens": 1e-6, "outputTokens": 5e-6}
+        )
+        cases = {
+            "cacheReadInputTokens": "EXPECTED_CACHE_UNIT_OMISSIONS",
+            "cacheWriteInputTokens": "EXPECTED_CACHE_UNIT_OMISSIONS",
+            "reasoningTokens": "NON_CHARGEABLE_METERING_UNITS",
+        }
+        for unit, expected in cases.items():
+            priced = lib.price_metering(
+                read_metering({f"Extraction/{key}": {unit: 5000}})
+            )
+            assert not priced.complete
+            assert expected in priced.why, (
+                f"the unpriced reason for {unit!r} does not name {expected}: "
+                f"{priced.why!r}"
+            )
+            other = (
+                "NON_CHARGEABLE_METERING_UNITS"
+                if expected == "EXPECTED_CACHE_UNIT_OMISSIONS"
+                else "EXPECTED_CACHE_UNIT_OMISSIONS"
+            )
+            assert other not in priced.why, (
+                f"the unpriced reason for {unit!r} names {other}, the register "
+                "that does not govern this unit"
+            )
+
     def test_a_zero_count_of_an_undeclared_unit_is_not_reported(self, read_metering):
         """Arithmetic: 0 x any rate is 0, so there is no spend to hide.
 
