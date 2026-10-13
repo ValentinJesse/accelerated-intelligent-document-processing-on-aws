@@ -267,8 +267,23 @@ unit_tests:
     - arch:arm64
 
   before_script:
-    # No Node: nothing in this job needs it.
     - *python_setup
+    # ⚠️ Node and the pinned cfn-lint are load-bearing here, and neither is visible
+    # from any line in the `script:` block. This job needed neither until the coverage
+    # producer below started re-running the `scripts` and `idp_sdk` suites in order to
+    # measure them, which drags their toolchain requirements into this job wholesale:
+    # `scripts/tests/test_ux_recorder.py` runs the recorder's cursor-overlay
+    # JavaScript under node and FAILS rather than skipping without it, and
+    # `scripts/tests/test_pyright_config.py` runs basedpyright live. `package_tests`
+    # carries the same two for the same two reasons. Read the suites, not the script
+    # block.
+    - *node_setup
+    - npm install -g basedpyright
+    # PINNING, not availability — same reasoning as on `package_tests`: cfn-lint
+    # arrives transitively via moto either way, and what the cfn-lint-gated
+    # assertions in `lib/idp_sdk/tests/unit/` would otherwise run against is whatever
+    # that open range resolves to. Keep in step with CFN_LINT_VERSION.
+    - pip install 'cfn-lint==1.51.0'
 
   script:
     # SKIP_INSTALL=1: idp_common[test] already installed via uv above (avoids a
@@ -279,11 +294,21 @@ unit_tests:
     # on the command line twice, which pytest answers by collecting NOTHING and
     # exiting 5 -- loud rather than silent, but a broken job either way.
     - make test-cicd -C lib/idp_common_pkg SKIP_INSTALL=1
+    # The line above writes ONE of the ratchet's nine trees. Without the next step the
+    # other eight resolve to no report at all, so the ratchet named them as
+    # "not checked" and exited 0 — advisory-but-passing over exactly the trees where
+    # coverage had actually been lost, including this repository's own hook guards
+    # (issue #1256). Trees are measured concurrently and `idp_common` is skipped
+    # because the line above already produced its report; the ratchet below still
+    # requires it by name.
+    - make coverage-all-cicd
     # Ratchet per-file coverage against scripts/coverage_debt.json. Must follow the
-    # line above: it reads the coverage report that step writes. This ordering is
-    # also why the two steps could not be split into separate JOBS without passing
-    # the report between them as an artifact.
-    - make check-coverage-debt
+    # two lines above: it reads the coverage reports those steps write, which is also
+    # why none of the three could be split into separate JOBS without passing the
+    # reports between them as artifacts. `--require-all-trees` (inside the -cicd
+    # target) is what makes a tree with no report red BY NAME instead of named and
+    # passed.
+    - make check-coverage-debt-cicd
 
   # COVERAGE IS REPORTED, NOT ENFORCED. There is deliberately no `coverage:`
   # minimum here, for the same reason GitHub's report sets fail_below_min: false:

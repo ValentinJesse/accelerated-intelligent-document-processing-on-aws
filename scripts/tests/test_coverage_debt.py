@@ -1684,3 +1684,324 @@ class TestMeasurementConditions:
             assert 0 <= conditions["skipped"] <= conditions["collected"], (
                 f"{name}: skipped {conditions['skipped']} of {conditions['collected']}"
             )
+
+
+@pytest.mark.unit
+class TestRequireAllTreesIsDerivedFromTheRegistry:
+    """`--require-all-trees` must turn an unmeasured tree into a REFUSAL (#1256).
+
+    ⚠️ **Asserting a non-zero exit does not prove this, and that is the whole
+    difficulty.** `check()` computes ``2 if refusals else (1 if problems else 0)``:
+    `unchecked` appears in **neither** term, so a tree with no report contributes
+    nothing at all to the exit code. A case built from one tree therefore exits 2 with
+    the flag *and* without it — with it because the required tree was not checked,
+    without it because *no* tree was checked, which is a different refusal reached by a
+    different line. A proof reading only the status passes on that, and would keep
+    passing with the flag deleted. #1190 was exactly that shape of vacuity in this
+    gate, so the method here is the one that found it.
+
+    Every case runs **twice over the same fixture** — once through
+    `--require-all-trees`, once bare — and is classified by the refusal **wording**,
+    which only the per-name loop appending to `refusals` can emit. The bare column is
+    the control: it must exit 0 with that wording absent, which is what makes
+    "Unchecked" and "refused" distinguishable rather than inferred.
+
+    Each fixture therefore carries a **healthy** tree alongside the unmeasured one.
+    Without it the bare run refuses on "no tree was checked" and the two columns
+    collapse into the same answer again.
+    """
+
+    #: The sentence only the `for name in required:` loop in `check()` produces. Nothing
+    #: on the `unchecked` path can print it, which is what makes it a classifier.
+    REFUSAL = "was passed, but this tree was not checked"
+
+    def _both_ways(self, monkeypatch, tmp_path, capsys, build):
+        """Run `main()` over one fixture with the flag and without. Returns both.
+
+        `build` is called once per run against a freshly installed registry, so the two
+        runs see identical inputs — a fixture built once and compared twice would let a
+        first run's side effect (a report written, a baseline rewritten) explain the
+        difference instead of the flag.
+        """
+        results = {}
+        for label, argv in (
+            ("flag", ["check_coverage_debt.py", "--require-all-trees"]),
+            ("bare", ["check_coverage_debt.py"]),
+        ):
+            root = tmp_path / label
+            root.mkdir()
+            build(root)
+            monkeypatch.setattr(sys, "argv", argv)
+            code = ccd.main()
+            results[label] = (code, capsys.readouterr().out)
+        return results
+
+    def _healthy_plus(self, root, monkeypatch, extra, baseline_extra=None):
+        """A tree that WILL compare clean, plus `extra` trees that will not."""
+        healthy = _fake_tree(root, "healthy")
+        trees = [healthy, *extra]
+        baseline = {
+            "trees": {
+                "healthy": {"total": 90.0, "files": {"pkg/mod.py": 90.0}},
+                **(baseline_extra or {}),
+            }
+        }
+        _install(monkeypatch, root, trees, baseline)
+        monkeypatch.setattr(
+            ccd,
+            "tracked_source_files",
+            lambda t: ["pkg/mod.py"] if t.name == "healthy" else [],
+        )
+        _write_tree_report(healthy, {"mod.py": 90.0})
+        return trees
+
+    def test_a_tree_whose_report_is_MISSING_is_refused_by_name_and_not_bare(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Case 1. The ordinary CI failure: a producer step that did not run.
+
+        The control column is the assertion that matters — bare exits **0** over the
+        same inputs, naming `absent` as unchecked and passing, which is precisely the
+        state that left eight of nine trees unratcheted.
+        """
+
+        def build(root):
+            self._healthy_plus(
+                root,
+                monkeypatch,
+                [_fake_tree(root, "absent")],
+                {"absent": {"total": 70.0, "files": {"pkg/mod.py": 70.0}}},
+            )
+            # Deliberately no report for `absent`.
+
+        got = self._both_ways(monkeypatch, tmp_path, capsys, build)
+
+        flag_code, flag_out = got["flag"]
+        bare_code, bare_out = got["bare"]
+        assert flag_code == 2, f"flag run exited {flag_code}:\n{flag_out}"
+        assert self.REFUSAL in flag_out and "[absent]" in flag_out, flag_out
+        assert "no coverage report at" in flag_out, flag_out
+        # The control. Classified by wording, not by status: bare must reach a PASS over
+        # the identical fixture, so the difference is attributable to the flag alone.
+        assert bare_code == 0, (
+            f"the control run exited {bare_code}, so this fixture fails for a reason "
+            f"other than the flag and the case proves nothing:\n{bare_out}"
+        )
+        assert self.REFUSAL not in bare_out, bare_out
+        assert "not checked" in bare_out and "✅" in bare_out, bare_out
+
+    def test_a_tree_whose_report_is_EMPTY_is_refused_by_name_and_not_bare(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Case 2, and the one a reader is likeliest to misjudge: the file is there.
+
+        A zero-byte `coverage.xml` is what a producer leaves behind when it is killed
+        mid-write, and it is worse than an absent one because the remedy a reader
+        reaches for is "the report exists, so the gate must have compared it". The
+        report resolves, nothing parses, and the tree still reaches no verdict — so the
+        flag has to refuse it by name exactly as it refuses an absent one.
+        """
+
+        def build(root):
+            trees = self._healthy_plus(
+                root,
+                monkeypatch,
+                [_fake_tree(root, "empty")],
+                {"empty": {"total": 70.0, "files": {"pkg/mod.py": 70.0}}},
+            )
+            report = ccd.report_path(trees[1])
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("", encoding="utf-8")
+            # A run record beside it, so the refusal cannot be the trust check firing on
+            # a missing record instead of on the empty report itself.
+            _write_run_record(report)
+
+        got = self._both_ways(monkeypatch, tmp_path, capsys, build)
+
+        flag_code, flag_out = got["flag"]
+        bare_code, bare_out = got["bare"]
+        assert flag_code == 2, f"flag run exited {flag_code}:\n{flag_out}"
+        assert self.REFUSAL in flag_out and "[empty]" in flag_out, flag_out
+        assert bare_code == 0, (
+            f"the control run exited {bare_code}, so this fixture fails for a reason "
+            f"other than the flag and the case proves nothing:\n{bare_out}"
+        )
+        assert self.REFUSAL not in bare_out, bare_out
+        assert "✅" in bare_out, bare_out
+
+    def test_a_tree_ADDED_TO_THE_REGISTRY_is_required_without_any_caller_edit(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Case 3, and the reason the derivation is inside the script.
+
+        The tree is **invented by this test** and named nothing like the nine real ones,
+        so the requirement cannot be satisfied by a list of today's names in a Makefile,
+        a CI config or this module. If the derivation stopped reading `TREES`, a tree
+        added to the registry and produced by nobody would be unratcheted while the gate
+        reported that every tree was required — which is the defect one layer up from
+        the one #1256 is about.
+        """
+
+        def build(root):
+            self._healthy_plus(
+                root,
+                monkeypatch,
+                [_fake_tree(root, "a_tree_invented_by_this_test")],
+                # No baseline entry either: a brand-new tree has none, which is the real
+                # arrival shape. Its report is also absent.
+            )
+
+        got = self._both_ways(monkeypatch, tmp_path, capsys, build)
+
+        flag_code, flag_out = got["flag"]
+        bare_code, bare_out = got["bare"]
+        assert flag_code == 2, f"flag run exited {flag_code}:\n{flag_out}"
+        assert self.REFUSAL in flag_out, flag_out
+        assert "[a_tree_invented_by_this_test]" in flag_out, flag_out
+        assert bare_code == 0, (
+            f"the control run exited {bare_code}, so this fixture fails for a reason "
+            f"other than the flag and the case proves nothing:\n{bare_out}"
+        )
+        assert self.REFUSAL not in bare_out, bare_out
+
+    def test_the_required_set_is_every_registry_tree_and_nothing_else(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The derivation's extent, over the REAL registry rather than a fixture.
+
+        Equality in both directions. A derivation that required a superset would refuse
+        on a name no producer could ever satisfy; one that required a subset is the
+        #1256 gap with a flag on top. Read off the refusals, which name one tree each,
+        so this is the gate's own answer rather than a re-derivation of it.
+        """
+        trees = [_fake_tree(tmp_path, t.name) for t in ccd.TREES]
+        _install(monkeypatch, tmp_path, trees, {"trees": {}})
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: [])
+        monkeypatch.setattr(
+            sys, "argv", ["check_coverage_debt.py", "--require-all-trees"]
+        )
+        assert ccd.main() == 2
+        out = capsys.readouterr().out
+        refused = {
+            line.split("]")[0].lstrip(" -[")
+            for line in out.splitlines()
+            if self.REFUSAL in line
+        }
+        assert refused == {t.name for t in ccd.TREES}, (
+            f"the flag required {sorted(refused)} but the registry holds "
+            f"{sorted(t.name for t in ccd.TREES)}"
+        )
+
+    def test_it_is_refused_alongside_write_or_summary_naming_the_flag_given(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Neither mode compares anything, so the precondition would go unevaluated.
+
+        The message has to name `--require-all-trees`, because that is the flag on the
+        command line: `--require-tree` is only what it expands into internally, and a
+        refusal citing a flag the caller did not pass sends them looking for it.
+        """
+        _install(monkeypatch, tmp_path, [_fake_tree(tmp_path)], {"trees": {}})
+        for other in ("--write", "--summary"):
+            monkeypatch.setattr(
+                sys, "argv", ["check_coverage_debt.py", "--require-all-trees", other]
+            )
+            assert ccd.main() == 2
+            out = capsys.readouterr().out
+            assert "--require-all-trees" in out, out
+            assert "--require-tree asserts" not in out, out
+
+    def test_the_cicd_ratchet_target_is_the_only_one_passing_the_flag(self):
+        """Both CIs must reach the flag through a target, and the local one must not.
+
+        `check-coverage-debt` with no arguments is correct for a developer who measured
+        one tree, and is the exact invocation that passed over eight unmeasured ones in
+        CI. The two spellings therefore have to stay distinct targets.
+        """
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        recipes = {}
+        for block in makefile.split("\n"):
+            if block.startswith(("check-coverage-debt:", "check-coverage-debt-cicd:")):
+                recipes[block.split(":")[0]] = True
+        assert set(recipes) == {"check-coverage-debt", "check-coverage-debt-cicd"}, (
+            f"expected both targets, found {sorted(recipes)}"
+        )
+        cicd = makefile.split("\ncheck-coverage-debt-cicd:")[1].split("\n\n")[0]
+        local = makefile.split("\ncheck-coverage-debt:")[1].split("\n\n")[0]
+        assert "--require-all-trees" in cicd, cicd
+        assert "--require-all-trees" not in local, local
+
+    def test_the_cicd_producer_skips_exactly_the_tree_CI_already_measured(self):
+        """Pins `COVERAGE_CICD_SKIP`'s membership, and that the recipe still runs.
+
+        Two separate things, because the registry entry for that variable rests on both
+        and neither follows from the other: a second name added to it would narrow the
+        producer silently, and a recipe emptied of its command would leave the variable
+        looking correct while nothing was produced at all.
+        """
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        assigned = next(
+            line.split("?=", 1)[1].strip()
+            for line in makefile.splitlines()
+            if line.startswith("COVERAGE_CICD_SKIP")
+        )
+        assert assigned == "--skip idp_common", (
+            f"COVERAGE_CICD_SKIP is {assigned!r}. Every name in it is a tree the "
+            f"producer does not measure; only `idp_common` has an earlier CI step "
+            f"writing its report."
+        )
+        recipe = makefile.split("\ncoverage-all-cicd:")[1].split("\n\n")[0]
+        assert "scripts/coverage_all.py" in recipe, recipe
+        assert "$(COVERAGE_CICD_SKIP)" in recipe, recipe
+        assert "--jobs" in recipe, recipe
+
+    @pytest.mark.parametrize(
+        "config", [".gitlab-ci.yml", ".github/workflows/developer-tests.yml"]
+    )
+    def test_each_config_runs_the_producer_then_the_cicd_ratchet_in_ONE_job(
+        self, config
+    ):
+        """Same job and in order, parsed rather than grepped for position.
+
+        Two GitLab jobs in one stage run in **parallel**, so file position proves no
+        ordering; and the reports pass between these steps through the workspace, so
+        splitting them across jobs would need artifacts. Both facts make "one job, in
+        this order" the property to assert.
+        """
+        data = yaml.safe_load((REPO_ROOT / config).read_text(encoding="utf-8"))
+        wanted = [
+            "make test-cicd -C lib/idp_common_pkg",
+            "make coverage-all-cicd",
+            "make check-coverage-debt-cicd",
+        ]
+
+        def command_lists(node):
+            if isinstance(node, dict):
+                steps = node.get("steps")
+                if isinstance(steps, list):  # a GitHub job
+                    yield [str(s.get("run", "")) for s in steps if isinstance(s, dict)]
+                script = node.get("script")
+                if isinstance(script, list):  # a GitLab job
+                    yield [str(line) for line in script]
+                for value in node.values():
+                    yield from command_lists(value)
+
+        holding_all = [
+            commands
+            for commands in command_lists(data)
+            if all(any(w in c for c in commands) for w in wanted)
+        ]
+        assert holding_all, (
+            f"{config} has no single job running all of {wanted}. Either a step is "
+            f"gone, or they are now in separate jobs — where nothing orders the "
+            f"ratchet after the runs that write the reports it reads, and the reports "
+            f"would have to be passed between them as artifacts."
+        )
+        for commands in holding_all:
+            positions = [
+                next(i for i, c in enumerate(commands) if w in c) for w in wanted
+            ]
+            assert positions == sorted(positions), (
+                f"{config} runs them at {positions} for {wanted}; the ratchet must "
+                f"follow both producers or it reads whatever the workspace had."
+            )

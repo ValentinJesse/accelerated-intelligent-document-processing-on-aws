@@ -73,6 +73,15 @@ rather than a pass:
   further for a caller that knows which tree it just measured: it fails **by name** if
   that tree was not checked, which is stronger than "something was checked" once more
   than one tree can have a report. Issue #1190.
+
+  ⚠️ **"Something was checked" is what both CI configurations settled for, and it is
+  how eight of the nine trees stayed unratcheted.** The only report either CI produced
+  was `lib/idp_common_pkg`'s, so this gate compared one tree, named the other eight as
+  unchecked, and exited 0 — a job log in which a complete run and a one-ninth run look
+  the same. `--require-all-trees` is the CI spelling: it requires **every** tree in
+  :data:`TREES`, and the list is derived from the registry here rather than enumerated
+  by a caller, so a tree added to `TREES` is required without any Makefile or CI config
+  being edited. Issue #1256.
 * **A report whose run did not finish cleanly.** A partially failed pytest still writes
   a `coverage.xml`, and a run where some xdist workers errored writes one showing large,
   uniform-looking falls across unrelated files — the tests that would have covered them
@@ -475,7 +484,26 @@ def run_trust(report: Path) -> RunTrust:
     both CI configurations invoke this gate as a **separate step** from the run — which is
     the gap issue #1190 is about — and the coverage report's own internal consistency
     cannot tell a genuinely low figure from a fabricated one.
+
+    ⚠️ It also answers the cruder question of whether the **report** can be read at all,
+    and that belongs here rather than at the two call sites because both of them already
+    handle ``unverified`` correctly and neither handled an exception: `check` put the
+    traceback in front of a reader instead of a named refusal, and `--write` died partway
+    through regenerating the baseline. A zero-byte `coverage.xml` is the live shape — what
+    a producer leaves behind when it is killed mid-write, or when the disk filled — and it
+    is the more misleading one than an absent file, because a reader who sees the report
+    sitting there concludes the gate compared it. Treated as unmeasured, exactly like a
+    record that cannot be read, so `--require-all-trees` names the tree and the run
+    reaches no verdict for it.
     """
+    try:
+        ET.parse(report)
+    except (ET.ParseError, OSError) as exc:
+        return RunTrust(
+            "unverified",
+            f"{report.name} cannot be read as a coverage report ({exc}), so it measures "
+            f"nothing — a producer killed mid-write leaves exactly this",
+        )
     record = run_record_path(report)
     if not record.is_file():
         return RunTrust(
@@ -926,7 +954,26 @@ def main() -> int:
             "saying only that nothing was checked."
         ),
     )
+    parser.add_argument(
+        "--require-all-trees",
+        action="store_true",
+        help=(
+            "Fail unless EVERY tree in the registry was checked. What both CI "
+            "configurations pass, now that they produce a report per tree"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.require_all_trees:
+        # Derived from the registry, never enumerated by the caller. A Makefile or CI
+        # config listing the nine names would be a second copy of TREES, and the copy
+        # that goes stale is the one deciding what this gate is allowed to skip -- so a
+        # tree added to the registry and forgotten there would be unratcheted while the
+        # gate reported that every tree was required. Issue #1256.
+        args.require_tree = [
+            *args.require_tree,
+            *(t.name for t in TREES if t.name not in set(args.require_tree)),
+        ]
 
     unknown = [n for n in args.require_tree if n not in TREES_BY_NAME]
     if unknown:
@@ -941,8 +988,12 @@ def main() -> int:
         # Refused rather than ignored. Neither of those modes compares anything, so a
         # caller passing both has asserted a precondition that nothing will evaluate --
         # and an ignored assertion is the exact shape of the defect this flag exists for.
+        # Named by the spelling the caller actually used: `--require-all-trees` expands
+        # into `require_tree` above, so a message naming only the latter would cite a
+        # flag that is not on the command line.
+        flag = "--require-all-trees" if args.require_all_trees else "--require-tree"
         print(
-            "🚫 --require-tree asserts that a tree was CHECKED, which neither --summary "
+            f"🚫 {flag} asserts that a tree was CHECKED, which neither --summary "
             "nor --write does. Drop one of them."
         )
         return 2
