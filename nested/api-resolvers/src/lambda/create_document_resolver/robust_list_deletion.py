@@ -103,13 +103,15 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     in the sort key as ``ts#<timestamp>#id#<object_key>``, which is the only route to a
     row whose ``ObjectKey`` attribute was never written.
 
-    ⚠️ **The sort-key arm anchors at the END, and a substring test is wrong here because
-    this feeds a delete.** The object key is the terminal segment, so
-    ``f"#id#{object_key}" in sort_key`` also matched a *different* document whose key
-    merely starts with this one — ``invoices/report.pdf`` selected the rows for
-    ``invoices/report.pdf.bak`` and ``invoices/report.pdf (1).pdf``. Every row this
-    returns is deleted by key, so the sibling would vanish from the document list while
-    its tracking record survived.
+    ⚠️ **The sort-key arm parses the key out and compares it whole; every looser test is
+    wrong here because this feeds a delete.** A substring test matched a *different*
+    document whose key merely starts with this one — ``invoices/report.pdf`` selected
+    the rows for ``invoices/report.pdf.bak`` and ``invoices/report.pdf (1).pdf``;
+    anchoring at the end still matched one whose own key *contains* ``#id#`` and ends
+    with the target, which ``#`` being legal in an S3 key makes reachable by upload.
+    Every row this returns is deleted by key, so the sibling would vanish from the
+    document list while its tracking record survived. Splitting on the FIRST ``#id#``
+    is what this repository's own reader of the same sort key does.
 
     ⚠️ **This is a client-side predicate, and it has to be: the sort-key half cannot be
     a ``FilterExpression``.** DynamoDB refuses a key attribute in a ``Query`` filter —
@@ -128,7 +130,9 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     if entry.get('ObjectKey') == object_key:
         return True
     sort_key = entry.get('SK')
-    return isinstance(sort_key, str) and sort_key.endswith(f"#id#{object_key}")
+    if not isinstance(sort_key, str) or '#id#' not in sort_key:
+        return False
+    return sort_key.split('#id#', 1)[1] == object_key
 
 
 def query_shard_for_object_key(tracking_table, list_pk: str, object_key: str) -> List[Dict[str, Any]]:

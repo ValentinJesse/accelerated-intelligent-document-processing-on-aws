@@ -182,11 +182,16 @@ rest of the cleanup after one fault leaves more behind than it removes.
 failed.** Every strategy for finding the list-index row is reached through that record's
 queued timestamp, so deleting it after a failed cleanup leaves the orphaned row
 unreachable — and the retry the reported failure asks for then finds no metadata, runs no
-strategy, and reports success with the row still listed. Note the bound: **only** a
-list-entry failure holds the record back. An S3 purge failure does not, so that case
-delists the document while leaving objects in the bucket, and a retry through the same
-API has nothing left to find — which is why the purge accumulates its per-key refusals
-across every batch and reports after the last one, rather than stopping at the first.
+strategy, and reports success with the row still listed.
+
+Note the bound: **only** a list-entry failure holds the record back. An S3 failure —
+either bucket — does not, so those cases delist the document while leaving objects
+behind. Calling `delete_single_document` again on the same key still completes the purge,
+because it re-lists the prefix and the surviving versions are found; what is gone is the
+route *from the web UI*, which has no row left to select. That asymmetry is why the purge
+accumulates its per-key refusals across every batch and reports after the last one rather
+than stopping at the first: a delete that reports a failure should not also have reclaimed
+less than one that said nothing.
 
 **A fault must not come back as a value a caller cannot distinguish from absence.** `[]`
 from the shard query means "this shard holds no entry for this document" and `False` from

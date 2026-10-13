@@ -124,6 +124,21 @@ def _condition_parts(condition) -> list:
     return parts
 
 
+class _ListingFailure:
+    """A paginator page that raises when the loop touches it.
+
+    ``paginate`` returns an iterator, so a page that must fail cannot simply be an
+    exception instance in the list — the loop would bind it and carry on. Raising from
+    ``get`` is what puts the fault inside the loop body, where the real one occurs.
+    """
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def get(self, *_args, **_kwargs):
+        raise RuntimeError(self._message)
+
+
 def _list_row(marker: str, pk: str = "list#2025-09-10#s#03") -> dict:
     """A shard row that actually names ``KEY``, which the selection now requires.
 
@@ -427,6 +442,10 @@ class TestQueryShardForObjectKey:
             ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY}.bak"}, False),
             ({"SK": f"ts#2026-01-01T00:00:00#id#{KEY} (1).pdf"}, False),
             ({"SK": f"ts#2026-01-01T00:00:00#id#prefix-{KEY}"}, False),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#backup/{KEY}"}, False),
+            ({"SK": f"ts#2026-01-01T00:00:00#id#a#id#{KEY}"}, False),
+            ({"SK": "ts#2026-01-01T00:00:00#id#a#id#b", "ObjectKey": "a#id#b"}, False),
+            ({"SK": "ts#2026-01-01T00:00:00#id#no-match"}, False),
         ],
         ids=[
             "attribute-match",
@@ -439,6 +458,10 @@ class TestQueryShardForObjectKey:
             "a-right-extension-is-a-different-document",
             "and-so-is-a-renamed-copy",
             "a-left-extension-is-a-different-document",
+            "a-deeper-path-with-the-same-basename",
+            "a-key-containing-the-delimiter-is-not-the-target",
+            "and-that-document-is-not-selected-either",
+            "a-sort-key-naming-some-other-document",
         ],
     )
     def test_the_selection_predicate(self, entry, expected):
@@ -1018,6 +1041,68 @@ class TestDeleteSingleDocument:
         assert result["deleted"]["output_files"] == 1509
         assert result["success"] is False
         assert any("AccessDenied" in message for message in result["errors"])
+
+    def test_refusals_already_seen_survive_a_later_listing_failure(self):
+        """⚠️ Accumulating is what makes losing them possible.
+
+        The immediate-raise form could not drop a refusal because it never got past
+        one. Holding them until the last batch means anything that fails afterwards —
+        the next listing page most obviously — would otherwise replace the refusal with
+        its own message, and the caller would be told the listing broke and never learn
+        that versions were denied.
+        """
+        s3 = MagicMock()
+        paginator = MagicMock()
+        # An explicit, finite page sequence whose second element raises. A bare
+        # `return_value` here would iterate for ever.
+        paginator.paginate.return_value = iter(
+            [
+                {"Versions": [{"Key": OUT1, "VersionId": "v1"}]},
+                _ListingFailure("page 2 of ListObjectVersions failed"),
+            ]
+        )
+        s3.get_paginator.return_value = paginator
+        s3.delete_objects.return_value = {
+            "Errors": [
+                {
+                    "Key": OUT1,
+                    "VersionId": "v1",
+                    "Code": "AccessDenied",
+                    "Message": "Access Denied",
+                }
+            ]
+        }
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert result["success"] is False
+        joined = " ".join(result["errors"])
+        assert "page 2" in joined, "the listing failure is not reported"
+        assert "AccessDenied" in joined, (
+            f"the refusal seen on page 1 was discarded: {result['errors']}"
+        )
+
+    def test_a_malformed_errors_array_cannot_produce_a_negative_count(self):
+        """The count is by key identity, not by subtraction.
+
+        ``len(batch) - len(Errors)`` goes negative when the array does not correspond
+        one-to-one with the batch — a duplicated or malformed entry is enough — and a
+        negative number of deleted objects is a report nobody can act on.
+        """
+        s3 = _s3([{"Versions": [{"Key": OUT1, "VersionId": "v1"}]}])
+        s3.delete_objects.return_value = {
+            "Errors": [
+                {"Key": OUT1, "VersionId": "v1", "Code": "AccessDenied"},
+                {"Key": OUT1, "VersionId": "v1", "Code": "AccessDenied"},
+                {"Key": "unrelated", "VersionId": "vX", "Code": "InternalError"},
+            ]
+        }
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert result["deleted"]["output_files"] == 0
+        assert result["deleted"]["output_files"] >= 0
+        assert result["success"] is False
 
     def test_a_purge_with_no_refusals_is_unaffected(self):
         """The ordinary case, asserted so the check above cannot be vacuous.

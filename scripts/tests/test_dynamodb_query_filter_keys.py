@@ -80,6 +80,11 @@ KEY_ATTRIBUTE_NAMES = (
     "SK",
     "ItemType",
     "InitialEventTime",
+    # ChatSessionsTable / ChatMessagesTable, which carry a live filtered Query in
+    # `list_agent_chat_sessions_resolver`. Omitting them meant the identical defect
+    # spelled `begins_with(sessionId, :s)` there was missed while `SK` failed.
+    "userId",
+    "sessionId",
 )
 
 #: Calls whose ``FilterExpression`` is read, and so the universe this rule applies to.
@@ -139,8 +144,26 @@ def _literal_string(node: ast.AST) -> str | None:
 
 
 def _filter_expressions_in_dict(node: ast.AST) -> List[Tuple[int, str]]:
-    """``FilterExpression`` values in a dict literal, with their line numbers."""
+    """``FilterExpression`` values in a dict literal, with their line numbers.
+
+    ``dict(FilterExpression=...)`` counts as a dict literal here, because it is one in
+    every sense that matters and because the sibling gate this is modelled on
+    (``scripts/check_filtered_scans.py``) already reads that spelling — being weaker
+    than the model its own docstring cites is the kind of gap nobody goes looking for.
+    """
     found: List[Tuple[int, str]] = []
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dict"
+    ):
+        for keyword in node.keywords:
+            if (
+                keyword.arg == "FilterExpression"
+                and (text := _literal_string(keyword.value)) is not None
+            ):
+                found.append((getattr(keyword.value, "lineno", node.lineno), text))
+        return found
     if not isinstance(node, ast.Dict):
         return found
     for key, value in zip(node.keys, node.values):
@@ -153,6 +176,76 @@ def _filter_expressions_in_dict(node: ast.AST) -> List[Tuple[int, str]]:
     return found
 
 
+def _contains(node: ast.AST, target: ast.AST) -> bool:
+    """Is ``target`` (by identity) anywhere inside ``node``?"""
+    return any(child is target for child in ast.walk(node))
+
+
+def _enclosing_blocks(module: ast.Module, call: ast.Call) -> List[List[ast.stmt]]:
+    """Every statement list containing ``call``, outermost first.
+
+    A *branch* rather than a function, because the two are different and the difference
+    is what produced a false positive on real code: a resolver that reads one `kwargs`
+    name across a whole function cannot tell an `if` branch's assignment from its
+    `else` branch's, and those branches are mutually exclusive by construction.
+    """
+    blocks: List[List[ast.stmt]] = []
+
+    def descend(statements: List[ast.stmt]) -> None:
+        for statement in statements:
+            if not _contains(statement, call):
+                continue
+            blocks.append(statements)
+            for field in ("body", "orelse", "finalbody"):
+                nested = getattr(statement, field, None)
+                if isinstance(nested, list) and any(
+                    isinstance(item, ast.stmt) for item in nested
+                ):
+                    descend(nested)
+            for handler in getattr(statement, "handlers", None) or []:
+                descend(handler.body)
+            return
+
+    descend(module.body)
+    return blocks
+
+
+def _bound_names(statements: List[ast.stmt]) -> set:
+    """Names assigned anywhere inside ``statements``."""
+    bound = set()
+    for statement in statements:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Assign):
+                bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                bound.add(node.target.id)
+    return bound
+
+
+def _binding_scope(call: ast.Call, module: ast.Module, names: set) -> List[ast.stmt]:
+    """The narrowest statement list that binds one of ``names``, else the module body.
+
+    ⚠️ **Module-wide resolution made a false positive reachable on real code, and a
+    false positive is not the harmless direction for this gate.** Its finding is "this
+    call can never succeed", so a wrong one asserts a ``ValidationException`` about a
+    correct call. ``feature-platform/sample-health-insurance-review/feature-api/
+    handler.py`` binds one ``kwargs`` name in an ``if`` branch that ends in
+    ``table.query(**kwargs)`` and another in the ``else`` branch that ends in
+    ``table.scan(**kwargs)`` — so a legitimate filtered scan naming ``PK`` there, which
+    AWS explicitly permits, was reported against the query. Measured: 1 finding before,
+    0 after. Function scope is *not* enough for that shape, because both calls are in
+    the same function; mutually exclusive branches are the unit that matters.
+
+    Falling back to the module body keeps the over-approximating behaviour for a name
+    bound nowhere nearer — a module-level constant splatted into a query — where
+    narrowing would cost detection rather than remove a false positive.
+    """
+    for statements in reversed(_enclosing_blocks(module, call)):
+        if names & _bound_names(statements):
+            return statements
+    return module.body
+
+
 def _splatted_filter_expressions(
     call: ast.Call, module: ast.Module
 ) -> List[Tuple[int, str]]:
@@ -162,9 +255,20 @@ def _splatted_filter_expressions(
     both defect sites in #1366 did and what ``check_filtered_scans.py`` learned the
     same lesson about: a checker reading only literal keywords sees no arguments at all
     on precisely the calls it exists to protect. Resolution is by *name* anywhere in
-    the module, which over-approximates — a same-named dict in a sibling function
-    counts — and over-approximating is the safe direction for a gate whose finding is
-    "this call can never succeed".
+    the narrowest **statement block** that binds it — see :func:`_binding_scope`.
+
+    ⚠️ **Module-wide resolution made a false positive reachable on a real file, and a
+    false positive is not the harmless direction for this gate.** Its finding is "this
+    call can never succeed", so a wrong one asserts a ``ValidationException`` about a
+    correct call;
+    ``feature-platform/sample-health-insurance-review/feature-api/handler.py`` shares one
+    ``kwargs`` local between a ``table.query(**kwargs)`` branch and a
+    ``table.scan(**kwargs)`` branch in the same function, so a legitimate filtered scan
+    naming ``PK`` there — which AWS explicitly permits — would have been reported against
+    the query. Both #1366 sites bind their dict in the same function that splats it, so
+    narrowing costs no detection; it also made the earlier wrapper-indirection
+    measurements attributable, since this module has a second ``query_kwargs`` splat that
+    was absorbing the credit.
 
     ⚠️ **Three ways the key reaches the dict, and the one the repository actually uses
     is not the dict literal.** Every filtered query in this tree today spells it
@@ -182,7 +286,8 @@ def _splatted_filter_expressions(
     if not names:
         return []
     found: List[Tuple[int, str]] = []
-    for node in ast.walk(module):
+    scope = _binding_scope(call, module, names)
+    for node in [n for stmt in scope for n in ast.walk(stmt)]:
         # Shape 1: `name = {...}` / `name: T = {...}` — the dict literal.
         target_names: List[str] = []
         value: ast.AST | None = None
@@ -219,6 +324,13 @@ def _splatted_filter_expressions(
         ):
             for argument in node.args:
                 found.extend(_filter_expressions_in_dict(argument))
+            # `update(FilterExpression=...)` — the keyword form of the same call.
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "FilterExpression"
+                    and (text := _literal_string(keyword.value)) is not None
+                ):
+                    found.append((getattr(keyword.value, "lineno", 0), text))
     return found
 
 
@@ -437,6 +549,34 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
             "and the .update form of the same thing",
         ),
         (
+            'kw = {}\nkw.update(FilterExpression="contains(SK, :i)")\ntable.query(**kw)',
+            True,
+            "the KEYWORD form of .update, which reading only node.args misses",
+        ),
+        (
+            'kw = dict(FilterExpression="contains(SK, :i)")\ntable.query(**kw)',
+            True,
+            "dict(...) rather than a literal - the spelling the sibling gate "
+            "check_filtered_scans.py already handles",
+        ),
+        (
+            'kw = {"FilterExpression": "begins_with(sessionId, :s)"}\n'
+            "table.query(**kw)",
+            True,
+            "a key of another table in this deployment, not only the tracking table's",
+        ),
+        (
+            "def a():\n"
+            '    kw = {"FilterExpression": "begins_with(PK, :p)"}\n'
+            "    table.scan(**kw)\n"
+            "def b():\n"
+            '    kw = {"FilterExpression": "ObjectStatus = :s"}\n'
+            "    table.query(**kw)",
+            False,
+            "the false positive: one function's legitimate scan filter must not be "
+            "reported against another function's query that reuses the local name",
+        ),
+        (
             'kw = {}\nkw["ProjectionExpression"] = "PK, SK"\ntable.query(**kw)',
             False,
             "a subscript assignment of a different key is not a filter",
@@ -489,6 +629,10 @@ def test_the_three_repaired_sites_are_covered_by_discovery():
         "bound-method-through-a-wrapper",
         "subscript-assignment",
         "dict-update",
+        "dict-update-keyword-form",
+        "dict-call-not-literal",
+        "another-tables-key-attribute",
+        "a-sibling-functions-scan-filter",
         "subscript-of-another-key",
         "scan-through-a-subscript",
         "scan-is-allowed",

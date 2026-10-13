@@ -70,19 +70,25 @@ practice are deployment-level rather than per-document: a permission the executi
 is missing, or a request the service refuses. Both affect every document in the selection
 identically, so the banner names the cause rather than only a count.
 
-**What is left behind depends on which step failed, and the error names the steps that
-did complete.** The two cases differ in whether the document is still in the list, so it
-is worth knowing which you are looking at:
+**What is left behind depends on which step failed, and the error reports what each step
+did remove.** Only one of the three cases leaves the document in the list, so it is worth
+reading which one you have:
 
 - **The list-index cleanup failed.** The document's **tracking record is deliberately
   kept**: that record's queued timestamp is the only route to its row in the list index,
   so discarding it would leave that row orphaned with nothing able to find it again. The
-  document stays in the list, and retrying the delete once the underlying cause is fixed
-  completes the job.
-- **Only the output-object purge failed.** That does not hold the tracking record back,
-  so the document *is* removed from the list and some of its output objects remain in
-  the bucket. There is nothing left to retry from the UI; reclaiming those objects means
-  deleting the prefix directly, or re-running `idp-cli` against the key.
+  document stays in the list, and retrying the delete from the UI once the underlying
+  cause is fixed completes the job.
+- **The output-object purge failed.** That does not hold the tracking record back, so the
+  document *is* removed from the list and some or all of its output objects remain in the
+  bucket. The UI has no row left to select, so finishing the job means `idp-cli` against
+  the key, or deleting the prefix directly. Those objects are noncurrent versions, so the
+  bucket's lifecycle rule expires them eventually; the cost of leaving them is storage
+  until it does.
+- **The input-object delete failed.** The document is likewise removed from the list, and
+  **the originally uploaded file is still in the input bucket**. This is the case worth
+  acting on if the reason for deleting was that the document should not be held — the
+  remedy is the same `idp-cli` delete, or removing that one object.
 
 A selection where some documents were removed and others were not reports the failure for
 the whole call and names each document it could not finish; the ones that were removed are

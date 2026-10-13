@@ -398,17 +398,24 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     ``ObjectKey`` attribute was never written. Matching one shape alone leaves the
     other orphaned in the document list.
 
-    ⚠️ **The sort-key arm anchors at the END, and a substring test is wrong here
-    because this feeds a delete.** The object key is the terminal segment of the sort
-    key, so ``f"#id#{object_key}" in sort_key`` also matched a *different* document
-    whose key merely starts with this one — measured, deleting ``invoices/report.pdf``
-    selected the rows for ``invoices/report.pdf.bak`` and
-    ``invoices/report.pdf (1).pdf``, both of which are ordinary names. Every row this
-    returns is deleted by key, so the sibling vanished from the document list while its
-    tracking record and its S3 bytes survived: the orphan shape #1238 exists to
-    prevent. It is the same hazard ``_is_document_output`` carries a warning about on
-    the S3 side — a prefix is not a path segment — arriving through the sort key
-    instead of through an S3 ``Prefix``.
+    ⚠️ **The sort-key arm parses the key out and compares it whole; every looser test
+    is wrong here because this feeds a delete.** A substring test
+    (``f"#id#{object_key}" in sort_key``) matched a *different* document whose key
+    merely starts with this one — deleting ``invoices/report.pdf`` selected the rows
+    for ``invoices/report.pdf.bak`` and ``invoices/report.pdf (1).pdf``, both ordinary
+    names. Anchoring at the end fixes those two and still matched a document whose own
+    key *contains* ``#id#`` and ends with the target, which ``#`` being legal in an S3
+    key makes reachable by upload. Every row this returns is deleted by key, so the
+    sibling vanished from the document list while its tracking record and its S3 bytes
+    survived: the orphan shape that #1238 exists to prevent. It is the same hazard
+    ``_is_document_output`` carries a warning about on the S3 side — a prefix is not a
+    path segment — arriving through the sort key instead of through an S3 ``Prefix``.
+
+    Splitting on the **first** ``#id#`` and comparing the remainder whole is what this
+    repository's own reader of the same sort key already does
+    (``list_documents_range_resolver``), so a key containing the delimiter round-trips:
+    ``ts#…#id#a#id#b`` yields ``a#id#b``, which equals that document's key and no
+    other's.
 
     ⚠️ **This is a client-side predicate, and it has to be: the sort-key half cannot
     be a ``FilterExpression``.** DynamoDB refuses a key attribute in a ``Query``
@@ -428,7 +435,9 @@ def list_entry_names_document(entry: Dict[str, Any], object_key: str) -> bool:
     if entry.get("ObjectKey") == object_key:
         return True
     sort_key = entry.get("SK")
-    return isinstance(sort_key, str) and sort_key.endswith(f"#id#{object_key}")
+    if not isinstance(sort_key, str) or "#id#" not in sort_key:
+        return False
+    return sort_key.split("#id#", 1)[1] == object_key
 
 
 def _query_shard_for_object_key(
@@ -874,7 +883,17 @@ def delete_single_document(
                 # ``len()`` of it is meaningless. S3 omits ``Errors`` when nothing was
                 # refused, so absence is the ordinary case.
                 failures = response["Errors"] if "Errors" in response else []
-                deleted_output_count += len(batch) - len(failures)
+                # Counted by key identity rather than by length. ``len(batch) - len(
+                # failures)`` reported a **negative** count when the ``Errors`` array
+                # did not correspond one-to-one with the batch — a malformed or
+                # duplicated entry is enough — and a negative number of deleted objects
+                # is a report nobody can act on.
+                refused_keys = {(f.get("Key"), f.get("VersionId")) for f in failures}
+                deleted_output_count += sum(
+                    1
+                    for obj in batch
+                    if (obj["Key"], obj["VersionId"]) not in refused_keys
+                )
                 # ⚠️ **Accumulated, not raised here.** Raising inside the loop abandoned
                 # every version after the refused batch — measured: one refused key in
                 # the first 1000-key batch of 1,510 versions left 510 never attempted,
@@ -897,7 +916,20 @@ def delete_single_document(
             )
         logger.debug(f"Deleted {deleted_output_count} output object versions")
     except Exception as e:
-        error_msg = f"Error deleting from output bucket: {str(e)}"
+        # ⚠️ **Carry the refusals accrued so far into the message.** Anything can fail
+        # after a batch was partly refused — the next listing page most obviously — and
+        # reporting only that last fault discards the refusal entirely: the user is told
+        # the listing broke and never learns that some versions were denied. The
+        # immediate-raise form this replaced could not lose them because it never got
+        # that far; accumulating is what makes losing them possible.
+        refused = (
+            f" ({len(purge_failures)} version(s) already refused: "
+            + ", ".join(sorted({f.get("Code") or "?" for f in purge_failures}))
+            + ")"
+            if purge_failures
+            else ""
+        )
+        error_msg = f"Error deleting from output bucket: {str(e)}{refused}"
         logger.error(error_msg)
         result["errors"].append(error_msg)
     finally:

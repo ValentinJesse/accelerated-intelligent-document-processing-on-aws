@@ -298,11 +298,33 @@ class TestParityWithTheSharedImplementation:
         ({"ObjectKey": None}, False),
         # A left extension, which a substring test already answered correctly.
         ({"SK": f"ts#{QUEUED}#id#prefix-{KEY}"}, False),
+        # A deeper path sharing the basename.
+        ({"SK": f"ts#{QUEUED}#id#backup/{KEY}"}, False),
+        # ⚠️ A document whose OWN key contains the delimiter and ends with the target.
+        # `#` is legal in an S3 key, so this arrives by upload, and anchoring at the end
+        # of the sort key matched it. Splitting on the first `#id#` does not.
+        ({"SK": f"ts#{QUEUED}#id#a#id#{KEY}"}, False),
+        ({"SK": f"ts#{QUEUED}#id#a#id#b", "ObjectKey": "a#id#b"}, False),
     ]
+
+    #: A key that legitimately contains the delimiter must still match ITSELF — the
+    #: narrowing must not strand a document whose name happens to carry `#id#`.
+    DELIMITER_KEY = "odd#id#name.pdf"
 
     def test_the_case_matrix_is_not_empty(self):
         """A parametrisation over an empty list collects as a skip, not a failure."""
-        assert len(self.CASES) >= 11
+        assert len(self.CASES) >= 14
+
+    def test_a_key_containing_the_delimiter_still_matches_itself(self, rld):
+        """The other direction of the narrowing, which is the one it could break.
+
+        Rejecting `…#id#a#id#<target>` must not also reject the row belonging to a
+        document actually named `a#id#<something>`. Splitting on the FIRST delimiter
+        returns the whole remainder, so such a key round-trips.
+        """
+        row = {"SK": f"ts#{QUEUED}#id#{self.DELIMITER_KEY}"}
+        assert rld.list_entry_names_document(row, self.DELIMITER_KEY) is True
+        assert shared_predicate(row, self.DELIMITER_KEY) is True
 
     @pytest.mark.parametrize("entry, expected", CASES, ids=range(len(CASES)))
     def test_both_predicates_give_the_right_answer(self, rld, entry, expected):
@@ -314,9 +336,17 @@ class TestParityWithTheSharedImplementation:
             f"idp_common's predicate is wrong on {entry!r}"
         )
 
-    def test_the_matrix_exercises_both_answers(self):
-        """Otherwise the matrix could be asserting one constant answer."""
+    def test_the_matrix_exercises_both_answers(self, rld):
+        """Otherwise the matrix could be asserting one constant answer.
+
+        Both halves: that the authored expectations are not all one value, and that the
+        predicate itself produces both over them — the first alone is a tautology over
+        this file's own literals and would pass with the predicate never called.
+        """
         assert {expected for _entry, expected in self.CASES} == {True, False}
+        assert {
+            rld.list_entry_names_document(entry, KEY) for entry, _expected in self.CASES
+        } == {True, False}
 
 
 def test_the_vendored_copy_still_has_no_idp_common_layer():

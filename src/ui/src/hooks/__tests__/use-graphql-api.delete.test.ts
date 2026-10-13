@@ -90,6 +90,35 @@ describe('deleteDocuments', () => {
     expect(shown).not.toContain('try again');
   });
 
+  it('does not mistake a server-side AccessDenied for the caller lacking permission', async () => {
+    // ⚠️ The likeliest delete failure contains the literal words "Access Denied" — an
+    // IAM denial of the *resolver's own* execution role — and `isAuthorizationError`
+    // has a prose arm matching that substring. If it fired, the carefully reported
+    // cause would be replaced by "ask an administrator to assign it a role", which is
+    // advice the reader cannot act on and is exactly the wrongness this change removed.
+    //
+    // It does not fire, because an explicit non-authorization `errorType` short-circuits
+    // the prose arm. That is a property of two files agreeing, so it is pinned here
+    // rather than left to be re-derived.
+    graphql.mockRejectedValue({
+      errors: [
+        {
+          message:
+            '1 of 1 document(s) could not be completely deleted (0 completed) — a.pdf: ' +
+            'Error deleting from output bucket: An error occurred (AccessDenied) when ' +
+            'calling the ListObjectVersions operation',
+          errorType: 'InternalError',
+        },
+      ],
+    });
+
+    await deleteOnce(['a.pdf']);
+
+    const shown = setErrorMessage.mock.calls[0][0] as string;
+    expect(shown).toContain('AccessDenied');
+    expect(shown).not.toContain('ask an administrator');
+  });
+
   it('names the action in the banner for an authorization refusal', async () => {
     // `describeApiError` deliberately replaces the server's text for a 403: the
     // Cognito groups it names are not something the reader can grant themselves.

@@ -202,9 +202,12 @@ class TestTheReportedOutcome:
         # The actionable half survives.
         assert "AccessDeniedException" in message
         assert "dynamodb:Query" in message
-        # And the steps that did complete are named, so the message cannot read as
-        # "nothing happened" for a document whose cleanup mostly succeeded.
-        assert "completed: input_file" in message, message
+        # And what the cleanup DID remove is reported with its values, so the message
+        # cannot read as "nothing happened" for a document whose cleanup mostly
+        # succeeded — and a count is shown as a count rather than claimed to have
+        # "completed", which is not a question a count answers.
+        assert "removed: input_file=True" in message, message
+        assert "list_entries=False" in message, message
 
     def test_the_rejected_expression_detail_is_not_truncated_away(self, resolver):
         """The detail after the operation name is sometimes the entire answer.

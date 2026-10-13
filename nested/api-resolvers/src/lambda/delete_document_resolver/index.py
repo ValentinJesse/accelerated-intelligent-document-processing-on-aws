@@ -137,21 +137,28 @@ def handler(event, context):
                 logger.info(f"Successfully deleted document: {object_key}")
             else:
                 errors = result.get("errors", [])
-                # Which steps DID complete, so the message cannot imply that nothing
+                # What the cleanup DID remove, so the message cannot imply that nothing
                 # happened to a document most of whose cleanup succeeded. An S3 purge
                 # failure in particular does not hold back the tracking record, so the
                 # document is gone from the list even though this call failed — saying
                 # only "0 deleted" would send the reader looking for a row that is not
-                # there. The log already carries the full per-step dict.
-                done = [
-                    name
-                    for name, value in (result.get("deleted") or {}).items()
-                    if value
-                ]
+                # there.
+                #
+                # ⚠️ **Values, not a list of names.** Reporting the truthy keys as
+                # "completed" was wrong in both directions, because two of the five are
+                # counts rather than flags: a purge that deleted 9 of 10 versions listed
+                # `output_files` as completed in the same sentence that said a version
+                # was refused, and a document with no output objects omitted it although
+                # that step succeeded with nothing to do. A count has no true/false
+                # answer, so the honest form is to show it.
+                removed = ", ".join(
+                    f"{name}={value}"
+                    for name, value in sorted((result.get("deleted") or {}).items())
+                )
                 failures.append(
                     f"{object_key}: "
                     + _redact_arns("; ".join(str(e) for e in errors))
-                    + (f" [completed: {', '.join(sorted(done))}]" if done else "")
+                    + (f" [removed: {removed}]" if removed else "")
                 )
                 logger.error(f"Failed to delete document {object_key}: {errors}")
 
