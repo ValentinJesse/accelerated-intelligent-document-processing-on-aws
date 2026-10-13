@@ -354,6 +354,13 @@ Resources:
                       - !Sub 'glue.${AWS::URLSuffix}'
                       - !Sub 'lambda.${AWS::URLSuffix}'
                       - !Sub 'logs.${AWS::URLSuffix}'
+                      # AWS::GuardDuty::MalwareProtectionPlan passes
+                      # MalwareScanRole to GuardDuty (MalwareScanning=CREATE_PLAN
+                      # only). The principal is NOT `guardduty.` — the plan's own
+                      # sub-service principal is what the role trusts and what
+                      # appears in iam:PassedToService, so a `guardduty.` entry
+                      # here would read as correct and deny anyway.
+                      - !Sub 'malware-protection-plan.guardduty.${AWS::URLSuffix}'
                       - !Sub 'scheduler.${AWS::URLSuffix}'
                       - !Sub 'states.${AWS::URLSuffix}'
 
