@@ -26,13 +26,31 @@ from botocore.exceptions import (
 )
 from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
 
+# The invocation's wall clock. Every ladder in this module backs off and retries
+# inside a Lambda that will be killed on a fixed deadline, so both of these are
+# needed here: a sleep must not outlive the invocation, and an attempt the size of
+# the one that just failed must not be BEGUN when what remains cannot hold it. The
+# rule has one implementation, in a standard-library-only leaf module, shared with
+# the streamed agentic ladder's decorators in ``utils.bedrock_utils``.
+#
+# It is not imported FROM ``utils.bedrock_utils``, which also exports it, because of
+# what that costs at cold start: ``utils/__init__`` imports
+# ``idp_common.config.models``, whose package ``__init__`` reaches back here through
+# ``configuration_manager`` -> ``merge_utils``. Measured, ``import idp_common.bedrock``
+# goes from 526 modules in 0.15 s to 968 in 1.00 s, and starts requiring
+# ``idp_common.config`` — which is the import a lean handler pays for before its
+# handler body runs, and one of the two chains
+# ``tests/unit/test_import_surface_region_free.py`` exists to keep thin.
+from idp_common.lambda_deadline import (
+    attempt_cannot_finish,
+    clamp_sleep_to_budgets,
+    remaining_invocation_seconds,
+)
+
 # The shard invocation's time budget. Imported rather than restated, because this
 # client's read timeout is one of its terms and a term written in two places is
 # exactly how the budget stopped adding up (#1014). ``timeout_budget`` is a leaf
-# module that imports nothing, which matters here: importing from
-# ``idp_common.utils`` instead would build an SSM client at module scope and make
-# ``import idp_common.config`` — which reaches this module via ``merge_utils`` —
-# require an AWS region before any handler code runs.
+# module that imports nothing, for the same reason as above.
 from idp_common.timeout_budget import (
     BOTOCORE_TOTAL_MAX_ATTEMPTS,
     CONFIDENCE_READ_TIMEOUT_SECONDS,
@@ -1930,6 +1948,7 @@ class BedrockClient:
         request_start_time: float,
         last_exception: Optional[Exception] = None,
         context: str = "Unspecified",
+        worst_attempt_seconds: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Recursive helper method to handle retries for Bedrock invocation.
@@ -1940,6 +1959,11 @@ class BedrockClient:
             max_retries: Maximum number of retry attempts
             request_start_time: Time when the original request started
             last_exception: The last exception encountered (for final error reporting)
+            worst_attempt_seconds: The costliest attempt this ladder has measured so
+                far. Threaded through the recursion because the budget gate below is
+                asked about the worst attempt rather than the last one -- a cheap
+                failure in the middle of a ladder must not re-license an expensive
+                attempt. See lambda_deadline.attempt_cannot_finish.
 
         Returns:
             Bedrock response object with metering information
@@ -1947,6 +1971,10 @@ class BedrockClient:
         Raises:
             Exception: The last exception encountered if max retries are exceeded
         """
+        # Bound before the try, so the except handlers can always measure how long
+        # the attempt they are handling cost. Reassigned immediately before the API
+        # call, which is the duration the budget gate below is about.
+        attempt_start_time = time.time()
         try:
             # Create a copy of the messages to sanitize for logging
             sanitized_params = copy.deepcopy(converse_params)
@@ -2085,8 +2113,20 @@ class BedrockClient:
                     self._put_metric("BedrockMaxRetriesExceeded", 1)
                     raise
 
-                # Calculate backoff time
-                backoff = self._calculate_backoff(retry_count)
+                # Calculate backoff time, never sleeping past the end of this
+                # invocation.
+                backoff = self._backoff_within_invocation(retry_count)
+
+                # Refuse to begin an attempt this invocation cannot hold. The cost is
+                # the WORST attempt measured so far, not the last one, plus the backoff
+                # about to be slept -- both come out of the same budget, and a cheap
+                # throttle between two expensive stalls must not reset the comparison.
+                worst = max(worst_attempt_seconds, time.time() - attempt_start_time)
+                if attempt_cannot_finish(worst + backoff, "Bedrock converse"):
+                    self._put_metric("BedrockRequestsFailed", 1)
+                    self._put_metric("BedrockRetryAbandonedOutOfTime", 1)
+                    raise
+
                 logger.warning(
                     f"Bedrock throttling occurred (attempt {retry_count + 1}/{max_retries}). "
                     f"Error: {error_message}. "
@@ -2105,6 +2145,7 @@ class BedrockClient:
                     request_start_time=request_start_time,
                     last_exception=e,
                     context=context,
+                    worst_attempt_seconds=worst,
                 )
             else:
                 # Self-heal an over-limit maxTokens request. There is no AWS API
@@ -2121,6 +2162,13 @@ class BedrockClient:
                 if discovered_limit is not None and self._apply_max_tokens_limit(
                     converse_params, discovered_limit
                 ):
+                    # Deliberately NOT gated on the invocation budget. The attempt it
+                    # repeats is a ValidationException refused in milliseconds, so the
+                    # gate could only ever fire here with the deadline already past —
+                    # and the thing it would refuse is the clamp that makes a
+                    # newly-added model work at all, re-raised as a ValidationException
+                    # the caller classifies as deterministic. A cheap retry that
+                    # usually succeeds is worth more than a marginally earlier failure.
                     logger.warning(
                         "maxTokens exceeded model limit for %s; Bedrock reports "
                         "%d. Clamping and retrying. Update model_config_limits.yaml.",
@@ -2135,6 +2183,10 @@ class BedrockClient:
                         request_start_time=request_start_time,
                         last_exception=e,
                         context=context,
+                        worst_attempt_seconds=max(
+                            worst_attempt_seconds,
+                            time.time() - attempt_start_time,
+                        ),
                     )
 
                 # Include model_id: errors like ResourceNotFoundException
@@ -2171,8 +2223,21 @@ class BedrockClient:
                 self._put_metric("BedrockMaxRetriesExceeded", 1)
                 raise
 
-            # Calculate backoff time
-            backoff = self._calculate_backoff(retry_count)
+            # Calculate backoff time, never sleeping past the end of this invocation.
+            backoff = self._backoff_within_invocation(retry_count)
+
+            # This is the branch the ladder spent a whole invocation in: a read
+            # timeout costs the client's full read_timeout, and three of those fill a
+            # 900 s function, so by the third the remaining time cannot hold a fourth.
+            # Refuse it and raise the timeout, which the handlers classify as
+            # transient and the state machine retries with its own budget — rather
+            # than starting an attempt that can only end on the wall clock.
+            worst = max(worst_attempt_seconds, time.time() - attempt_start_time)
+            if attempt_cannot_finish(worst + backoff, "Bedrock converse"):
+                self._put_metric("BedrockRequestsFailed", 1)
+                self._put_metric("BedrockRetryAbandonedOutOfTime", 1)
+                raise
+
             logger.warning(
                 f"Bedrock timeout occurred (attempt {retry_count + 1}/{max_retries}). "
                 f"Error: {error_message}. "
@@ -2191,6 +2256,7 @@ class BedrockClient:
                 request_start_time=request_start_time,
                 last_exception=e,
                 context=context,
+                worst_attempt_seconds=worst,
             )
 
         except Exception as e:
@@ -2436,6 +2502,7 @@ class BedrockClient:
         retry_count: int,
         max_retries: int,
         last_exception: Optional[Exception] = None,
+        worst_attempt_seconds: float = 0.0,
     ) -> List[float]:
         """
         Recursive helper method to handle retries for embedding generation.
@@ -2454,6 +2521,9 @@ class BedrockClient:
         Raises:
             Exception: The last exception encountered if max retries are exceeded
         """
+        # Bound before the try so the handler can measure the attempt it is handling;
+        # reassigned immediately before the API call.
+        attempt_start_time = time.time()
         try:
             logger.info(
                 f"Bedrock embedding request attempt {retry_count + 1}/{max_retries}:"
@@ -2544,8 +2614,23 @@ class BedrockClient:
                     self._put_metric("BedrockEmbeddingMaxRetriesExceeded", 1)
                     raise
 
-                # Calculate backoff time
-                backoff = self._calculate_backoff(retry_count)
+                # Calculate backoff time, never sleeping past the end of this
+                # invocation. An embedding request is short, so what bites on this
+                # ladder is the sleep rather than the attempt: seven retries at a
+                # 300 s cap is most of a Lambda spent asleep on a throttle.
+                backoff = self._backoff_within_invocation(retry_count)
+
+                # The same gate as the generation ladder, on the same rule. It is
+                # unlikely to fire here precisely because the attempts are cheap, and
+                # an exemption would be the wrong shape: this ladder also retries
+                # ``ReadTimeout`` and ``TimeoutError``, and an embedding call that
+                # does stall gets the same protection as a generation one.
+                worst = max(worst_attempt_seconds, time.time() - attempt_start_time)
+                if attempt_cannot_finish(worst + backoff, "Bedrock embedding"):
+                    self._put_metric("BedrockEmbeddingRequestsFailed", 1)
+                    self._put_metric("BedrockEmbeddingRetryAbandonedOutOfTime", 1)
+                    raise
+
                 logger.warning(
                     f"Bedrock throttling occurred (attempt {retry_count + 1}/{max_retries}). "
                     f"Error: {error_message}. "
@@ -2563,6 +2648,7 @@ class BedrockClient:
                     retry_count=retry_count + 1,
                     max_retries=max_retries,
                     last_exception=e,
+                    worst_attempt_seconds=worst,
                 )
             else:
                 logger.error(
@@ -2984,6 +3070,7 @@ class BedrockClient:
         request_start_time: float,
         last_exception: Optional[Exception] = None,
         context: str = "Unspecified",
+        worst_attempt_seconds: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Invoke Lambda hook with retry logic for transient failures.
@@ -3003,6 +3090,9 @@ class BedrockClient:
         Raises:
             Exception: If invocation fails after all retries
         """
+        # Bound before the try so the handlers can measure the attempt they are
+        # handling; reassigned immediately before the invoke.
+        attempt_start_time = time.time()
         try:
             logger.info(
                 f"LambdaHook request attempt {retry_count + 1}/{max_retries}: "
@@ -3035,7 +3125,24 @@ class BedrockClient:
 
                 # Retry on unhandled errors (transient issues)
                 if function_error == "Unhandled" and retry_count < max_retries:
-                    backoff = self._calculate_backoff(retry_count)
+                    backoff = self._backoff_within_invocation(retry_count)
+                    # A hook invocation is the most expensive attempt this client
+                    # makes: ``lambda_client`` waits 840 s for one, so two of them
+                    # exceed the 900 s caller, and every attempt re-runs whatever the
+                    # hook charges for. Raising here is caught by this method's own
+                    # ``except Exception`` below, which does not retry a
+                    # ``RuntimeError`` — the same route the exhausted path takes.
+                    worst = max(worst_attempt_seconds, duration)
+                    if attempt_cannot_finish(worst + backoff, "LambdaHook"):
+                        # ``LambdaHookRequestsFailed`` is NOT emitted here: this raise
+                        # is caught by this method's own ``except Exception`` below,
+                        # which declines to retry a ``RuntimeError`` and emits it on
+                        # the way out. Emitting it at both points counted one failed
+                        # request twice.
+                        self._put_metric("LambdaHookRetryAbandonedOutOfTime", 1)
+                        raise RuntimeError(
+                            f"LambdaHook function error: {error_message}"
+                        )
                     logger.warning(
                         f"LambdaHook transient error, retrying in {backoff:.2f}s"
                     )
@@ -3047,6 +3154,7 @@ class BedrockClient:
                         max_retries=max_retries,
                         request_start_time=request_start_time,
                         context=context,
+                        worst_attempt_seconds=worst,
                     )
 
                 self._put_metric("LambdaHookRequestsFailed", 1)
@@ -3113,7 +3221,12 @@ class BedrockClient:
 
             if error_code in retryable_errors and retry_count < max_retries:
                 self._put_metric("LambdaHookThrottles", 1)
-                backoff = self._calculate_backoff(retry_count)
+                backoff = self._backoff_within_invocation(retry_count)
+                worst = max(worst_attempt_seconds, time.time() - attempt_start_time)
+                if attempt_cannot_finish(worst + backoff, "LambdaHook"):
+                    self._put_metric("LambdaHookRequestsFailed", 1)
+                    self._put_metric("LambdaHookRetryAbandonedOutOfTime", 1)
+                    raise
                 logger.warning(
                     f"LambdaHook throttled ({error_code}), retrying in {backoff:.2f}s"
                 )
@@ -3126,6 +3239,7 @@ class BedrockClient:
                     request_start_time=request_start_time,
                     last_exception=e,
                     context=context,
+                    worst_attempt_seconds=worst,
                 )
             else:
                 logger.error(f"LambdaHook error: {error_code} - {error_message}")
@@ -3135,7 +3249,15 @@ class BedrockClient:
         except Exception as e:
             error_message = str(e)
             if "RuntimeError" not in type(e).__name__ and retry_count < max_retries:
-                backoff = self._calculate_backoff(retry_count)
+                backoff = self._backoff_within_invocation(retry_count)
+                # This is the branch a read timeout lands in, and ``lambda_client``
+                # waits 840 s for one. Nominally eight of those is 6,720 s inside a
+                # 900 s caller, each re-running the hook's paid work.
+                worst = max(worst_attempt_seconds, time.time() - attempt_start_time)
+                if attempt_cannot_finish(worst + backoff, "LambdaHook"):
+                    self._put_metric("LambdaHookRequestsFailed", 1)
+                    self._put_metric("LambdaHookRetryAbandonedOutOfTime", 1)
+                    raise
                 logger.warning(
                     f"LambdaHook unexpected error, retrying in {backoff:.2f}s: {error_message}"
                 )
@@ -3148,6 +3270,7 @@ class BedrockClient:
                     request_start_time=request_start_time,
                     last_exception=e,
                     context=context,
+                    worst_attempt_seconds=worst,
                 )
 
             logger.error(f"LambdaHook failed: {error_message}", exc_info=True)
@@ -3171,6 +3294,48 @@ class BedrockClient:
         jitter = random.random()  # nosec B311 - retry jitter
 
         return backoff_seconds + jitter
+
+    def _backoff_within_invocation(self, retry_count: int) -> float:
+        """:meth:`_calculate_backoff`, shortened so the sleep stays in this invocation.
+
+        The ladder is seven retries deep doubling from ``initial_backoff``, so its
+        sleeps run 2, 4, 8, 16, 32, 64, 128 s plus up to a second of jitter each —
+        254.0 to 261.0 s in total, more than a quarter of a 900 s Lambda and spent
+        making no progress. (``max_backoff`` is 300 s and never binds at seven
+        retries: it would first apply at the eighth, one past the end. It bounds the
+        ladder only if ``max_retries`` is raised.) Sleeping past the deadline is worse
+        than useless: the function is killed mid-sleep, which Step Functions
+        classifies as deterministic (``Sandbox.Timedout``, ``MaxAttempts: 1`` since
+        #917) rather than as the transient failure it is.
+
+        Returns 0.0 when nothing is left to spend, which means the next attempt goes
+        out immediately. That is the deliberate asymmetry the deadline bound has
+        everywhere in this codebase: proximity to the wall shortens sleeps, it does
+        not by itself end a ladder, because a cheap attempt may still succeed. What
+        ends a ladder is an attempt whose own measured cost no longer fits
+        (:func:`~idp_common.lambda_deadline.attempt_cannot_finish`), and the callers
+        below ask that separately.
+
+        Outside Lambda, and in any invocation where no handler published a deadline,
+        this returns :meth:`_calculate_backoff` unchanged.
+        """
+        requested = self._calculate_backoff(retry_count)
+        allowed = clamp_sleep_to_budgets(requested)
+        if allowed < requested:
+            remaining = remaining_invocation_seconds()
+            # Says what it did and nothing about what happens next. This line is
+            # emitted BEFORE the caller asks whether the next attempt fits, so any
+            # sentence about where the saved time goes is a claim this function is not
+            # in a position to make — and it sat directly above "another one cannot
+            # finish" in the log whenever the gate then refused.
+            logger.warning(
+                "Shortening Bedrock retry backoff from %.1fs to %.1fs to stay inside "
+                "this invocation (%s left).",
+                requested,
+                allowed,
+                f"{remaining:.1f}s" if remaining is not None else "unknown",
+            )
+        return allowed
 
     def _put_metric(
         self, metric_name: str, value: Union[int, float], unit: str = "Count"

@@ -397,11 +397,101 @@ UNREADABLE_BODY = "__unreadable_body__"
 # hangs the harness forever instead of being reported.
 REQUEST_TIMEOUT_SECONDS = 45
 
+# ----------------------------------------------------------------------------
+# WHICH CONTROL REFUSED
+# ----------------------------------------------------------------------------
+# Every authorization refusal this API makes arrives as 403 with `errorType:
+# "Unauthorized"`, and two controls that answer OPPOSITE questions produce it:
+#
+#   the field-level GROUP FLOOR   "this caller's groups do not admit this operation"
+#   a per-object RESOURCE control "this caller's groups were fine and the object
+#                                  they named was refused"
+#
+# For this harness those are opposite verdicts about the control under test. The
+# matrix asserts the first and cannot avoid provoking the second, because it drives
+# every operation with deliberately bogus arguments — so a bucket outside the
+# deployment's allow-list, a chat session nobody owns and a document selection that
+# does not exist all answered 403 and read as "DENIED but allowed", i.e. as the
+# group check failing for a role the manifest permits. Eight cells of one run.
+# Issue #1308.
+#
+# The dispatcher now says which one, in `errors[0].authzControl`. These names are
+# ITS vocabulary, not this file's: `test_api_rbac_verdicts.py` reads them out of
+# `http_api_dispatcher/index.py` and fails if the two drift, so a renamed value
+# cannot leave this harness silently reading `None` for every refusal.
+CONTROL_FIELD = "authzControl"
+#: The group floor refused (authz.enforce: undeclared field, IAM-only, or group
+#: mismatch). A decision about the FIELD and the caller's GROUPS.
+CONTROL_GROUP_FLOOR = "api-group-floor"
+#: A resolver refused the OBJECT named, having admitted the caller's groups.
+CONTROL_RESOURCE = "resource"
+#: A resolver refused without saying which control did it.
+CONTROL_RESOLVER = "resolver"
+#: An invocation asserted its own identity and was refused.
+CONTROL_UNVERIFIED_IDENTITY = "unverified-identity"
+
+# Why `None` is not folded into `CONTROL_RESOLVER`, even though both end up at the
+# strict verdict: `None` means "this deployment did not tell me", which is the
+# answer from any stack deployed before the label existed, and from the in-band
+# `{success:false,error:{type:"Unauthorized"}}` 200 the configuration and sync
+# resolvers use (the dispatcher passes that body through and never sees a refusal).
+# A reader of the report has to be able to tell "the harness could not attribute
+# this" from "the server said it could not attribute it"; collapsing them would
+# make a stack with no labels at all look like one whose resolvers are all
+# unattributed, and the first of those is the case where the whole distinction
+# below is inert and has to be read as such.
+CONTROL_UNLABELLED = None
+
+
+def refusal_is_resource_level(control):
+    """Is this refusal positively attributed to a per-object control?
+
+    The polarity is the load-bearing part and it is **fail-closed**: only an
+    explicit ``"resource"`` label answers True. An unattributed resolver refusal, a
+    missing label, an unrecognised value and a group-floor refusal all answer
+    False, so every one of them keeps the strict verdict.
+
+    Defaulting the other way would be the suppression this exists to avoid: a
+    genuine group-check regression inside a resolver would then read as a known
+    coverage gap, and the harness would report a real authorization failure as an
+    expected one. A forgotten label costs a visible failure instead, which is the
+    direction a security gate should fail in.
+    """
+    return control == CONTROL_RESOURCE
+
+
+class ApiResult(tuple):
+    """``(http_status, errorType, in_band_error_type, request_id)`` — plus which
+    control refused, and the refusal message, as ATTRIBUTES.
+
+    A 4-tuple with two attributes rather than a 6-tuple, because sixteen call sites
+    across this file and ``api_security_cases.py`` unpack exactly four values and
+    ``st, et, ib, rid = call(...)`` has to keep working. It is the same trade
+    ``UNREADABLE_BODY`` makes by travelling in the ``errorType`` slot, and it is
+    recorded here for the same reason: the alternative is a sixth element that
+    lands in the wrong variable at one of those sites.
+
+    ``authz_control`` is the dispatcher's ``errors[0].authzControl`` or ``None``;
+    ``message`` is ``errors[0].message``, which the report prints so a refusal can
+    be read without a CloudWatch query.
+    """
+
+    def __new__(cls, status, error_type, in_band, request_id, control=None, message=""):
+        self = tuple.__new__(cls, (status, error_type, in_band, request_id))
+        self.authz_control = control
+        self.message = message
+        return self
+
 
 def call(api_base, field, args, token):
-    """POST /op/<field>; return (http_status, errorType, in_band_error_type,
-    request_id). in_band_error_type captures the {success:false,error:{type}}
-    payload that scope denials use (HTTP 200 body).
+    """POST /op/<field>; return an :class:`ApiResult`, which unpacks as
+    ``(http_status, errorType, in_band_error_type, request_id)`` and also carries
+    ``.authz_control`` and ``.message``. in_band_error_type captures the
+    {success:false,error:{type}} payload that scope denials use (HTTP 200 body).
+
+    ``.authz_control`` is what makes a group refusal and a per-object refusal
+    distinguishable — see :data:`CONTROL_FIELD`. Before it, both arrived as
+    ``403/Unauthorized`` and this function discarded the only field that differed.
 
     Two sentinel values mark a call that established nothing, so that
     :func:`inconclusive` can tell them apart from a refusal:
@@ -437,17 +527,19 @@ def call(api_base, field, args, token):
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         # Reported, not raised: one unreachable operation must not abort the whole
         # matrix, and it must not be mistaken for a refusal either.
-        return 0, None, None, f"<request error: {e}>"
+        return ApiResult(0, None, None, f"<request error: {e}>")
 
     if not (raw or b"").strip():
-        return status, UNREADABLE_BODY, None, request_id
+        return ApiResult(status, UNREADABLE_BODY, None, request_id)
 
     et = None
     in_band = None
+    control = CONTROL_UNLABELLED
+    message = ""
     try:
         p = json.loads(raw)
     except (ValueError, TypeError):
-        return status, UNREADABLE_BODY, None, request_id
+        return ApiResult(status, UNREADABLE_BODY, None, request_id)
     if isinstance(p, dict):
         errors = p.get("errors")
         if isinstance(errors, list) and errors:
@@ -461,10 +553,20 @@ def call(api_base, field, args, token):
             first = errors[0]
             if isinstance(first, dict):
                 et = first.get("errorType")
+                # Read as a plain value, with no validation against the vocabulary:
+                # an unrecognised label must reach the verdict functions so they can
+                # apply the strict reading to it, and must reach the report so a
+                # reader sees what the server actually said. Rejecting it here
+                # would turn a value this harness does not know into `None`, which
+                # is the "this deployment cannot tell me" answer and a different
+                # claim entirely.
+                control = first.get(CONTROL_FIELD)
+                raw_message = first.get("message")
+                message = raw_message if isinstance(raw_message, str) else ""
         err = p.get("error")
         if isinstance(err, dict):
             in_band = err.get("type")
-    return status, et, in_band, request_id
+    return ApiResult(status, et, in_band, request_id, control=control, message=message)
 
 
 def call_body(api_base, field, args, token):
@@ -687,14 +789,100 @@ class Verdict(NamedTuple):
     detail: str
     outcome: str
     gap: Optional[str] = None
+    #: A compact form for the console matrix, where every cell is padded to 16
+    #: columns. ``detail`` names the control that refused and the remedy, which is
+    #: what the report needs and what makes a one-line-per-operation grid
+    #: unreadable. ``None`` means "the detail is already short enough".
+    cell: Optional[str] = None
 
 
-def classify(role, allowed, status, et, in_band) -> Verdict:
+def _allowed_role_was_denied(status, et, in_band, control) -> Verdict:
+    """A caller the policy ADMITS was refused. Which control did it decides what
+    this cell established.
+
+    * A refusal attributed to a **per-object** control: the request reached the
+      resolver, so the dispatcher's group floor admitted this caller. The cell was
+      asserting that an admitted caller is not refused by *authorization*, and a
+      per-object control is a different control — so the cell did not measure what
+      it exists to measure. ``ERROR``: not a pass, still blocking, and it lands in
+      the report's "Could not be run" section naming the control, instead of
+      reading as the group check failing.
+
+      This is NOT a downgrade to a warning. The remedy is to give the operation an
+      argument the resource control admits — the pattern ``getFileContents`` uses
+      and the one ``autoDetectSections``, ``addDocumentsToTestSetByKey`` and
+      ``getChatMessages`` were given — so that the group floor is what answers.
+      Scoring it green, or registering it against a gap, would turn a cell that
+      measures nothing into a cell that reports success, which is the worse half of
+      the defect this classification exists for.
+
+    * Anything else — the group floor itself, an unattributed resolver refusal, an
+      unrecognised label, or no label at all: ``FAIL``, as before. Positive
+      attribution is required to leave this branch, so a forgotten label costs a
+      visible failure rather than a silent pass.
+    """
+    where = control or "unattributed"
+    if refusal_is_resource_level(control):
+        return Verdict(
+            False,
+            f"INCONCLUSIVE: the group floor ADMITTED this caller and a "
+            f"resource-level control refused the object ({status}/{et}, "
+            f"authzControl={control}); this cell did not measure the group check",
+            "ERROR",
+            cell=f"{status}!grp?",
+        )
+    return Verdict(
+        False,
+        f"DENIED but allowed ({status}/{et}/{in_band}, control={where})",
+        "FAIL",
+        cell=f"DENIED({status})",
+    )
+
+
+def _refusal_is_a_group_refusal(status, et, in_band, control) -> Verdict:
+    """A caller the policy REFUSES was refused. Was it refused for their group?
+
+    ``PASS`` unless the response positively attributes the refusal to a per-object
+    control. That case is a ``FAIL``, and it is a real finding rather than a
+    bookkeeping nicety: the group floor runs before routing, so a caller it should
+    refuse cannot reach a resolver at all. A ``resource`` label on this cell means
+    the floor did not refuse somebody it must refuse, and the per-object control
+    happened to catch them — defense in depth working over a hole in the layer this
+    cell exists to test.
+
+    Before the label existed this cell passed on **any** 403, which is the same
+    confusion as the allowed-role case running the other way: a resource refusal
+    counted as proof that the group check works. That direction was the silent one.
+    """
+    if not _denied(status, et, in_band):
+        return Verdict(False, f"LEAK({status}/{et}/{in_band})", "FAIL")
+    if refusal_is_resource_level(control):
+        return Verdict(
+            False,
+            f"REFUSED BY THE WRONG CONTROL ({status}/{et}, "
+            f"authzControl={control}): the group floor did not refuse a caller "
+            f"its policy excludes; a resource-level control did",
+            "FAIL",
+            cell=f"WRONGCTL({status})",
+        )
+    return Verdict(True, f"{status}", "PASS")
+
+
+def classify(role, allowed, status, et, in_band, control=CONTROL_UNLABELLED) -> Verdict:
     """Judge one cell of the group matrix. `allowed` is ANY | IAM | set.
 
     ``outcome`` is ``PASS``, ``FAIL`` or ``ERROR``. ``ERROR`` means the check could
     not be run — see :func:`inconclusive` — and is never a pass in any cell,
     whichever way the cell was expected to go.
+
+    ``control`` is the dispatcher's ``errors[0].authzControl``. It decides nothing
+    about whether the call was denied (:func:`_denied` answers that, unchanged); it
+    decides **which control** the denial is attributed to, which is what separates
+    "correctly refused for their group" from "group was fine, the object was
+    refused". Those are opposite verdicts and they arrive in the same
+    ``403/Unauthorized``. Default ``None`` keeps the signature usable against a
+    deployment that predates the label, where every cell reverts to the previous
+    reading — strict in both directions.
     """
     why = inconclusive(status, et)
     if why:
@@ -703,28 +891,22 @@ def classify(role, allowed, status, et, in_band) -> Verdict:
         )
 
     if allowed == IAM:
-        ok = _denied(status, et, in_band)
-        detail = f"{status}" if ok else f"LEAK({status}/{et})"
-        return Verdict(ok, detail, "PASS" if ok else "FAIL")
+        # Every Cognito caller must be refused, and by the floor: authz.enforce's
+        # IAM_ONLY branch is the control under test here.
+        return _refusal_is_a_group_refusal(status, et, in_band, control)
     if allowed == ANY:
         if _denied(status, et, in_band):
-            return Verdict(
-                False, f"unexpected denial ({status}/{et}/{in_band})", "FAIL"
-            )
+            return _allowed_role_was_denied(status, et, in_band, control)
         return Verdict(True, f"{status}", "PASS")
     # group-restricted
     if role in allowed:
-        # Any denial shape fails here — including a bare 401/403 with no
+        # Any denial shape lands here — including a bare 401/403 with no
         # errorType (e.g. a gateway/WAF rejection), which would otherwise
         # silently pass as "auth worked".
         if _denied(status, et, in_band):
-            return Verdict(
-                False, f"DENIED but allowed ({status}/{et}/{in_band})", "FAIL"
-            )
+            return _allowed_role_was_denied(status, et, in_band, control)
         return Verdict(True, f"{status}", "PASS")
-    ok = _denied(status, et, in_band)
-    detail = f"{status}" if ok else f"LEAK({status}/{et}/{in_band})"
-    return Verdict(ok, detail, "PASS" if ok else "FAIL")
+    return _refusal_is_a_group_refusal(status, et, in_band, control)
 
 
 # ----------------------------------------------------------------------------
@@ -947,7 +1129,8 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
 
         cells = [field]
         # unauthenticated
-        st, et, ib, rid = call(ctx["api_base"], field, o["args"], None)
+        unauth = call(ctx["api_base"], field, o["args"], None)
+        st, et, ib, rid = unauth
         # Already strict (401 exactly, not merely "denied"), but a call that never
         # completed is not a failed assertion about the authorizer — it is no
         # observation at all, and has to say so.
@@ -966,6 +1149,13 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
             rid,
             gap=_inconclusive_gap(st) if why else None,
             outcome="ERROR" if why else None,
+            # The unauth cell asserts a 401 from the route's Cognito authorizer,
+            # which runs ahead of the dispatcher and therefore produces no label at
+            # all. Recorded anyway, because a non-null value here would mean the
+            # request reached the dispatcher — i.e. the authorizer did not
+            # authenticate — which is worth seeing in the report.
+            control=unauth.authz_control,
+            message=unauth.message,
         )
         # roles
         for role in ROLES:
@@ -982,9 +1172,10 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
                     outcome="SKIP",
                 )
                 continue
-            st, et, ib, rid = call(ctx["api_base"], field, o["args"], tokens[role])
-            verdict = classify(role, allowed, st, et, ib)
-            cells.append(f"{role[:2]}={verdict.detail}")
+            res = call(ctx["api_base"], field, o["args"], tokens[role])
+            st, et, ib, rid = res
+            verdict = classify(role, allowed, st, et, ib, res.authz_control)
+            cells.append(f"{role[:2]}={verdict.cell or verdict.detail}")
             _record(
                 results,
                 field,
@@ -995,6 +1186,8 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
                 et,
                 ib,
                 rid,
+                control=res.authz_control,
+                message=res.message,
                 # The operation's own known_gap wins if it has one; otherwise an
                 # inconclusive cell carries the gap classify assigned it.
                 gap=o.get("known_gap") or verdict.gap,
@@ -1205,6 +1398,8 @@ def _record(
     request_id="",
     gap=None,
     outcome=None,
+    control=CONTROL_UNLABELLED,
+    message="",
 ):
     resolved = _derive_outcome(passed, gap, outcome)
     # A gap downgrades a FAIL/ERROR to a WARN; it never turns one into a pass.
@@ -1217,6 +1412,19 @@ def _record(
             "http_status": status,
             "error_type": et,
             "in_band_error": in_band,
+            # WHICH control refused, verbatim from the response
+            # (`errors[0].authzControl`), or None when the response did not say —
+            # which is the answer from a stack deployed before the label existed,
+            # and from the in-band 200 denial the configuration and sync resolvers
+            # use. Recorded on every row, not only on refusals, so a reader can see
+            # at a glance whether this run could attribute refusals at all. A
+            # report full of nulls means the distinction below was inert.
+            "authz_control": control,
+            # The refusal message, so triaging a 403 does not start with a
+            # CloudWatch query. The dispatcher's own messages are fixed strings
+            # naming the field and the required groups; a resolver's names the
+            # control it applied.
+            "authz_message": message,
             # Kept for report/consumer compatibility, but `outcome` is the field
             # that decides anything. A SKIP is NOT passed: counting an absent
             # precondition as a satisfied assertion is the same conflation as
@@ -1342,9 +1550,23 @@ def _render_md(ctx, results, hard_fails, gap_fails, known_gaps, stamp, account):
         f"({len(hard_fails)} hard fail).",
         "",
         "> A **skipped** check asserted nothing, and a check that **could not be "
-        "run** (🛑 — a timeout, a dead connection, an unreadable body, a 5xx) "
-        "established nothing. Neither is counted as a pass. A known gap downgrades "
-        "either to a warning; it does not make it a pass.",
+        "run** (🛑 — a timeout, a dead connection, an unreadable body, a 5xx, or a "
+        "refusal by a control other than the one the cell tests) established "
+        "nothing. Neither is counted as a pass. A known gap downgrades either to a "
+        "warning; it does not make it a pass.",
+        "",
+        "> **Control** is which control refused, from the response's "
+        "`errors[0].authzControl`. `api-group-floor` is the field-level group "
+        "check in `authz.py`; `resource` is a per-object control inside a resolver "
+        "(a bucket allow-list, a session the caller does not own, a document "
+        "selection out of scope) which refuses a caller whose GROUP was admitted; "
+        "`resolver` is a resolver refusal that did not say which control it was, "
+        "and is read strictly. An empty column means the response carried no "
+        "label — a stack deployed before the label existed, the route's Cognito "
+        "authorizer answering 401 ahead of the dispatcher, or an in-band 200 "
+        "denial. Every 403 here was `errorType: \"Unauthorized\"` whichever "
+        "control produced it, so this column is the only thing that tells a "
+        "correct group refusal apart from a correct per-object one.",
         "",
     ]
     if parts["inconclusive"]:
@@ -1355,12 +1577,13 @@ def _render_md(ctx, results, hard_fails, gap_fails, known_gaps, stamp, account):
             "inconclusive result are different outcomes. Rows with no gap id are "
             "hard failures.",
             "",
-            "| Op | Principal | Status | Detail | Gap | Request ID |",
-            "|----|-----------|--------|--------|-----|------------|",
+            "| Op | Principal | Status | Control | Detail | Gap | Request ID |",
+            "|----|-----------|--------|---------|--------|-----|------------|",
         ]
         for r in parts["inconclusive"]:
             lines.append(
                 f"| `{r['op']}` | {r['principal']} | {r['http_status']} | "
+                f"{r.get('authz_control') or ''} | "
                 f"{r['detail']} | {r['known_gap'] or ''} | `{r['request_id']}` |"
             )
         lines.append("")
@@ -1368,12 +1591,13 @@ def _render_md(ctx, results, hard_fails, gap_fails, known_gaps, stamp, account):
         lines += [
             "## ❌ Hard failures",
             "",
-            "| Op | Principal | Status | Detail | Request ID |",
-            "|----|-----------|--------|--------|------------|",
+            "| Op | Principal | Status | Control | Detail | Request ID |",
+            "|----|-----------|--------|---------|--------|------------|",
         ]
         for r in parts["fail"]:
             lines.append(
                 f"| `{r['op']}` | {r['principal']} | {r['http_status']} | "
+                f"{r.get('authz_control') or ''} | "
                 f"{r['detail']} | `{r['request_id']}` |"
             )
         lines.append("")
@@ -1393,8 +1617,8 @@ def _render_md(ctx, results, hard_fails, gap_fails, known_gaps, stamp, account):
     lines += [
         "## Full matrix",
         "",
-        "| Op | Principal | Status | Pass | Detail | Request ID |",
-        "|----|-----------|--------|------|--------|------------|",
+        "| Op | Principal | Status | Pass | Control | Detail | Request ID |",
+        "|----|-----------|--------|------|---------|--------|------------|",
     ]
     for r in results:
         mark = _OUTCOME_MARK.get(r["outcome"], "❌")
@@ -1402,6 +1626,7 @@ def _render_md(ctx, results, hard_fails, gap_fails, known_gaps, stamp, account):
             mark = "⚠️🛑"
         lines.append(
             f"| `{r['op']}` | {r['principal']} | {r['http_status']} | {mark} | "
+            f"{r.get('authz_control') or ''} | "
             f"{r['detail']} | `{r['request_id']}` |"
         )
     lines += ["", "## Known gaps register", ""]
