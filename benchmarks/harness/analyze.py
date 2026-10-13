@@ -18,6 +18,37 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib  # noqa: E402
 
+CONF_BELOW = 0.9
+
+
+def confidence_distribution(confs, where=""):
+    """``mean_confidence`` / ``pct_conf_below_0.9`` / ``n_conf_leaves`` for one document.
+
+    The three figures were computed by the same copy-pasted expression in
+    ``score_synthetic`` and ``score_reference``, which is one definition too many
+    for a statistic whose range was never checked in either: GitHub #1395 found a
+    ``mean_confidence`` of 14.185 in four releases' committed grids, and it reached
+    both scorers through the same arithmetic.
+
+    The range check runs FIRST, before any of the three is computed, so a value
+    outside [0, 1] cannot be written and then flagged — see
+    :func:`lib.assert_confidences_in_range`, which raises rather than clamping. It
+    runs on the empty case too, where it passes because there is nothing out of
+    range; ``mean_confidence`` and ``pct_conf_below_0.9`` are then ``None`` and
+    ``n_conf_leaves`` is 0, which is what distinguishes "the grader scored nothing
+    here" from "it scored 0.0".
+    """
+    lib.assert_confidences_in_range(confs, where)
+    return {
+        "mean_confidence": round(sum(confs) / len(confs), 4) if confs else None,
+        "pct_conf_below_0.9": round(
+            100 * sum(1 for c in confs if c < CONF_BELOW) / len(confs), 1
+        )
+        if confs
+        else None,
+        "n_conf_leaves": len(confs),
+    }
+
 
 def score_confidence_coverage(sections):
     """Confidence coverage over every section of one document: scored/extracted rows.
@@ -1039,13 +1070,7 @@ def score_synthetic(bucket, doc_prefix, truth):
         "typed_fields": typed_tot or None,
         "cell_accuracy": cell_accuracy,
         "cells_compared": cell_tot or None,
-        "mean_confidence": round(sum(confs) / len(confs), 4) if confs else None,
-        "pct_conf_below_0.9": round(
-            100 * sum(1 for c in confs if c < 0.9) / len(confs), 1
-        )
-        if confs
-        else None,
-        "n_conf_leaves": len(confs),
+        **confidence_distribution(confs, f"{doc_prefix}sections/*/result.json"),
         **score_confidence_coverage(sections),
         # Calibration and discrimination against the exact per-cell truth (#935).
         # Only the synthetic corpus can carry these: a reference corpus is scored by
@@ -1150,13 +1175,7 @@ def score_reference(bucket, doc_prefix):
         "parse_failures": pf,
         "calibration_separation": sep,
         **score_classification(ev),
-        "mean_confidence": round(sum(confs) / len(confs), 4) if confs else None,
-        "pct_conf_below_0.9": round(
-            100 * sum(1 for c in confs if c < 0.9) / len(confs), 1
-        )
-        if confs
-        else None,
-        "n_conf_leaves": len(confs),
+        **confidence_distribution(confs, f"{doc_prefix}sections/*/result.json"),
         **score_confidence_coverage(sections),
     }
 
