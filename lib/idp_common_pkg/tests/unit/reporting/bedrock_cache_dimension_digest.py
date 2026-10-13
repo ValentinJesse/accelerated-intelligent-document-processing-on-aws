@@ -3,8 +3,8 @@
 
 """Which Bedrock models AWS publishes a prompt-cache billing dimension for.
 
-``config_library/pricing.yaml`` omits the two cache units on eleven ``bedrock/``
-entries, and an omitted unit used to be priced at exactly $0.00 by both cost
+``config_library/pricing.yaml`` omits one or both cache units on several
+``bedrock/`` entries, and an omitted unit used to be priced at $0.00 by both cost
 implementations with nothing recording *why* it was omitted — see
 [#1206](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1206).
 ``idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS`` now records a basis per
@@ -85,10 +85,12 @@ DIGEST_PATH = os.path.join(
 #: neither publishes a cache dimension and both carry 208 token-priced dimensions.
 #:
 #: Why **both** rates rather than the input one alone: on the input rate alone the
-#: eleven entries have 2 to 11 candidate models each, so the check was a rate
-#: collision away from meaningless. Requiring both pins 18 of the 21 members to
-#: exactly one model out of 141, and
-#: ``test_cache_unit_omission_basis.py`` pins what the remaining three leave open.
+#: entries then registered had 2 to 11 candidate models each, so the check was a
+#: rate collision away from meaningless. Requiring both pins most members to
+#: exactly one model out of the price list, and
+#: ``test_cache_unit_omission_basis.py`` pins what the rest leave open — as a
+#: floor and an equality rather than as a figure quoted here, because the figure
+#: moves whenever AWS adds a model at an identical rate.
 DIMENSION_PATTERNS = {
     "cacheReadInputTokens": r"cacheread",
     "cacheWriteInputTokens": r"cachewrite",

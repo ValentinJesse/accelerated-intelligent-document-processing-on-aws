@@ -29,6 +29,29 @@ that would break reproducibility) so a regenerated corpus is byte-comparable.
 > configuration — as `cell_accuracy` was here, exactly 0.500 for all 19 cells — suspect the
 > document before the product.
 
+> ⚠️ **The corpus manifest names paths relative to the repository root, and must.**
+> `corpus/manifest.yaml` is tracked and records a `pdf`, `truth` and `out` path per
+> document. Those paths are relative and are resolved at read time against the
+> manifest's own location (`harness/corpus_manifest.py`), so the manifest cannot name a
+> checkout other than the one holding it. It used to record absolute paths — whatever
+> `gen_corpus.py` produced on the machine that last ran it — and the committed copy
+> therefore named a sibling checkout, every path of it
+> ([#1393](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1393)).
+>
+> The case to worry about is the one that **works**. Where two checkouts sit side by
+> side, a consumer resolves those paths, reads documents and ground truth out of the
+> other tree, and produces a grid that is internally consistent, plausible, and about
+> code that was never run — and nothing in the output records which tree it came from,
+> so the result is not attributable to the commit it was run at. A machine without that
+> directory fails immediately and misleads nobody. An absolute path, a `~` or `$VAR`
+> path that becomes absolute on expansion, and a relative path that climbs out with
+> `..` are all refused rather than resolved, and a resolved path this checkout does not
+> hold is an error rather than a fallback: `corpus/docs/` is gitignored and
+> deterministically regenerable, so the remedy is always `python3
+> benchmarks/harness/gen_corpus.py`. Check the committed file with
+> `python3 benchmarks/harness/corpus_manifest.py --check`;
+> `benchmarks/tests/test_corpus_manifest_paths.py` asserts it on every PR.
+
 ### B. Reference (real, labeled)
 Existing stack test sets (`realkie-fcc-verified`, `ocr-benchmark`, `samples-tables`)
 with curated evaluation baselines. Real-world messiness the synthetic set can't emulate.
