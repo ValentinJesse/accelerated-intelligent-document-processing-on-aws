@@ -304,10 +304,16 @@ class TestTheFindingReachesTheSection:
         assert issue.section_id == "1"
         # ``root_cause`` is what an operator groups by when the same thing happens
         # across a batch, so it has to name the mode, the model and the condition.
-        # Also unpinned until a mutation survived.
-        assert "traditional extraction" in issue.root_cause
-        assert "truncated before completion" in issue.root_cause
-        assert self._model_of(svc) in issue.root_cause
+        # Asserted WHOLE rather than by fragments: three separate random-sample
+        # mutations survived a fragment-wise version of this (`"with model "`, the
+        # unrepaired suffix's `else ""`, and a clause of the remedy wording), all
+        # of them the same weak class — a string between two asserted strings.
+        # The expected value is BUILT from the service's own configured model, so
+        # it does not pin whatever the shipped default happens to be today.
+        assert issue.root_cause == (
+            f"traditional extraction with model {self._model_of(svc)}; "
+            f"response truncated before completion"
+        )
         # Durable, not merely in memory: this is what a reader opens.
         persisted = write.call_args.args[0]["metadata"]["processing_issues"]
         assert [i for i in persisted if i["code"] == CODE]
@@ -356,7 +362,9 @@ class TestTheFindingReachesTheSection:
         issue = next(i for i in section.processing_issues if i.code == CODE)
         assert issue.details["output_repaired"] is True
         assert issue.details["repair_method"] == "close_structures"
-        assert "close_structures" in issue.root_cause
+        assert issue.root_cause.endswith(
+            "response truncated before completion; repaired by close_structures"
+        )
 
     def test_an_unrepaired_result_does_not_claim_a_repair(self):
         svc = _svc()
@@ -373,6 +381,9 @@ class TestTheFindingReachesTheSection:
         issue = next(i for i in section.processing_issues if i.code == CODE)
         assert issue.details["output_repaired"] is False
         assert issue.details["repair_method"] is None
+        # Ends there — an absence assertion alone let a mutation of the `else ""`
+        # branch grow an arbitrary suffix and still pass.
+        assert issue.root_cause.endswith("response truncated before completion")
         assert "repaired by" not in issue.root_cause
 
     def test_a_complete_result_carries_no_truncation_issue(self):
@@ -425,11 +436,12 @@ class TestTheFindingReachesTheSection:
         )
         msg = next(i for i in section.processing_issues if i.code == CODE).message
         assert "use Advanced" not in msg
-        # Both halves again. Pinning only the second left a mutation of the first
-        # alive through the random sample.
-        assert "Reduce the rows" in msg
-        assert "max_pages_per_shard" in msg
-        assert "split the document" in msg
+        # The whole clause. Pinning only one half left a mutation of the other
+        # alive through the random sample, twice.
+        assert msg.endswith(
+            " Reduce the rows a single shard is asked for (extraction.agentic "
+            "max_pages_per_shard) or split the document."
+        )
 
     def test_the_warning_does_not_fail_the_section(self):
         """Severity is ``warning``, always — the scope line of this change.
@@ -732,12 +744,23 @@ class TestTheRemedyIsAvailableToTheDeploymentItIsGivenTo:
         )
         issue = self._issue_for(model)
         assert "use Advanced (agentic) extraction" not in issue.message
-        assert "split the document" in issue.message
+        # The whole alternative clause, not a fragment of it: a mutation of its
+        # second half survived a `"split the document" in message` assertion.
+        assert issue.message.endswith(
+            "split the document, or process it with a model that supports "
+            "Advanced (agentic) extraction, which shards the section across "
+            "requests."
+        )
         assert issue.details["advanced_mode_available"] is False
 
     def test_advanced_is_still_recommended_where_it_is_available(self):
         issue = self._issue_for("us.anthropic.claude-sonnet-5")
-        assert "use Advanced (agentic) extraction" in issue.message
+        assert issue.message.endswith(
+            " Simple extraction returns one response per section, so a section "
+            "whose answer does not fit in one response loses the tail; use "
+            "Advanced (agentic) extraction, which shards the section across "
+            "requests, or split the document."
+        )
         assert issue.details["advanced_mode_available"] is True
 
     def test_the_refusal_this_avoids_is_real(self):
