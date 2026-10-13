@@ -690,10 +690,10 @@ class TestTheListFieldsPresentAcrossSchemaShapes:
         assert truncated.details["list_fields_present"] == []
 
     def test_an_int_schema_key_cannot_be_a_response_key(self):
-        """The premise the paragraph above rests on, asserted rather than assumed.
+        """Half one of the premise the deletion rests on, asserted not assumed.
 
-        If ``ExtractionResult`` ever accepts a non-string key, the truncation
-        block's list can reach one and the deleted coercion has to come back.
+        If ``ExtractionResult`` ever accepts a non-string key, that half is gone.
+        It is not the load-bearing half — see the next test.
         """
         with pytest.raises(Exception):
             ExtractionResult(
@@ -703,8 +703,36 @@ class TestTheListFieldsPresentAcrossSchemaShapes:
                 total_duration=1.0,
             )
         # And the shape a response actually arrives in is string-keyed by
-        # construction, which is the other half of the premise.
+        # construction.
         assert all(isinstance(k, str) for k in json.loads(COMPLETE_JSON))
+
+    def test_a_schema_keyed_none_is_excluded_by_the_isinstance_guard(self):
+        """Half two, and the one that actually does the work.
+
+        ``_save_results`` passes the builder ``_apply_missing_field_handling``'s
+        output, not ``result.extracted_fields``, and that function writes
+        ``fields_out[prop_name] = None`` keyed by the **schema** property name. So
+        a non-string name *can* be a key in the dict the builder sees, and what
+        keeps it out of the list is the ``isinstance(..., list)`` test rejecting
+        ``None`` — not the typing of ``ExtractionResult``.
+
+        Which means the list is **unreachable** with a non-string name rather than
+        safe against one: handed ``{2024: [{...}]}`` directly the join would raise.
+        That shape has no producer, so the coercion was deleted rather than kept;
+        this is the assertion that the thing which replaces it holds.
+        """
+        svc = _svc()
+        svc._class_schema = {
+            "type": "object",
+            "properties": {2024: {"type": "array", "items": ROW}},
+        }
+        issues = svc._build_extraction_issues(
+            extracted_fields={2024: None},
+            metadata={"output_truncated": True},
+            section_id="1",
+        )
+        truncated = next(i for i in issues if i.code == CODE)
+        assert truncated.details["list_fields_present"] == []
 
     def test_a_class_with_no_list_fields_at_all_is_still_reported(self):
         """A truncated form has lost scalars, and this is the only signal for it."""

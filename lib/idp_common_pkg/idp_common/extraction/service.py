@@ -3814,16 +3814,31 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             # came back as a string is not reported as a list.
             #
             # No `str(name)` here, unlike the empty-list join above, and the
-            # asymmetry is the point rather than an oversight. A non-string schema
-            # property name (a bare `2024` read straight from YAML) can never be a
-            # KEY in `extracted_fields`: that dict comes from `json.loads` or from a
-            # forced-tool payload, both of which have string keys only, and
-            # `ExtractionResult.extracted_fields` is typed `dict[str, Any]`. So such
-            # a name always fails the lookup here and lands in `empty_lists` instead
-            # — which is why that join needs the coercion and this one cannot reach
-            # it. A `str()` here would be dead defence, and the test that was
-            # written to cover it could not: it set an `int` schema key and a
+            # asymmetry is the point rather than an oversight — but be precise about
+            # WHY, because the obvious reason is the wrong one. A non-string schema
+            # property name (a bare `2024` read straight from YAML) reaching this
+            # join would raise `TypeError`, and this function has no enclosing
+            # `try`. Two things together keep it from arriving, and it is the second
+            # that is load-bearing:
+            #
+            # 1. The RESPONSE cannot supply such a key. `extracted_fields` comes
+            #    from `json.loads` or from a forced-tool payload, both string-keyed,
+            #    and `ExtractionResult.extracted_fields` is typed `dict[str, Any]`.
+            # 2. One path DOES key by schema name, so (1) alone is not enough:
+            #    `_apply_missing_field_handling` — whose output is what
+            #    `_save_results` passes here, not `result.extracted_fields` — does
+            #    `fields_out[prop_name] = None` or pops the key. So a non-string
+            #    name can be present, and what excludes it is the
+            #    `isinstance(..., list)` test below: the value is `None`, never a
+            #    list.
+            #
+            # So this list is **unreachable** with a non-string name rather than
+            # safe against one, and the `isinstance` guard is what makes the
+            # coercion unnecessary. A `str()` here would be dead defence, and the
+            # test written to cover it could not: it set an `int` schema key and a
             # `str` response key, so `present` was empty and the mutation survived.
+            # `empty_lists` above is the opposite case — a schema-only name lands
+            # there by construction — which is why that join keeps its coercion.
             present = [
                 name
                 for name in array_fields
