@@ -155,6 +155,7 @@ RUN_ROOTS = [
     # The discovery upload path's bucket/key constraint: `bucket` and `prefix` are
     # request arguments and this function's role holds write on the discovery bucket.
     "nested/api-resolvers/src/lambda/discovery_upload_resolver",
+    "nested/api-resolvers/src/lambda/delete_agent_chat_session_resolver",
     "nested/api-resolvers/src/lambda/get_agent_chat_messages_resolver",
     "nested/api-resolvers/src/lambda/get_sample_document_resolver",
     "nested/api-resolvers/src/lambda/get_stepfunction_execution_resolver",
