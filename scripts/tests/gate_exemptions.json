@@ -2859,6 +2859,25 @@
         1378
       ],
       "reason": "Discovered through the prose route, on a comment explaining that a recognition rule 'would let codes through' -- which reads to the matcher as an exemption rationale and is the exact opposite. The three members are chosen so that no rule a recorder might plausibly carry admits any of them: one has a real stage prefix so an exact-code allowlist rejects it, one has no prefix any service uses so a prefix rule rejects it, one has a stage that is not a pipeline stage. That spread is measured rather than guessed: a single invented code spelled extraction_... left a recorder filtering on startswith(('extraction_', 'assessment_', 'classification_')) passing the entire suite, which is this issue's own defect one level up. The ratchet is that each member is asserted ABSENT from the AST-derived universe of real codes, so if a service ever adopts one of these names the negative control stops being negative and the test fails rather than becoming vacuous; the file also asserts the derived universe is non-empty, because an empty parametrisation collects as a pytest SKIP with a green exit. Registered rather than reworded, because rewording a comment to slip past discovery is the failure this registry exists to prevent."
+    },
+    "scripts/sdlc/scan_api_rbac.py::OWNERSHIP_REFUSAL_PATTERNS": {
+      "kind": "enforced-universe",
+      "memberKind": "one spelling of a refusal, which the S3 ownership arm accepts as evidence that an `ownership: true` declaration is enforced",
+      "turnsOff": "nothing by itself. It widens what SATISFIES the S3 ownership arm: a resolver declaring `ownership: true` is believed if its file contains one of these spellings, or if every key expression in it names a caller term. Before this arm existed the declaration was believed on a substring match against OWNERSHIP_PATTERNS alone, which name the SUBJECT of a check rather than the check -- so a resolver mentioning `user_id` in a log line satisfied it while scoping nothing.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "reason": "Detection vocabulary, not a carve-out -- the same shape as SCOPE_PATTERNS beside it. Registered because the direction matters: this list decides which files the gate BELIEVES, so a pattern in it that matches nothing is not harmless, it is pre-approval of whatever next contains that string. That is the identical hazard RATCHET_EVIDENCE_MARKERS carries in this registry's own meta-test, and the reason given there applies verbatim. JUDGEMENT rather than a computed premise because the fact that would have to be computed is 'this string denotes a refusal in this codebase's idiom', which is a reading of code intent and not a property of a path or a file. The ratchet is what makes that safe, and it is stronger than the premise would have been.",
+      "ratchet": "non-vacuity",
+      "ratchetEvidence": [
+        "scripts/sdlc/tests/test_ownership_refusal_vocabulary.py"
+      ],
+      "ratchetDetail": "test_no_refusal_pattern_is_dead asserts every member matches at least one of the 9 ownership-declaring resolvers' enforced_in files -- so a member that shields nothing is vacuous and fails. It fired on its first run and two speculative members were deleted on that evidence (`raise Unauthorized` and the errorType literal). test_the_arm_still_rejects_a_resolver_that_never_refuses pins the other direction, that the vocabulary does not admit the shape the arm was added for, so the two tests cannot both pass by the list becoming broad enough to accept everything. A third test guards both against an empty universe.",
+      "ratchetGap": "A member that matches a resolver for a reason unrelated to refusing is not detected: non-vacuity establishes that the string occurs, not that its occurrence is a refusal. `PermissionError` is the realistic case, since a file could name it in an unrelated `except`. Bounded by the arm being a disjunction with the per-access predicate rather than the only route, and by the live RBAC matrix, which exercises the refusal itself rather than its spelling.",
+      "issues": [
+        1308
+      ],
+      "discoveryNote": "Discovered via the PROSE route, not the name route: OWNERSHIP_REFUSAL_PATTERNS contains none of NAME_VOCABULARY's fragments (no EXEMPT/EXCLU/ALLOW/SKIP/...), so it was the attached comment that caught it -- the safety net firing where the reliable route did not, which is the one direction exemption_discovery.py says not to count on. Had the comment been worded differently this surface would have gone unregistered. Kept as a note rather than acted on, because renaming the constant to carry a vocabulary fragment would make it read as a carve-out, which it is not."
     }
   }
 }
