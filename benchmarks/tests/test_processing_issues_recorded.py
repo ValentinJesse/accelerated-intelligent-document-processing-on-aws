@@ -466,34 +466,62 @@ def test_every_severity_the_tree_can_emit_reaches_the_summary(severity, tmp_path
     assert summary["rows"][0]["processing_issues_by_severity"] == {severity: 1}
 
 
-def test_an_issue_type_nobody_has_written_yet_is_recorded_unchanged(tmp_path):
+# Codes no service emits, chosen so that no recognition rule a recorder might
+# plausibly carry would let any of them through. Measured rather than guessed: a
+# single invented code sharing the `extraction_` prefix left a recorder filtering on
+# `startswith(("extraction_", "assessment_", "classification_"))` — which is the
+# defect this change closes, one level up — passing the whole suite.
+#
+# * one with a real stage prefix, which an exact-code allowlist rejects;
+# * one with no prefix any service here uses, which a prefix rule rejects;
+# * one whose stage is not a pipeline stage at all.
+INVENTED_CODES = [
+    "extraction_rows_below_a_metric_invented_in_2027",
+    "a_shortfall_no_service_here_reports_yet",
+    "telepathy_unanimity_not_reached",
+]
+
+
+@pytest.mark.parametrize("invented_code", INVENTED_CODES)
+def test_an_issue_type_nobody_has_written_yet_is_recorded_unchanged(
+    invented_code, tmp_path
+):
     """The forward-looking half, and the one that says the recorder is not a list.
 
     A code and a severity that appear nowhere in this repository must come back
-    counted, tallied and readable. If this ever needs a harness edit to pass, the
-    recorder has become the control it replaced.
+    counted, tallied and readable, **beside** a code that does. If this ever needs a
+    harness edit to pass, the recorder has become the control it replaced.
     """
-    invented_code = "extraction_rows_below_a_metric_invented_in_2027"
     invented_severity = "catastrophe"
     assert invented_code not in CODES
     assert invented_severity not in SEVERITIES
 
+    known = "extraction_incomplete"
+    assert known in CODES
     summary, csv_rows = _written(
         tmp_path,
         [
             _row(
                 "c",
                 "d.pdf",
-                [_section(_issue(invented_code, invented_severity, stage="telepathy"))],
+                [
+                    _section(
+                        _issue(invented_code, invented_severity, stage="telepathy"),
+                        # Beside a real one, so a recorder that keeps only the codes
+                        # it recognises cannot pass by recording this and dropping
+                        # the other.
+                        _issue(known, "warning", stage="extraction"),
+                    )
+                ],
             )
         ],
     )
     (out,) = summary["rows"]
-    assert out["processing_issues"] == 1
-    assert out["processing_issues_by_code"] == {invented_code: 1}
-    assert out["processing_issues_by_severity"] == {invented_severity: 1}
-    assert out["processing_issues_by_stage"] == {"telepathy": 1}
-    assert csv_rows[0]["processing_issue_codes"] == f"{invented_code}=1"
+    assert out["processing_issues"] == 2
+    assert out["processing_issues_by_code"] == {invented_code: 1, known: 1}
+    assert out["processing_issues_by_severity"] == {invented_severity: 1, "warning": 1}
+    assert out["processing_issues_by_stage"] == {"telepathy": 1, "extraction": 1}
+    assert invented_code in csv_rows[0]["processing_issue_codes"]
     assert (
         summary["cell_stats"]["c"]["processing_issues"]["by_code"][invented_code] == 1
     )
@@ -515,6 +543,10 @@ def test_a_clean_document_records_zero_and_never_null():
     assert out["processing_issues_by_severity"] == {}
     assert out["processing_issue_detail"] == []
     assert out["processing_issue_codes"] is None
+    # A section with no `processing_issues` key is CLEAN, not malformed. Reporting a
+    # malformed count here would put a parse complaint on every healthy run, which
+    # is the fastest way to teach a reader to ignore the field.
+    assert out["processing_issues_malformed"] is None
 
 
 def test_a_document_whose_sections_did_not_read_records_no_issue_keys_at_all(
@@ -553,6 +585,24 @@ def test_a_read_document_with_issues_is_scored_by_the_real_scorers(monkeypatch):
     ):
         assert row["processing_issues"] == 1
         assert row["processing_issues_by_code"] == {"extraction_incomplete": 1}
+
+
+def test_a_section_whose_metadata_is_not_a_dict_does_not_stop_the_document():
+    """Every section result.json in this corpus carries a ``metadata`` dict, so this
+    shape is reachable only from malformed or very old output — which is precisely
+    when a scoring pass must not die part-way through a 130-run grid. The sections
+    around it are still read."""
+    out = analyze.score_processing_issues(
+        [
+            {"inference_result": {}},
+            {"metadata": None},
+            {"metadata": "not a dict"},
+            {"metadata": ["also not a dict"]},
+            _section(_issue("extraction_incomplete")),
+        ]
+    )
+    assert out["processing_issues"] == 1
+    assert out["processing_issues_by_code"] == {"extraction_incomplete": 1}
 
 
 def test_malformed_issue_entries_are_counted_not_dropped():
@@ -673,6 +723,32 @@ def test_the_cell_rollup_counts_the_runs_that_failed_too(tmp_path):
     }
 
 
+def test_a_cell_holding_a_row_that_was_never_scored_still_rolls_up(tmp_path):
+    """``score_all`` emits ``{..., "status": "NOT_LAUNCHED"}`` rows carrying no issue
+    keys at all, and ``--augment`` produces grids mixing scored and unscored rows.
+    The roll-up has to read those as "nothing recorded" rather than raising, and it
+    must not report the unscored run as clean: ``n_runs_scored`` is short of
+    ``n_runs``, which is what says the counts cover fewer runs than the cell has.
+    """
+    not_launched = {
+        "cell": "c",
+        "doc": "never.pdf",
+        "sub_doc": None,
+        "repeat": 0,
+        "resolved": {},
+        "run_id": None,
+        "status": "NOT_LAUNCHED",
+        "success": False,
+    }
+    rows = [not_launched, _row("c", "ok.pdf", [_section(_issue("extraction_sparse"))])]
+    summary, _ = _written(tmp_path, rows)
+    block = summary["cell_stats"]["c"]["processing_issues"]
+    assert block["n_runs"] == 2
+    assert block["n_runs_scored"] == 1
+    assert block["n_runs_with_issues"] == 1
+    assert block["by_code"] == {"extraction_sparse": 1}
+
+
 def test_scoring_prints_a_warning_naming_the_codes(tmp_path, capsys):
     """Whoever runs ``aggregate.py`` is the person about to copy these numbers
     somewhere. A completeness warning that only ever reaches a file is how a warned
@@ -692,6 +768,12 @@ def test_scoring_prints_a_warning_naming_the_codes(tmp_path, capsys):
     assert "processing issues" in printed
     assert "extraction_rows_below_ocr_estimate=1" in printed
     assert "error=1" in printed
+    # The notice has to say the run is not clean and where to read the detail.
+    # Asserting only the first and last fragments leaves the sentence between them
+    # unread — measured: a mutation blanking that line survived the suite.
+    assert "NOT clean" in printed
+    assert "processing_issue_detail" in printed
+    assert "1 issue(s) on 1 of 1 runs" in printed
 
 
 def test_a_clean_grid_prints_no_warning(tmp_path, capsys):
