@@ -3811,13 +3811,21 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
             # order is not safe to lean on. Naming the wrong field is worse than
             # naming none, so this reports presence and leaves the inference to the
             # reader. `isinstance` rather than truthiness, so a declared array that
-            # came back as a string is not reported as a list; `map(str, ...)`
-            # because a schema read straight from YAML can carry a non-string
-            # property name (a bare `2024`) and this function runs with no
-            # enclosing `try` — a raise here would cost the section its whole
-            # processing-issue list.
+            # came back as a string is not reported as a list.
+            #
+            # No `str(name)` here, unlike the empty-list join above, and the
+            # asymmetry is the point rather than an oversight. A non-string schema
+            # property name (a bare `2024` read straight from YAML) can never be a
+            # KEY in `extracted_fields`: that dict comes from `json.loads` or from a
+            # forced-tool payload, both of which have string keys only, and
+            # `ExtractionResult.extracted_fields` is typed `dict[str, Any]`. So such
+            # a name always fails the lookup here and lands in `empty_lists` instead
+            # — which is why that join needs the coercion and this one cannot reach
+            # it. A `str()` here would be dead defence, and the test that was
+            # written to cover it could not: it set an `int` schema key and a
+            # `str` response key, so `present` was empty and the mutation survived.
             present = [
-                str(name)
+                name
                 for name in array_fields
                 if isinstance(extracted_fields.get(name), list)
                 and extracted_fields.get(name)

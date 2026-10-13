@@ -647,18 +647,24 @@ class TestTheListFieldsPresentAcrossSchemaShapes:
         """``_build_extraction_issues`` runs with no enclosing ``try``.
 
         A schema read straight from YAML can carry a bare numeric key, which
-        arrives as an ``int``. These names come from the **schema**, so they reach
-        the joins regardless of what the response holds, and an unguarded
-        ``str.join`` over one raises ``TypeError`` — which, with no enclosing
-        ``try`` in ``_save_results``, costs the section its whole processing-issue
-        list and fails the save.
+        arrives as an ``int``. Schema names reach the **empty-list** join whatever
+        the response holds, and an unguarded ``str.join`` over one raises
+        ``TypeError`` — which, with no enclosing ``try`` in ``_save_results``,
+        costs the section its whole processing-issue list and fails the save. That
+        join is the one this pins, and the mutation that removes its coercion is
+        caught here.
 
-        Driven through the builder directly rather than through ``_save_results``,
-        because ``ExtractionResult.extracted_fields`` is typed ``dict[str, Any]``
-        and pydantic refuses a non-string key — so the response side cannot carry
-        one and the schema side is the whole exposure. Both joins are covered here:
-        the pre-existing empty-list one (an ``int`` name is never a key in the
-        response, so it lands there) and the truncation one.
+        It does **not** cover the truncation block's own list, because that list
+        cannot reach a non-string name: ``extracted_fields`` comes from
+        ``json.loads`` or from a forced-tool payload, both string-keyed, and
+        ``ExtractionResult.extracted_fields`` is typed ``dict[str, Any]`` — so an
+        ``int`` schema name always fails the lookup and lands in ``empty_lists``
+        instead. A coercion there would have been dead defence, and this test
+        claimed to cover it while measurably not doing so (the mutation survived),
+        so the coercion was deleted rather than the claim kept.
+
+        Driven through the builder directly, because pydantic refuses a non-string
+        key on ``ExtractionResult`` and the point is the schema side.
         """
         svc = _svc()
         svc._class_schema = {
@@ -674,13 +680,31 @@ class TestTheListFieldsPresentAcrossSchemaShapes:
         # Nothing raised, and both issues were produced rather than the list being
         # lost. The empty-list issue names the field, because an `int` schema name
         # is never a key in the response and so reads as an absent list; the
-        # truncation issue claims nothing, for the same reason.
+        # truncation issue claims nothing, for the same reason — which is also why
+        # it needs no coercion of its own.
         assert CODE in codes, codes
         assert "extraction_incomplete" in codes, codes
         empty = next(i for i in issues if i.code == "extraction_incomplete")
         assert "2024" in empty.message
         truncated = next(i for i in issues if i.code == CODE)
         assert truncated.details["list_fields_present"] == []
+
+    def test_an_int_schema_key_cannot_be_a_response_key(self):
+        """The premise the paragraph above rests on, asserted rather than assumed.
+
+        If ``ExtractionResult`` ever accepts a non-string key, the truncation
+        block's list can reach one and the deleted coercion has to come back.
+        """
+        with pytest.raises(Exception):
+            ExtractionResult(
+                extracted_fields={2024: _rows(1)},  # type: ignore[dict-item]
+                metering={},
+                parsing_succeeded=True,
+                total_duration=1.0,
+            )
+        # And the shape a response actually arrives in is string-keyed by
+        # construction, which is the other half of the premise.
+        assert all(isinstance(k, str) for k in json.loads(COMPLETE_JSON))
 
     def test_a_class_with_no_list_fields_at_all_is_still_reported(self):
         """A truncated form has lost scalars, and this is the only signal for it."""
