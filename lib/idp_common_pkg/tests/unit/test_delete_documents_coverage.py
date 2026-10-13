@@ -303,9 +303,13 @@ class TestQueryShardForObjectKey:
         # result here means list entries survive the delete.
         table = _table()
         pages = [_list_row("a"), _list_row("b"), _list_row("c")]
+        # A non-matching row on a later page, so this test sees the selection as well
+        # as the pagination: with every row matching, a branch that appended
+        # unconditionally would produce an identical result.
+        stranger = {"PK": "pk", "SK": "ts#z#id#someone/else.pdf"}
         table.query.side_effect = [
             {"Items": [pages[0]], "LastEvaluatedKey": {"PK": "p"}},
-            {"Items": [pages[1]], "LastEvaluatedKey": {"PK": "p2"}},
+            {"Items": [pages[1], stranger], "LastEvaluatedKey": {"PK": "p2"}},
             {"Items": [pages[2]]},
         ]
         assert [i["SK"] for i in _query_shard_for_object_key(table, "pk", KEY)] == [
