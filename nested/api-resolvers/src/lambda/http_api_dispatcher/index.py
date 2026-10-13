@@ -114,11 +114,27 @@ def _denial_response(message: str, control: str) -> Dict[str, Any]:
     label is the failure mode this exists to prevent, and the harness reads an
     absent label as "this deployment cannot tell me", which silently restores the
     behaviour #1308 is about.
+
+    An unrecognised value is **logged and downgraded, never raised.** Every call
+    site passes one of the module constants, so reaching this branch is a
+    programming error — but this function runs inside an ``except`` handler, so an
+    exception from here escapes the handler entirely and API Gateway answers a
+    bodiless 502. A refusal that becomes a 502 is worse than one carrying the wrong
+    label: it stops being a denial the UI can render, and it moves a deliberate
+    policy decision into the 5xx rate that server faults are alarmed on. Denying
+    with the strict label keeps the refusal a refusal, and the ERROR line is how the
+    mistake gets found.
     """
-    if control not in AUTHZ_CONTROLS:  # pragma: no cover - defensive
-        raise ValueError(
-            f"unknown authz control {control!r}; expected one of {AUTHZ_CONTROLS}"
+    if control not in AUTHZ_CONTROLS:
+        logger.error(
+            "Unknown authz control %r; expected one of %s. Denying with %r, which "
+            "every consumer reads strictly. This is a programming error in this "
+            "module, not an authorization decision about the caller.",
+            control,
+            AUTHZ_CONTROLS,
+            AUTHZ_CONTROL_RESOLVER_UNSPECIFIED,
         )
+        control = AUTHZ_CONTROL_RESOLVER_UNSPECIFIED
     return _http_response(
         403,
         {

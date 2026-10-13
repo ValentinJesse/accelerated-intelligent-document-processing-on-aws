@@ -1131,3 +1131,18 @@ def test_the_resource_class_is_a_permission_error_so_old_mappings_still_apply():
 
 def test_the_group_floor_class_is_a_permission_error(authz):
     assert issubclass(authz.GroupFloorDenied, PermissionError)
+
+
+def test_an_unknown_control_still_denies_rather_than_502ing(idx, monkeypatch, caplog):
+    """``_denial_response`` runs inside an ``except`` handler, so raising from it
+    escapes the handler and API Gateway answers a bodiless 502 — a refusal that
+    stops being a refusal, and a policy denial counted in the 5xx rate that server
+    faults are alarmed on. An unrecognised label is logged and downgraded to the
+    strict one instead."""
+    with caplog.at_level("ERROR"):
+        resp = idx._denial_response("Unauthorized: x", "not-a-control")
+
+    assert resp["statusCode"] == 403
+    assert _error(resp)["errorType"] == "Unauthorized"
+    assert _refusal_control(resp) == idx.AUTHZ_CONTROL_RESOLVER_UNSPECIFIED
+    assert any("Unknown authz control" in r.message for r in caplog.records)
