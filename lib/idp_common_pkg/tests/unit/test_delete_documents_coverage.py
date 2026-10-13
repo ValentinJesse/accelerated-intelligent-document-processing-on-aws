@@ -834,6 +834,84 @@ class TestDeleteSingleDocument:
         result = delete_single_document(KEY, _table(), s3, "in", "out")
         assert result["deleted"]["output_files"] == 2
 
+    def test_a_refused_purge_is_not_counted_as_a_deletion(self):
+        """``DeleteObjects`` answers **200** for a batch it refused entirely.
+
+        Per-key outcomes come back in an ``Errors`` array and the S3 service model
+        declares no exception for them — measured: ``DeleteObjects`` output members are
+        ``['Deleted', 'RequestCharged', 'Errors']`` and its modelled error list is
+        empty. So nothing raises, the retry ladder returns normally, and counting
+        ``len(batch)`` reported a wholly denied purge as a completed one.
+
+        That is the second half of #1366 and the more dangerous one: with the
+        enumeration permitted but the versioned delete refused — which is exactly what
+        granting ``s3:ListBucketVersions`` alone would produce, since SAM's
+        ``S3CrudPolicy`` carries neither versioned action — the document would be
+        delisted and reported deleted while every byte of its output stayed in the
+        bucket.
+        """
+        s3 = _s3([{"Versions": [{"Key": OUT1, "VersionId": "v1"}]}])
+        s3.delete_objects.return_value = {
+            "Errors": [
+                {
+                    "Key": OUT1,
+                    "VersionId": "v1",
+                    "Code": "AccessDenied",
+                    "Message": "Access Denied",
+                }
+            ]
+        }
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert result["success"] is False, "a refused purge was reported as a success"
+        assert result["deleted"]["output_files"] == 0
+        assert any("AccessDenied" in message for message in result["errors"]), (
+            f"the refusal did not reach the caller: {result['errors']}"
+        )
+
+    def test_a_partly_refused_purge_counts_only_what_went(self):
+        """The count has to be what was deleted, not what was attempted.
+
+        ``Quiet=True`` suppresses the ``Deleted`` array, so the only way to know is
+        ``len(batch) - len(Errors)``; a report of "3 deleted" for a batch of three where
+        one was refused is the same miscount as the whole-batch case, just quieter.
+        """
+        versions = [{"Key": f"{KEY}/sections/{i}.json", "VersionId": f"v{i}"} for i in range(3)]
+        s3 = _s3([{"Versions": versions}])
+        s3.delete_objects.return_value = {
+            "Errors": [
+                {
+                    "Key": versions[2]["Key"],
+                    "VersionId": "v2",
+                    "Code": "AccessDenied",
+                    "Message": "Access Denied",
+                }
+            ]
+        }
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert result["deleted"]["output_files"] == 2
+        assert result["success"] is False
+
+    def test_a_purge_with_no_refusals_is_unaffected(self):
+        """The ordinary case, asserted so the check above cannot be vacuous.
+
+        S3 omits ``Errors`` when nothing was refused. This reads membership rather than
+        ``.get()`` for the reason the pagination loops in this module do — a bare
+        ``MagicMock`` auto-creates a truthy value for any key — so the shape that must
+        keep working is "the key is absent".
+        """
+        s3 = _s3([{"Versions": [{"Key": OUT1, "VersionId": "v1"}]}])
+        s3.delete_objects.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        result = delete_single_document(KEY, _table(), s3, "in", "out")
+
+        assert result["deleted"]["output_files"] == 1
+        assert result["errors"] == []
+        assert result["success"] is True
+
     def test_a_sibling_sharing_the_key_as_a_byte_prefix_is_not_purged(self):
         """The assertion that matters: what the purge leaves alone (#1133).
 
