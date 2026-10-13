@@ -270,7 +270,21 @@ blind spot before it was closed.
 
 - **A `None` metric is "not measured", never "fine".** Before reporting "no effect",
   check that the instrument that would have shown the effect was populated — the
-  aggregate prints `cells_compared` alongside `cell_accuracy` for exactly this.
+  aggregate prints `cells_compared` alongside `cell_accuracy`, in both the JSON and
+  the CSV, for exactly this.
+- **An ABSENT metric has a third reading the rule above does not cover: "does not
+  apply to this row".** The two scorers emit disjoint accuracy families, so every
+  exact-key metric is absent on a reference row and `weighted_accuracy` is absent on
+  a synthetic one, and neither absence says anything about the run. Read
+  `scored_against` on the row before reading its accuracy at all: `exact_truth` means
+  the exact-key family is the measurement, `stack_evaluation` means
+  `weighted_accuracy` and `class_accuracy` are, and `exact_truth_unavailable` spells
+  out which. Per cell, `n_scored_exact_truth` and `n_scored_stack_evaluation` are the
+  denominators the corresponding `_stats` `n`s belong to — in `core` a 141-run cell
+  splits 21 / 120, so **both** accuracy `n`s look thinned against `n_success` and
+  neither is. A mean taken across the two families is a mean over no observations,
+  which prints as `nan`; that is a property of the column read and not of the runs
+  ([#1364](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1364)).
 - **Scoring is retroactive.** It re-reads S3 and DynamoDB, so adding truth or a metric
   lets an already-completed run be re-scored with no new spend. Prefer that to a re-run.
 
