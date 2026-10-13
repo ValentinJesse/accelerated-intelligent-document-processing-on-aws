@@ -1877,6 +1877,14 @@ class TestRequireAllTreesIsDerivedFromTheRegistry:
         trees = [_fake_tree(tmp_path, t.name) for t in ccd.TREES]
         _install(monkeypatch, tmp_path, trees, {"trees": {}})
         monkeypatch.setattr(ccd, "tracked_source_files", lambda t: [])
+        # ⚠️ `LEGACY_IDP_COMMON_REPORT` is an absolute path fixed at import, so
+        # `_install`'s REPO_ROOT patch does not move it and `idp_common` resolves to
+        # whatever report the real checkout happens to hold. Without this the test
+        # passes on a clean tree and fails right after `make test-cicd` writes that
+        # file — an order dependence, not a finding.
+        monkeypatch.setattr(
+            ccd, "LEGACY_IDP_COMMON_REPORT", tmp_path / "no-legacy-report.xml"
+        )
         monkeypatch.setattr(
             sys, "argv", ["check_coverage_debt.py", "--require-all-trees"]
         )
