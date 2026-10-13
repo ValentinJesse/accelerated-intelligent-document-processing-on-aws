@@ -135,6 +135,10 @@ in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configu
   but an `openai.gpt-5.*` id written into a configuration by hand still routes
   to `us-east-1` through bedrock-mantle, with only a warning logged (same as
   EU). Avoid them in Canada.
+- **The Canada swaps are one-way.** A configuration that holds a `ca.` id keeps
+  it when carried into a US or EU stack, and an `eu.` id stored in a Canada
+  stack is not rewritten. The picklists hide both, but a stored value stays
+  until someone edits it.
 - **ca-west-1** receives the same handling as ca-central-1 but has not been
   validated.
 

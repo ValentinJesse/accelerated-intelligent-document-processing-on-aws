@@ -97,7 +97,7 @@ The BdaService can be configured with:
 - `dataAutomationProjectArn`: Optional ARN of a BDA project
 - `dataAutomationProfileArn`: Optional ARN of a BDA profile (defaults to standard profile)
 
-The default profile's geo prefix is derived from the stack region: `us.` / `eu.` / `apac.` for those geos, and `na.` for Canada (Central) — AWS names the Canada profile `na.data-automation-v1`, not `ca.`.
+The default profile's geo prefix is derived from the stack region, including `us.` / `eu.` / `apac.` for those geos and `na.` for Canada (Central) — AWS names the Canada profile `na.data-automation-v1`, not `ca.`.
 
 ```python
 bda_service = BdaService(

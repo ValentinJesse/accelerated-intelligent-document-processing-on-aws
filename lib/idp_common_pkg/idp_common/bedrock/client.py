@@ -645,8 +645,10 @@ CACHEPOINT_SUPPORTED_MODELS = [
     "eu.amazon.nova-2-lite-v1:0",
     "eu.amazon.nova-2-lite-v1:0:priority",
     "eu.amazon.nova-2-lite-v1:0:flex",
-    # Canada geo profile of Nova Lite: the same model as the us./eu. rows above,
-    # so it takes the same cachePoint blocks.
+    # Canada geo profile of Nova Lite. Measured in ca-central-1 on 2026-10-12: a
+    # 7,530-token system prompt followed by a cachePoint wrote 7,530 tokens
+    # (cacheWriteInputTokens) and an identical second call read 7,530
+    # (cacheReadInputTokens).
     "ca.amazon.nova-lite-v1:0",
     "global.amazon.nova-2-lite-v1:0",
     "global.amazon.nova-2-lite-v1:0:priority",
