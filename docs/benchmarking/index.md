@@ -73,6 +73,25 @@ it — no effect, or no opportunity? `forced_tool_honored_rate` (a forced tool t
 answered in prose has measured nothing), `coercions` / `coercion_refusals`, and
 `validation_valid_rate` are reported per run and rolled up per cell.
 
+**Did the pipeline warn about anything?** Extraction, classification and assessment
+emit structured `ProcessingIssue`s — `extraction_rows_below_ocr_estimate`,
+`assessment_coverage_incomplete`, `extraction_validation_failed` and the rest — and
+`analyze.py` records them per run as `processing_issues` (the count, `0` on a clean
+run and never null), `processing_issues_by_severity` / `_by_code` / `_by_stage`
+(tallies), and `processing_issue_detail` (every issue verbatim, which is where the
+message a reader needs lives). `cell_stats` merges the tallies per cell over **all**
+its runs including the failed ones, and `aggregate.py` prints a `⚠` line at scoring
+time naming the codes. The CSV carries the count plus the severity and code tallies
+rendered flat.
+
+Read these **before** reading a completeness figure. A check that fires into a field
+nobody reads is indistinguishable, in the results tree, from a check that does not
+fire — so until these existed a run whose extraction reported losing rows was
+recorded identically to a clean one, which is how a warned run came to be described
+as a silent one. Nothing in the recorder enumerates issue codes: the tallies are
+keyed on each issue's own values, so a code added to any service is recorded without
+a harness change.
+
 Scoring is **resolver-free** — it reads S3 output and DynamoDB metering directly, so it
 works on any stack version (useful for cross-release comparisons).
 

@@ -761,6 +761,107 @@ def score_audit_metadata(sections):
     }
 
 
+def render_tally(tally):
+    """A ``{name: count}`` tally as one CSV-safe string, or ``None`` when empty.
+
+    ``"code=4 other_code=1"``, sorted by name so two grids diff. Needed because
+    ``aggregate._write_summary_csvs`` uses ``csv.DictWriter``: a dict row value
+    stringifies to its ``repr`` in the cell, and a key absent from ``CSV_COLS`` is
+    dropped without a word. The JSON keeps the tally as a tally.
+    """
+    return " ".join(f"{k}={tally[k]}" for k in sorted(tally)) or None
+
+
+def score_processing_issues(sections):
+    """What the pipeline WARNED about on this document (GitHub #1378).
+
+    ``grep -rn processing_issues benchmarks/harness/*.py`` returned nothing before
+    this existed. Extraction, classification and assessment all emit
+    :class:`idp_common.models.ProcessingIssue`, and none of it reached
+    ``benchmarks/results/*/summary.json`` — so a run whose extraction reported
+    losing rows was recorded identically to a clean one, and **a check that fires
+    into a field nobody reads is indistinguishable, in the results tree, from a
+    check that does not fire**. Issue #1361 was duly filed as large documents
+    losing rows "silently" when ``extraction_rows_below_ocr_estimate`` had fired on
+    every lossy count it reported.
+
+    Read off the same place :func:`score_audit_metadata` reads its audit block: the
+    section's ``result.json`` ``metadata``. That key is the complete per-section set
+    rather than extraction's own, because extraction preserves the issues of stages
+    it does not own (``owned_stages`` in ``extraction/service.py``) and assessment
+    merges into the same key rather than replacing it.
+
+    Nothing here enumerates issue types. The tallies are keyed on each issue's own
+    ``severity``/``code``/``stage``, and ``processing_issue_detail`` carries the
+    issue dicts themselves, so a code added to any service tomorrow is recorded
+    without an edit here. A recorder listing the codes it knows would be the very
+    defect this closes, one level up.
+
+    Each issue is normalised through the shipped model —
+    ``ProcessingIssue.from_dict(...).to_dict()`` — rather than copied raw or
+    re-described by a field list written here. That makes the model the authority
+    for what an issue *is* (and applies its own ``root_cause``/``details`` size
+    bounds, which is what keeps a 281 KB jsonschema message out of a committed
+    artifact). Imported inside the function and deliberately NOT wrapped in a
+    try/except recording ``None``, for the same reason
+    :func:`score_confidence_coverage` is not: a silent skip here reproduces exactly
+    the defect the measurement exists to close.
+
+    ``processing_issues`` is ``0`` for a clean document and never ``None``. The
+    absence of issues IS the measurement here, whereas ``None`` is the encoding
+    this harness reserves for "could not be read" (see :func:`unread_sections_row`)
+    — and both callers return before reaching this when the sections did not read,
+    so a ``0`` always means a document that was read and warned about nothing.
+    An entry that is not a dict, or a ``processing_issues`` that is not a list, is
+    counted as ``processing_issues_malformed`` rather than dropped: output nobody
+    can parse is a finding about the run, not an empty one.
+    """
+    from idp_common.models import ProcessingIssue
+
+    issues = []
+    malformed = 0
+    for sec in sections:
+        md = sec.get("metadata")
+        if not isinstance(md, dict):
+            continue
+        raw = md.get("processing_issues")
+        if raw is None:
+            continue
+        if not isinstance(raw, list):
+            malformed += 1
+            continue
+        for entry in raw:
+            if not isinstance(entry, dict):
+                malformed += 1
+                continue
+            issues.append(ProcessingIssue.from_dict(entry).to_dict())
+    by_severity, by_code, by_stage = {}, {}, {}
+    for issue in issues:
+        for tally, field in (
+            (by_severity, "severity"),
+            (by_code, "code"),
+            (by_stage, "stage"),
+        ):
+            name = str(issue.get(field) or "")
+            tally[name] = tally.get(name, 0) + 1
+    return {
+        "processing_issues": len(issues),
+        "processing_issues_malformed": malformed or None,
+        # Severity is kept as its OWN axis rather than folded into the total: the
+        # whole use of this figure is triage, and a warning and an error collapsed
+        # into one count cannot be triaged.
+        "processing_issues_by_severity": by_severity,
+        "processing_issues_by_code": by_code,
+        "processing_issues_by_stage": by_stage,
+        # The issues themselves, verbatim. This is what makes the figure readable
+        # rather than merely present: #1361's author needed the message
+        # ("141 of an estimated 814 rows"), not a count.
+        "processing_issue_detail": issues,
+        "processing_issue_severities": render_tally(by_severity),
+        "processing_issue_codes": render_tally(by_code),
+    }
+
+
 def unread_sections_row(read):
     """The row keys a document whose sections could not all be READ contributes.
 
@@ -855,6 +956,7 @@ def score_synthetic(bucket, doc_prefix, truth):
     )
     return {
         **audit,
+        **score_processing_issues(sections),
         "sections": len(sections),
         "sections_expected": expected_sections,
         "sections_correct": sections_correct,
@@ -974,6 +1076,7 @@ def score_reference(bucket, doc_prefix):
         confs += lib.confidence_values(sec.get("explainability_info"))
     return {
         **score_audit_metadata(sections),
+        **score_processing_issues(sections),
         "eval_unread": ev_read.error if ev_read.is_failed else None,
         "weighted_accuracy": acc,
         "parse_failures": pf,

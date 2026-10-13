@@ -228,6 +228,19 @@ CSV_COLS = [
     "conf_rows_scored",
     "conf_rows_unscored",
     "conf_coverage",
+    # What the pipeline WARNED about on this run (#1378). Until these existed a
+    # lossy-but-warned run was recorded identically to a clean one, which is how
+    # #1361 came to be written as rows being lost "silently" when
+    # `extraction_rows_below_ocr_estimate` had fired on every lossy count in it.
+    # `processing_issues` is the count (0 on a clean row, never null — absence of
+    # issues is the measurement, not a failure to read it); the other two are the
+    # severity and code tallies rendered flat, because a CSV cell cannot hold a
+    # tally and `DictWriter(extrasaction="ignore")` drops an unlisted key in
+    # silence. The tallies themselves, and every issue verbatim, are in the JSON.
+    "processing_issues",
+    "processing_issues_malformed",
+    "processing_issue_severities",
+    "processing_issue_codes",
     # Calibration against exact per-cell truth (#935). `calibration_separation`
     # below is a different and much weaker instrument — a difference of two means,
     # available only on the reference path — and it cannot distinguish a grader that
@@ -286,6 +299,49 @@ def _stats(vals):
         "cv": round(stdev / mean, 4) if mean else None,
         "min": round(min(xs), 5),
         "max": round(max(xs), 5),
+    }
+
+
+def _merge_tallies(tallies):
+    """Sum any number of ``{name: count}`` tallies into one.
+
+    Keyed on whatever names arrive, so a code or severity this file has never heard
+    of rolls up without an edit here (#1378).
+    """
+    out = {}
+    for tally in tallies:
+        if not isinstance(tally, dict):
+            continue
+        for name, n in tally.items():
+            if isinstance(n, (int, float)):
+                out[str(name)] = out.get(str(name), 0) + n
+    return out
+
+
+def cell_issues(rs):
+    """Per-cell roll-up of what the pipeline warned about (#1378).
+
+    Over **every** run in the cell, not just the successful ones, unlike the
+    statistics beside it. A run that failed is the one whose warnings triage wants
+    first, and restricting this to `success` would reproduce the blind spot the
+    figure exists to close at the cell level. `n_runs` is carried so the counts
+    have a visible denominator.
+
+    Always a populated dict, which is what lets `_missing_metric_notes` tell a cell
+    that recorded no issues (every count 0) from a grid scored before this existed
+    (the key absent) — the distinction `LATE_ADDED_METRICS` is about.
+    """
+    counted = [r for r in rs if isinstance(r.get("processing_issues"), int)]
+    return {
+        "n_runs": len(rs),
+        "n_runs_scored": len(counted),
+        "n_runs_with_issues": sum(1 for r in counted if r["processing_issues"]),
+        "n_issues": sum(r["processing_issues"] for r in counted),
+        "by_severity": _merge_tallies(
+            r.get("processing_issues_by_severity") for r in rs
+        ),
+        "by_code": _merge_tallies(r.get("processing_issues_by_code") for r in rs),
+        "by_stage": _merge_tallies(r.get("processing_issues_by_stage") for r in rs),
     }
 
 
@@ -355,6 +411,8 @@ def cell_stats(rows):
             "calibration": analyze.pool_calibration(
                 [r.get("calibration_curve") for r in succ]
             ),
+            # What the pipeline warned about, over ALL this cell's runs (#1378).
+            "processing_issues": cell_issues(rs),
         }
     return out
 
@@ -511,6 +569,27 @@ def write_summary(rm, rows, out):
         )
         for cell, cv, n in sorted(noisy, key=lambda x: -(x[1] or 0)):
             print(f"    {cell}: cost CV={cv} over n={n}")
+    # ...and loudly when the pipeline warned about anything (#1378). Printed for the
+    # same reason the incomplete-grid notice above is: whoever runs this is the
+    # person about to copy these numbers somewhere, and a completeness warning that
+    # only ever reaches a file is how a warned run gets described as a silent one.
+    warned = [
+        (cell, s["processing_issues"])
+        for cell, s in cells.items()
+        if s.get("processing_issues", {}).get("n_issues")
+    ]
+    if warned:
+        print(
+            "⚠ the pipeline recorded processing issues — these runs are NOT clean, "
+            "see each row's processing_issue_detail:"
+        )
+        for cell, pi in sorted(warned, key=lambda x: -x[1]["n_issues"]):
+            print(
+                f"    {cell}: {pi['n_issues']} issue(s) on "
+                f"{pi['n_runs_with_issues']} of {pi['n_runs']} runs — "
+                f"{analyze.render_tally(pi['by_severity'])} — "
+                f"{analyze.render_tally(pi['by_code'])}"
+            )
     print(
         f"summary -> {out}/summary.{{json,csv}} + cell_stats.csv ({len(rows)} rows, {len(cells)} cells)"
     )
@@ -833,6 +912,7 @@ def calibration_findings(cur, base, regression=True):
 LATE_ADDED_METRICS = {
     "calibration": "pooled confidence ECE / AUROC (#935)",
     "conf_coverage": "confidence coverage (#997)",
+    "processing_issues": "pipeline processing issues (#1378)",
 }
 
 
