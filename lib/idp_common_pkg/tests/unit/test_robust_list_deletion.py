@@ -207,6 +207,43 @@ class TestTheCascade:
         table.delete_item.assert_not_called()
 
 
+class TestTheAdjacentShards:
+    """Strategy 3's shard identifiers, which have to be the padded two-digit form.
+
+    A neighbour emitted as ``list#…#s#1`` rather than ``#s#01`` names a partition key
+    that cannot exist, so strategy 3 queries nothing, finds nothing, and looks exactly
+    like a neighbour search that ran and came back empty. The equivalent assertion
+    exists for ``idp_common.delete_documents`` and did not for this copy — measured: a
+    mutation dropping the ``02d`` format spec survived this suite until these cases
+    were added, in the module that is *only* reached through strategy 3.
+    """
+
+    @pytest.mark.parametrize(
+        "shard, expected",
+        [
+            ("00", ["01"]),
+            ("01", ["00", "02"]),
+            ("03", ["02", "04"]),
+            ("05", ["04"]),
+        ],
+    )
+    def test_the_identifiers_are_zero_padded_and_clamped(self, rld, shard, expected):
+        assert rld.get_adjacent_shards("2025-09-10", shard) == [
+            f"list#2025-09-10#s#{s}" for s in expected
+        ]
+
+    def test_a_non_numeric_shard_yields_no_neighbours(self, rld):
+        assert rld.get_adjacent_shards("2025-09-10", "xx") == []
+
+    @pytest.mark.parametrize("shard", ["00", "01", "02", "03", "04", "05"])
+    def test_it_agrees_with_the_shared_implementation(self, rld, shard):
+        from idp_common.delete_documents import _get_adjacent_shards
+
+        assert rld.get_adjacent_shards("2025-09-10", shard) == _get_adjacent_shards(
+            "2025-09-10", shard
+        )
+
+
 class TestParityWithTheSharedImplementation:
     """The duplication is deliberate; the two diverging is not.
 

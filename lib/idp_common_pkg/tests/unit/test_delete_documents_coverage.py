@@ -899,6 +899,38 @@ class TestDeleteSingleDocument:
         assert result["deleted"]["output_files"] == 2
         assert result["success"] is False
 
+    def test_a_failed_document_record_delete_is_reported(self):
+        """The last step on the path, and the one with no test until now.
+
+        Every other step's failure handler is exercised somewhere in this file; this
+        one's was not, so the mutation that broke its error reporting went unnoticed.
+        It matters more than its position suggests: this is the delete that makes the
+        document disappear from the list, so a failure here is the case where the user
+        is told the document is gone and it is not.
+        """
+        table = _table()
+        table.get_item.return_value = {
+            "Item": {"PK": f"doc#{KEY}", "QueuedTime": QUEUED}
+        }
+        # The list-entry cascade succeeds, so the record delete is reached; only the
+        # final `delete_item` on the document record faults.
+        table.delete_item.side_effect = [
+            {"Attributes": {"x": 1}},  # strategy 1 removes the list entry
+            _modelled_error("DeleteItem", "AccessDeniedException"),
+        ]
+
+        result = delete_single_document(KEY, table, _s3(), "in", "out")
+
+        assert result["deleted"]["list_entries"] is True
+        assert result["deleted"]["document_record"] is False
+        assert result["success"] is False, (
+            "the document record was not deleted and the delete was reported as a "
+            "success"
+        )
+        assert any("AccessDenied" in message for message in result["errors"]), (
+            f"the cause did not reach the caller: {result['errors']}"
+        )
+
     def test_a_purge_with_no_refusals_is_unaffected(self):
         """The ordinary case, asserted so the check above cannot be vacuous.
 
