@@ -319,8 +319,11 @@ def filter_models_by_region(data: Any, region_type: str) -> Any:
                             filtered_list.append(item)
                         # Include models that match the region type or are region-agnostic
                         elif region_type == "us":
-                            # Include US models and non-region-specific models, exclude other geo prefixes
-                            if item.startswith("us.") or not _is_geo_scoped(item):
+                            # Include US models and non-region-specific models, exclude other geo prefixes.
+                            # GovCloud (us-gov-*) stacks resolve to this region type, so us-gov. ids stay.
+                            if item.startswith(
+                                ("us.", "us-gov.")
+                            ) or not _is_geo_scoped(item):
                                 filtered_list.append(item)
                         elif region_type == "eu":
                             # Exclude US-only models (e.g., openai.gpt-5.*) that have no EU availability

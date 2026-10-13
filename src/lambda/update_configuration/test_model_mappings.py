@@ -180,15 +180,14 @@ def test_a_canada_profile_is_offered_in_neither_us_nor_eu_picklists():
 def test_a_geo_profile_outside_the_region_type_is_offered_nowhere(region_type: str):
     """The filters read geo prefixes from the shared prefix rule, not a local list.
 
-    ``apac.``, ``jp.``, ``au.`` and ``us-gov.`` profiles are callable from none
-    of the US, EU or Canada region types, so no picklist offers them. ``global.``
-    and unprefixed ids stay offered in all three.
+    ``apac.``, ``jp.`` and ``au.`` profiles are callable from none of the US, EU
+    or Canada region types, so no picklist offers them. ``global.`` and
+    unprefixed ids stay offered in all three. ``us-gov.`` has its own rule, below.
     """
     geo_scoped = [
         "apac.amazon.nova-lite-v1:0",
         "jp.anthropic.claude-haiku-5-5",
         "au.anthropic.claude-haiku-5-5",
-        "us-gov.anthropic.claude-sonnet-4-6",
     ]
     region_agnostic = [
         "global.anthropic.claude-sonnet-4-6",
@@ -204,3 +203,24 @@ def test_a_geo_profile_outside_the_region_type_is_offered_nowhere(region_type: s
         assert model_id not in offered, (region_type, model_id)
     for model_id in region_agnostic:
         assert model_id in offered, (region_type, model_id)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "region_type,expected", [("us", True), ("eu", False), ("ca", False)]
+)
+def test_a_govcloud_profile_is_offered_only_in_the_us_region_type(
+    region_type: str, expected: bool
+):
+    """GovCloud (``us-gov-*``) stacks resolve to the ``us`` region type, so the US
+    filter keeps ``us-gov.`` ids, as it did before Canada support. EU and Canada
+    stacks cannot call them. A commercial US stack is offered one too; no shipped
+    picklist carries a ``us-gov.`` id.
+    """
+    model_id = "us-gov.anthropic.claude-sonnet-4-6"
+    # The us. entry makes the filter treat this list as a model list.
+    enum = ["us.amazon.nova-2-lite-v1:0", model_id]
+    schema = {"properties": {"model": {"type": "string", "enum": enum}}}
+
+    offered = index.filter_models_by_region(schema, region_type)
+    assert (model_id in offered["properties"]["model"]["enum"]) == expected
