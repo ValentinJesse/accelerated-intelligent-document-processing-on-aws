@@ -82,8 +82,17 @@ KEY_ATTRIBUTE_NAMES = (
     "InitialEventTime",
 )
 
-#: Calls whose ``FilterExpression`` is read. ``scan`` is deliberately absent — see the
-#: module docstring; a key attribute in a Scan filter is valid.
+#: Calls whose ``FilterExpression`` is read, and so the universe this rule applies to.
+#:
+#: ``scan`` is outside it. That is a scope decision rather than a tolerated defect, and
+#: it is registered in ``scripts/tests/gate_exemptions.json``: AWS documents the two
+#: operations oppositely, so the same expression is refused on one and correct on the
+#: other, and the premise is a property of the DynamoDB API rather than of anything in
+#: this tree. ``test_the_scan_exclusion_is_not_shielding_nothing`` is its ratchet, and
+#: that test re-scans with ``("query", "scan")`` written inline rather than through a
+#: second named constant: a constant for the lifted universe is itself discovered as an
+#: exemption surface, and asking for a registry judgement on the probe that *defends*
+#: an exemption is the kind of noise that teaches a reviewer to rubber-stamp the file.
 GUARDED_CALLS = ("query",)
 
 
@@ -191,7 +200,7 @@ def _mentions_key_attribute(expression: str) -> str | None:
     return None
 
 
-def _issues_a_guarded_call(call: ast.Call) -> bool:
+def _issues_a_guarded_call(call: ast.Call, guarded: tuple = GUARDED_CALLS) -> bool:
     """Does ``call`` put a ``.query`` on the wire, directly or through a wrapper?
 
     Two shapes, and the second is the one that matters most here. The direct form is
@@ -213,22 +222,26 @@ def _issues_a_guarded_call(call: ast.Call) -> bool:
     direction for a check whose finding is "this cannot succeed".
     """
     func = call.func
-    if isinstance(func, ast.Attribute) and func.attr in GUARDED_CALLS:
+    if isinstance(func, ast.Attribute) and func.attr in guarded:
         return True
     arguments = list(call.args) + [kw.value for kw in call.keywords]
-    return any(
-        isinstance(a, ast.Attribute) and a.attr in GUARDED_CALLS for a in arguments
-    )
+    return any(isinstance(a, ast.Attribute) and a.attr in guarded for a in arguments)
 
 
-def scan_source(source: str, path: str) -> List[Finding]:
-    """Every guarded call in ``source`` whose literal FilterExpression names a key."""
+def scan_source(
+    source: str, path: str, guarded: tuple = GUARDED_CALLS
+) -> List[Finding]:
+    """Every guarded call in ``source`` whose literal FilterExpression names a key.
+
+    ``guarded`` is a parameter solely so the non-vacuity ratchet below can ask what the
+    ``scan`` exclusion is shielding. Production callers take the default.
+    """
     module = ast.parse(source)
     findings: List[Finding] = []
     for node in ast.walk(module):
         if not isinstance(node, ast.Call):
             continue
-        if not _issues_a_guarded_call(node):
+        if not _issues_a_guarded_call(node, guarded):
             continue
         candidates: List[Tuple[int, str]] = []
         for kw in node.keywords:
@@ -252,7 +265,9 @@ def _python_files() -> Tuple[Path, ...]:
     return tracked_paths(REPO_ROOT, "*.py")
 
 
-def _findings_over(paths: Iterable[Path]) -> List[Finding]:
+def _findings_over(
+    paths: Iterable[Path], guarded: tuple = GUARDED_CALLS
+) -> List[Finding]:
     findings: List[Finding] = []
     for path in paths:
         try:
@@ -260,7 +275,9 @@ def _findings_over(paths: Iterable[Path]) -> List[Finding]:
         except (OSError, UnicodeDecodeError):
             continue
         try:
-            findings.extend(scan_source(source, str(path.relative_to(REPO_ROOT))))
+            findings.extend(
+                scan_source(source, str(path.relative_to(REPO_ROOT)), guarded)
+            )
         except SyntaxError:
             # A file this interpreter cannot parse is out of reach of any AST gate.
             continue
@@ -286,6 +303,34 @@ def test_discovery_is_not_empty():
 def test_no_query_filters_on_a_key_attribute():
     findings = _findings_over(_python_files())
     assert not findings, "\n".join(str(f) for f in findings)
+
+
+@pytest.mark.unit
+def test_the_scan_exclusion_is_not_shielding_nothing():
+    """The ratchet on ``scan`` being outside :data:`GUARDED_CALLS`.
+
+    An exclusion that shields nothing is dead, and a dead exclusion is pre-approval of
+    whatever next occupies the name — so the registry entry for this scope decision has
+    to be able to show it is load bearing. Lifting the exclusion is how: the sites that
+    then appear are the legitimate filtered scans the asymmetry exists for, and if there
+    were none, narrowing this gate to ``query`` would be a distinction without a
+    difference and the simpler rule would be the honest one.
+
+    The count is reported rather than pinned to an exact figure. A new legitimate
+    filtered scan naming ``PK`` or ``SK`` is a correct thing to write, so pinning
+    equality would make writing one a red gate — which is the opposite of what this
+    exclusion means. What must not happen is the count reaching zero unnoticed.
+    """
+    files = _python_files()
+    guarded_today = set(_findings_over(files))
+    scan_only = [
+        f for f in _findings_over(files, ("query", "scan")) if f not in guarded_today
+    ]
+    assert scan_only, (
+        "lifting the `scan` exclusion produces no findings, so it currently shields "
+        "nothing. Either the legitimate filtered scans have gone — in which case drop "
+        "the query/scan distinction and its registry entry — or discovery has narrowed."
+    )
 
 
 @pytest.mark.unit
