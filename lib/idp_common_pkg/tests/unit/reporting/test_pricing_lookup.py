@@ -287,33 +287,62 @@ def test_cache_heavy_document_cost_computed_by_hand(shipped_reporter):
 
 
 @pytest.mark.unit
-def test_govcloud_claude_cache_read_is_reported_not_the_input_rate(shipped_reporter):
-    """The sharpest same-model instance of the bug, pinned.
+def test_govcloud_claude_resolves_the_govcloud_band_through_the_lookup(
+    shipped_reporter,
+):
+    """The GovCloud row costed by hand, and the same 10x mis-binding pinned on it.
 
-    ``bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0`` deliberately
-    lists no cache units (verified live: cachePoint does not reduce input tokens
-    through that inference profile). The old unit-level substring rule returned
-    its 3.3E-6 inputTokens price for ``cacheReadInputTokens`` — the fresh-input
-    rate, 10x the commercial cache-read rate (#926).
+    ``bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0`` is the GovCloud
+    cross-region inference profile for the model the test above prices
+    commercially, and AWS charges more for it in GovCloud: $3.60 input, $18.00
+    output, $0.36 cache read, $4.50 five-minute cache write per MTok.
+    ``test_govcloud_pricing_rates.py`` is what ties those four figures to AWS's
+    published offer file; this test is about the lookup resolving them.
 
-    The answer is ``None``, an unpriced NULL cost, and this is the one entry where
-    that is worth spelling out. AWS **does** publish both cache dimensions for
-    this model in both GovCloud regions — cache read $0.36/MTok, 5-minute cache
-    write $4.50/MTok — so the omission is not a statement that the units are free;
-    it is a statement about the measured behaviour of one inference profile, and
-    that is the half of the premise no offline check can re-verify.
-    ``EXPECTED_CACHE_UNIT_OMISSIONS`` records it as ``priced_by_aws=True`` for
-    exactly that reason, so a cache read that does turn up here is reported rather
-    than billed at $0.00 against a published rate (#1206). A zero count still
-    costs nothing, which is what keeps every ordinary GovCloud Claude row quiet.
+        inputTokens            2,000 x 3.6E-6 = 0.0072
+        cacheReadInputTokens 100,000 x 3.6E-7 = 0.036
+        cacheWriteInputTokens  8,000 x 4.5E-6 = 0.036
+        outputTokens           1,500 x 1.8E-5 = 0.027
+                                                -------
+                                                 0.1062
+
+    Two things are worth pinning beyond the total. The #926 substring rule
+    returned this row's ``inputTokens`` price for ``cacheReadInputTokens`` — the
+    fresh-input rate, 10x the cache-read one — and that ratio is exactly 10 in
+    GovCloud as well, so the same arithmetic detects the same regression here.
+
+    And the GovCloud band is a uniform 12/11 of the commercial band on **every**
+    one of the four units, which is why a GovCloud cost report built from the
+    commercial rates was 8.3% low whatever the token mix (#1404). Asserting the
+    ratio rather than the four differences is what makes a single mistyped rate on
+    either row visible.
     """
     api = "bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    assert shipped_reporter._get_unit_cost(api, "inputTokens") == 3.3e-6
-    assert shipped_reporter._get_unit_cost(api, "cacheReadInputTokens", 1_000) is None
-    assert shipped_reporter._get_unit_cost(api, "cacheWriteInputTokens", 1_000) is None
-    # The count is what decides it: a row that metered no cache activity is free
-    # by arithmetic and is not reported.
-    assert shipped_reporter._get_unit_cost(api, "cacheReadInputTokens", 0) == 0.0
+    commercial = "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    counts = {
+        "inputTokens": 2_000,
+        "cacheReadInputTokens": 100_000,
+        "cacheWriteInputTokens": 8_000,
+        "outputTokens": 1_500,
+    }
+    total = sum(n * shipped_reporter._get_unit_cost(api, u) for u, n in counts.items())
+    assert total == pytest.approx(0.1062, rel=1e-12)
+
+    cache_read = shipped_reporter._get_unit_cost(api, "cacheReadInputTokens")
+    input_rate = shipped_reporter._get_unit_cost(api, "inputTokens")
+    assert cache_read == 3.6e-7
+    assert input_rate == 3.6e-6
+    assert input_rate / cache_read == pytest.approx(10.0)
+
+    for unit in counts:
+        assert shipped_reporter._get_unit_cost(
+            api, unit
+        ) / shipped_reporter._get_unit_cost(commercial, unit) == pytest.approx(
+            12 / 11
+        ), (
+            f"the GovCloud and commercial Sonnet 4.5 rows no longer stand in the "
+            f"published 12/11 ratio on {unit}"
+        )
 
 
 @pytest.mark.unit
