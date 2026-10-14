@@ -207,17 +207,25 @@ CACHE_RATE_CASES = [
     ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.1e-6, 1.1e-7, 1.4e-6),
     ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.3e-6, 3.3e-7, 4.125e-6),
     ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.0e-6, 3.0e-7, 3.75e-6),
-    # Nova: cache read 0.25x input, cache write 1.0x input.
-    ("us.amazon.nova-lite-v1:0", 6.0e-8, 1.5e-8, 6.0e-8),
-    ("us.amazon.nova-pro-v1:0", 8.0e-7, 2.0e-7, 8.0e-7),
-    ("us.amazon.nova-2-lite-v1:0", 3.0e-7, 7.5e-8, 3.0e-7),
-    ("us.amazon.nova-2-lite-v1:0:flex", 1.5e-7, 3.75e-8, 1.5e-7),
-    ("us.amazon.nova-2-lite-v1:0:priority", 5.25e-7, 1.31e-7, 5.25e-7),
-    ("eu.amazon.nova-2-lite-v1:0", 3.9e-7, 9.75e-8, 3.9e-7),
-    # Added by this change; the two IDs the substring rule was mis-binding.
-    ("eu.amazon.nova-2-lite-v1:0:flex", 1.95e-7, 4.88e-8, 1.95e-7),
-    ("eu.amazon.nova-2-lite-v1:0:priority", 6.83e-7, 1.71e-7, 6.83e-7),
-    ("global.amazon.nova-2-lite-v1:0:flex", 1.5e-7, 3.75e-8, 1.5e-7),
+    # Nova: cache read 0.25x input, cache write $0.00 — NOT a multiple of input.
+    # Nova charges for the cache read and not for the write that populates the
+    # cache, so these rows are the one family here whose write column is zero
+    # rather than 1.25x. That is AWS's published rate in every region and tier,
+    # and it is only correct because the units are disjoint; both halves are
+    # owned by test_nova_cache_write_pricing.py, which derives the whole Nova
+    # class from the shipped file rather than transcribing it. These rows carried
+    # the full input rate until issue #1405 — transcribed here too, which is part
+    # of why it survived.
+    ("us.amazon.nova-lite-v1:0", 6.0e-8, 1.5e-8, 0.0),
+    ("us.amazon.nova-pro-v1:0", 8.0e-7, 2.0e-7, 0.0),
+    ("us.amazon.nova-2-lite-v1:0", 3.0e-7, 7.5e-8, 0.0),
+    ("us.amazon.nova-2-lite-v1:0:flex", 1.5e-7, 3.75e-8, 0.0),
+    ("us.amazon.nova-2-lite-v1:0:priority", 5.25e-7, 1.31e-7, 0.0),
+    ("eu.amazon.nova-2-lite-v1:0", 3.9e-7, 9.75e-8, 0.0),
+    # Added by #926; the two IDs the substring rule was mis-binding.
+    ("eu.amazon.nova-2-lite-v1:0:flex", 1.95e-7, 4.88e-8, 0.0),
+    ("eu.amazon.nova-2-lite-v1:0:priority", 6.83e-7, 1.71e-7, 0.0),
+    ("global.amazon.nova-2-lite-v1:0:flex", 1.5e-7, 3.75e-8, 0.0),
 ]
 
 
