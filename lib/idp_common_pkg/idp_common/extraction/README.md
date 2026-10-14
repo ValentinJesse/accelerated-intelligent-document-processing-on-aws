@@ -2435,28 +2435,45 @@ signals make both loud without changing what is extracted:
   this code would start failing runs that complete today on a deployment that opted into
   `fail` for a different check.
 
-  ⚠️ **Reachability: treat this as a Simple-mode signal.** `_build_extraction_issues` runs
-  for both modes and reports whatever `metadata["output_truncated"]` says, so the
-  *reporting* half is mode-blind — but the *setting* half is not. Both branches of
-  `_invoke_extraction_model` return through one `ExtractionResult`, and the flag is
-  assigned only inside the Simple branch (the Advanced branch leaves it at its
-  initialiser), so there is **no reachable Advanced-mode path** to this issue today. The
-  Advanced-mode wording is exercised by handing `_save_results` a result with the flag
-  set, which is a direct call rather than a flow, and
-  `test_output_truncation_warning.py::TestReachability` fails if an Advanced-mode setter is
-  ever added — so this note has to be rewritten rather than quietly becoming false.
+  **Advanced mode reaches this** too, by a different route, and the two halves are worth
+  separating. `_build_extraction_issues` runs for both modes and reports whatever
+  `metadata["output_truncated"]` says, so the *reporting* half is mode-blind. The *setting*
+  half has one path per mode: on the Simple path the flag is assigned inside
+  `_invoke_extraction_model`'s Simple branch (the Advanced branch leaves it at its
+  initialiser, and `test_output_truncation_warning.py::TestReachability` pins that), and on
+  the Advanced path it arrives as a `_output_truncated` marker in the shard's **metering**,
+  which `_save_results` pops into the same metadata key. Metering is the carrier because it
+  is the one part of a shard's result that is persisted to S3 and merged, so the marker
+  survives the in-process runtime and the Step Functions Distributed Map alike — the same
+  reason `_integrated_field_assessment` and `_shard_scalar_conflicts` ride there.
 
-  What covers that path instead is **a hard failure, not a check**. On a `max_tokens` stop
-  the strands event loop raises `MaxTokensReachedException`; nothing in the ladder retries
-  or swallows it (`MaxTokensReachedException` is in no retry list and matches no message
-  needle, so `async_exponential_backoff_retry` makes one attempt and re-raises), both of
-  `_invoke_agent_for_extraction`'s translators decline it, and `runtime.py`'s
-  `asyncio.gather` over the shards passes no `return_exceptions` — so one truncated shard
-  fails the section rather than merging the survivors into a short list. Note this is **not**
-  the agent's tool boundary, which is a different control for a different cause (`minItems`
-  enforcement on `extraction_tool`'s input). And `minItems` is an opt-in that **no shipped
-  preset declares** — `grep -rn minItems config_library/` finds nothing — so it guards a
-  deployment only once a config author has set it.
+  What writes that marker is **the salvage** (GitHub issue #1363). On a `max_tokens` stop
+  the strands event loop raises `MaxTokensReachedException` rather than returning an
+  `AgentResult`; nothing in the ladder retries or swallows it
+  (`MaxTokensReachedException` is in no retry list and matches no message needle, so
+  `async_exponential_backoff_retry` makes one attempt and re-raises), and `runtime.py`'s
+  `asyncio.gather` over the shards passes no `return_exceptions`. So the exception used to
+  fail the section — including when the tool calls that had already succeeded left a
+  **validated** extraction in `agent.state`, which is the ordinary shape under
+  `extraction.confidence.mode: integrated`, because there the turn that overruns is the
+  `provide_field_assessment` one AFTER the data is safe. `_invoke_agent_for_extraction` now
+  recognises the error through `utils.bedrock_utils.is_max_tokens_agent_error` (one matcher,
+  shared with rules discovery) and, when `agent.state["current_extraction"]` validates
+  against the class model, keeps that extraction and returns an `agentic_idp.TruncatedAgentRun`
+  in place of the `AgentResult` Strands never produced — carrying `Agent.event_loop_metrics`
+  so the tokens the run really spent are still metered. The section completes with its rows
+  and this warning instead of failing.
+
+  Two bounds on that, both tested: it salvages **only** an output-ceiling stop (any other
+  exception still fails the section), and **only** an extraction the class model accepts. It
+  never synthesises an empty result — every leaf of the shard transport model is nullable
+  (#782/#1078), so `{}` validates, and a document that completed with no fields would be
+  worse than a failed one.
+
+  Note this is **not** the agent's tool boundary, which is a different control for a
+  different cause (`minItems` enforcement on `extraction_tool`'s input). And `minItems` is an
+  opt-in that **no shipped preset declares** — `grep -rn minItems config_library/` finds
+  nothing — so it guards a deployment only once a config author has set it.
 - `ExtractionOutputIncomplete` — the section's list came back under half the rows its own
   OCR text evidences, and `extraction.row_shortfall_action` is `fail` (opt-in; see the trade
   above). Raised by `_fail_on_row_shortfall`, which is the **last statement of

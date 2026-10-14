@@ -914,22 +914,23 @@ class TestTheOpenAIAdapterReachesTheMatcher:
 
 
 class TestReachability:
-    """⚠️ Treat this as a Simple-mode signal, and here is why.
+    """One setting path per mode, and they are not the same mechanism.
 
     ``_build_extraction_issues`` runs for both modes and reports whatever
     ``metadata["output_truncated"]`` says, so the *reporting* half is mode-blind.
-    The *setting* half is not: both branches of ``_invoke_extraction_model``
-    return through one ``ExtractionResult``, and the flag is assigned only inside
-    the Simple branch. The Advanced branch never touches it, so it stays ``False``
-    from the initialiser and no Advanced-mode run can currently produce this
-    issue. The Advanced-mode wording above is therefore exercised by handing
-    ``_save_results`` a result with the flag set, which is a direct call and not a
-    flow — said here rather than implied, because a document claiming "both
-    modes" without this note is the over-claim the equivalent note on
-    ``extraction_list_truncated`` exists to prevent.
+    The *setting* half has two paths. On the **Simple** path the flag is assigned
+    inside ``_invoke_extraction_model``'s Simple branch, from the response's own
+    ``stopReason``; the Advanced branch of that function still never touches it,
+    and the AST assertion below keeps that true so the two mechanisms cannot be
+    conflated. On the **Advanced** path it arrives as a ``_output_truncated``
+    marker in the shard's metering, written by the #1363 salvage in
+    ``agentic_idp._invoke_agent_for_extraction`` and popped into the same metadata
+    key by ``_save_results`` — a real flow, exercised end to end below.
 
-    If an Advanced-mode setter is ever added, this test fails and the note has to
-    be rewritten rather than quietly becoming false.
+    Before that salvage existed there was no reachable Advanced-mode path at all:
+    a truncated agent turn raised out of the event loop and failed the section,
+    taking a validated extraction with it. Both doc tiers have to keep saying
+    which route each mode takes, which is what the last test here pins.
     """
 
     SRC = (
@@ -946,7 +947,14 @@ class TestReachability:
         assert len(fns) == 1, f"expected one definition, found {len(fns)}"
         return fns[0]
 
-    def test_the_flag_is_only_ever_set_on_the_simple_branch(self):
+    def test_the_stop_reason_flag_is_only_ever_set_on_the_simple_branch(self):
+        """The Advanced path reaches the issue through metering, not through here.
+
+        Keeping ``_invoke_extraction_model``'s Advanced branch out of this
+        variable is what stops the two mechanisms being conflated: a
+        ``stopReason`` is a property of one Converse response, and an agent loop
+        makes many.
+        """
         fn = self._invoke_fn()
         branches = [
             n
@@ -975,9 +983,54 @@ class TestReachability:
         outside = [ln for ln in stores if ln != initialiser and ln not in simple_lines]
         assert not outside, (
             f"output_truncated is assigned outside the Simple branch at line(s) "
-            f"{outside}. If that is deliberate, the 'no reachable Advanced-mode "
-            f"path' note in both doc tiers is now false and must be rewritten."
+            f"{outside}. The Advanced path is meant to reach this issue through the "
+            f"_output_truncated metering marker, not by setting this variable; if "
+            f"that changed, both doc tiers' description of the two routes is now "
+            f"wrong and must be rewritten."
         )
+
+    def test_the_advanced_path_reaches_the_issue_through_the_metering_marker(self):
+        """The real Advanced-mode flow: a salvaged shard's marker becomes the issue.
+
+        ``_output_truncated`` is what ``agentic_idp.structured_output_async`` puts
+        in the shard's metering when it salvages a truncation-killed agent run
+        (#1363). This drives the whole tail — ``_save_results`` through
+        ``_build_extraction_issues`` — so the issue is produced by a flow rather
+        than by handing the tail a pre-set flag.
+        """
+        svc = _svc(agentic=True)
+        result = ExtractionResult(
+            extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+            metering={
+                "Extraction/bedrock/m": {"outputTokens": 1},
+                "_output_truncated": True,
+            },
+            parsing_succeeded=True,
+            total_duration=1.0,
+            # Deliberately NOT set: the Advanced path never assigns it.
+            output_truncated=False,
+        )
+        _w, _d, section = _save(svc, result)
+        assert CODE in _codes(section.processing_issues)
+        # ``result.metering`` rather than the dict handed in: ExtractionResult is a
+        # Pydantic model and validation copies it.
+        assert "_output_truncated" not in result.metering, (
+            "the marker must be popped, or it leaks into the metering report as a "
+            "key that is not a token counter"
+        )
+
+    def test_an_unsalvaged_agentic_section_carries_no_truncation_issue(self):
+        svc = _svc(agentic=True)
+        _w, _d, section = _save(
+            svc,
+            ExtractionResult(
+                extracted_fields={"Account Number": "1", "Transactions": _rows(43)},
+                metering={"Extraction/bedrock/m": {"outputTokens": 1}},
+                parsing_succeeded=True,
+                total_duration=1.0,
+            ),
+        )
+        assert CODE not in _codes(section.processing_issues)
 
     @pytest.mark.parametrize(
         "rel",
@@ -989,9 +1042,10 @@ class TestReachability:
     def test_both_doc_tiers_state_the_reachability_bound(self, rel):
         repo = Path(__file__).resolve().parents[5]
         text = re.sub(r"[*`#\s]+", " ", (repo / rel).read_text(encoding="utf-8"))
-        assert "no reachable Advanced-mode path" in text, (
-            f"{rel} no longer tells a reader that the Advanced-mode wording is "
-            f"exercised by a direct call rather than by a flow"
+        assert "Advanced mode reaches this" in text, (
+            f"{rel} no longer tells a reader that Advanced mode reaches this issue, "
+            f"and by which route. It used to say there was no Advanced-mode path at "
+            f"all, which the #1363 salvage made false."
         )
 
 
