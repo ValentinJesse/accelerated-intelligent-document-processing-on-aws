@@ -311,7 +311,7 @@ coverage: ## Re-measure idp_common and print its table, worst-covered first (oth
 coverage-table: ## Print a tree's table from the last run, without re-measuring (COVERAGE_ARGS=--tree=NAME)
 	@python3 scripts/coverage_table.py $(COVERAGE_ARGS)
 
-coverage-all: ## Measure EVERY tree (9 of them) and print each one's figure
+coverage-all: ## Measure EVERY tree the registry names and print each one's figure
 	@python3 scripts/coverage_all.py $(COVERAGE_ARGS)
 
 # What both CIs run, and the reason the ratchet can now reach more than one tree.
@@ -347,7 +347,7 @@ coverage-summary: ## Print the recorded per-tree figures, without measuring anyt
 # which tree it just measured adds `--require-tree=<name>` and gets a failure that names
 # the tree instead of one that says only that nothing was checked.
 CHECK_COVERAGE_DEBT_ARGS ?=
-check-coverage-debt: ## Ratchet per-file coverage across all 9 trees: fail if a file loses coverage, or a new module arrives unratcheted
+check-coverage-debt: ## Ratchet per-file coverage across every registered tree: fail if a file loses coverage, or a new module arrives unratcheted
 	@python3 scripts/check_coverage_debt.py $(CHECK_COVERAGE_DEBT_ARGS)
 
 # The CI form. `--require-all-trees` is the difference and it is not cosmetic: with no
