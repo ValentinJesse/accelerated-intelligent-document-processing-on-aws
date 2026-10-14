@@ -40,10 +40,14 @@ from pydantic import BaseModel
 
 from idp_common.extraction.runtime import (
     _accumulate_metering,
-    _shard_list_row_count,
     collate_shard_assessments,
 )
-from idp_common.utils.bedrock_utils import is_max_tokens_agent_error
+
+# ``_shard_list_row_count`` and ``is_max_tokens_agent_error`` are imported inside
+# the tests that use them, not here. A module-level import of a name the fix adds
+# turns a pre-fix run of this file into one collection error, which says only that
+# the module does not import — the point of these tests is that each one fails for
+# the reason the product failed.
 
 # The real strands package, not the MagicMock stub ``tests/conftest.py`` installs
 # for a bare environment — ``agentic_idp`` is the module under test and the
@@ -235,8 +239,14 @@ class TestWhatIsNotSalvaged:
 class TestThePredicate:
     """One matcher for Strands' truncation exception, shared with rules discovery."""
 
+    @staticmethod
+    def _matcher():
+        from idp_common.utils.bedrock_utils import is_max_tokens_agent_error
+
+        return is_max_tokens_agent_error
+
     def test_the_real_exception_matches(self):
-        assert is_max_tokens_agent_error(MaxTokensReachedException(_MESSAGE)) is True
+        assert self._matcher()(MaxTokensReachedException(_MESSAGE)) is True
 
     def test_the_type_name_alone_is_enough(self):
         """Matched by name so this module need not import strands (lean Lambdas)."""
@@ -244,7 +254,7 @@ class TestThePredicate:
         class MaxTokensReachedException(Exception):  # noqa: N818 - mirrors Strands
             pass
 
-        assert is_max_tokens_agent_error(MaxTokensReachedException("anything")) is True
+        assert self._matcher()(MaxTokensReachedException("anything")) is True
 
     @pytest.mark.parametrize(
         "message",
@@ -254,13 +264,13 @@ class TestThePredicate:
         ],
     )
     def test_the_message_alone_is_enough(self, message):
-        assert is_max_tokens_agent_error(Exception(message)) is True
+        assert self._matcher()(Exception(message)) is True
 
     @pytest.mark.parametrize(
         "message", ["ThrottlingException", "Input is too long", "end_turn", ""]
     )
     def test_an_unrelated_failure_does_not_match(self, message):
-        assert is_max_tokens_agent_error(Exception(message)) is False
+        assert self._matcher()(Exception(message)) is False
 
     def test_rules_discovery_answers_through_the_same_matcher(self):
         """Two copies of this predicate drift; the delegate is what stops that."""
@@ -388,4 +398,6 @@ class TestAGapIsNotCollated:
     def test_the_row_count_reads_both_shapes(self, data, expected):
         """The SFN merge holds model instances, the in-process path the same —
         but a plain dict is what a test or a future caller is most likely to pass."""
+        from idp_common.extraction.runtime import _shard_list_row_count
+
         assert _shard_list_row_count(data, {"Transactions"}) == expected
