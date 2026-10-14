@@ -144,6 +144,46 @@ def aws_credentials():
     )
 
 
+# --- No outbound AWS from this suite -----------------------------------------
+# The credential fixture above makes the credentials harmless; this makes the request
+# not happen, and both are wanted because they fail in different directions. A
+# placeholder credential still produces a *signed request to a real endpoint*, which
+# is rejected rather than prevented and which the code under test then swallows.
+#
+# Measured in #1398 over this package alone: 343 requests reached botocore's real send
+# in one `pytest -m "not integration"` — 320 CloudWatch `PutMetricData`, the rest S3,
+# SSM and Secrets Manager — with no test failing and nothing reported. One of them was
+# signed with a real-shaped key even under the stripped runner, because
+# `patch.dict(os.environ, ..., clear=True)` erases the two pins no unset can replace.
+# The placeholders this file installs are deliberate (#988) and are exactly what the
+# other 342 signed with, so stripping the environment cannot reach them.
+#
+# One definition, walked up to rather than copied: scripts/tests/no_outbound_aws.py
+# carries the seam, the measurements and the ``integration``-marker carve-out, which
+# is the same split `real_aws_credentials_for_integration_tests` below makes.
+def _no_outbound_aws_fixture():
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    for ancestor in _Path(__file__).resolve().parents:
+        helper = ancestor / "scripts" / "tests"
+        if not (helper / "no_outbound_aws.py").is_file():
+            continue
+        _sys.path.insert(0, str(helper))
+        try:
+            from no_outbound_aws import fixture
+
+            return fixture()
+        finally:
+            _sys.path.pop(0)
+    raise RuntimeError(
+        "scripts/tests/no_outbound_aws.py not found above this file; it carries the "
+        "control that stops this suite transacting with a real AWS account (#1398)"
+    )
+
+
+no_outbound_aws = _no_outbound_aws_fixture()
+
 # ---------------------------------------------------------------------------
 # Integration-tier credential reconciliation
 # ---------------------------------------------------------------------------

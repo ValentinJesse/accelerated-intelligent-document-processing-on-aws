@@ -49,7 +49,9 @@ credentials measures different lines from one that cannot, and because botocore 
 credentials it first resolved onto a process-global session, *which test ran first in a
 worker process* decides the answer — so the figure moved run to run at a fixed worker
 count on a developer machine and not at all on a runner, which has nothing to resolve.
-That reasoning is written out at :data:`HERMETIC_AWS_UNSET`, with the measurement.
+That reasoning is written out where :func:`hermetic_aws_env` is imported below, with
+the measurement; the function itself lives in :mod:`scripts.hermetic_aws_env`, shared
+with :mod:`scripts.run_all_tests`.
 """
 
 from __future__ import annotations
@@ -65,6 +67,21 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# `scripts/` on the path, because this file is loaded BY PATH (by `make`, and by
+# `scripts/tests/test_offline_suites_are_hermetic.py`) and so has no package to
+# import its siblings through.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from hermetic_aws_env import (  # noqa: E402, F401
+    # The two lists are re-exported rather than used here: this file is loaded by
+    # path, and `scripts/tests/test_offline_suites_are_hermetic.py` reads them off it
+    # to compare against `$(HERMETIC_AWS)` in the makefile.
+    HERMETIC_AWS_SET,
+    HERMETIC_AWS_UNSET,
+    hermetic_aws_env,
+)
+
+sys.path.pop(0)
 
 #: How many trees to measure at once when ``--jobs`` is not given.
 #:
@@ -93,63 +110,26 @@ _spec.loader.exec_module(_ccd)
 #: below.
 SUBPROCESS_RC = REPO_ROOT / "scripts" / "coverage_subprocess.rc"
 
-#: Every AWS environment variable :data:`HERMETIC_AWS` removes, and the three it pins.
-#:
-#: This is the one pytest invocation in the repository that did not go through
-#: `$(PYTEST_HERMETIC)`, because it is made from Python rather than from a `make` recipe,
-#: and `scripts/tests/test_offline_suites_are_hermetic.py` scopes its "every line goes
-#: through the wrapper" check to the `test-packages-cicd` recipe — so this caller sat
-#: outside the universe of the control rather than being carved out of it. Nobody decided
-#: it should be unprotected; the question was never asked about it.
-#:
-#: **Leaving it out made the coverage figures it produces nondeterministic**, which is
-#: worse here than a failing suite would be, because the figures are a ratchet's input and
-#: `--write` records them permanently. `boto3.DEFAULT_SESSION` is created by the first bare
-#: `boto3.client(...)` in a process and **caches the credentials it resolved**, so a
-#: `monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")` applied after that point is ignored
-#: by every later client in the same process. Whether a `try: boto3...get_caller_identity()
-#: / except:` branch is covered therefore depends on which test ran *first in its process*
-#: — and xdist's `--dist load` partition of tests across workers varies with the worker
-#: count and run to run. Measured on `idp_feature_sdk` (461 tests, 0 errors, 0 skips in
-#: every cell): `pack.py` at 99.44% or 100.00% from one run to the next at a fixed `-n 4`,
-#: and under this neutralisation 100.00% at every worker count tried. Issue #1377.
-#:
-#: Spelled out here and **derived from the makefile in the test**, not parsed at run time:
-#: `test_offline_suites_are_hermetic.py` reads `HERMETIC_AWS` out of
-#: `make/hermetic_aws.mk` and fails if this mapping stops covering it, so the two cannot
-#: drift while both stay green.
-HERMETIC_AWS_UNSET = (
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
-    "AWS_PROFILE",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_SECURITY_TOKEN",
-    "AWS_ROLE_ARN",
-    "AWS_WEB_IDENTITY_TOKEN_FILE",
-    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-)
-
-#: The sources no amount of unsetting reaches: the shared config files, and IMDS.
-HERMETIC_AWS_SET = {
-    "AWS_CONFIG_FILE": "/dev/null",
-    "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
-    "AWS_EC2_METADATA_DISABLED": "true",
-}
-
-
-def hermetic_aws_env(env: dict[str, str]) -> dict[str, str]:
-    """``env`` with the ambient AWS environment neutralised, as ``HERMETIC_AWS`` does.
-
-    Mutates and returns ``env`` so it composes with
-    :func:`subprocess_coverage_env` in either order.
-    """
-    for name in HERMETIC_AWS_UNSET:
-        env.pop(name, None)
-    env.update(HERMETIC_AWS_SET)
-    return env
+# `HERMETIC_AWS_UNSET`, `HERMETIC_AWS_SET` and `hermetic_aws_env` are imported above
+# from `scripts/hermetic_aws_env.py`, which is the one Python expression of the
+# `$(HERMETIC_AWS)` wrapper and carries the reasoning for it. They were defined here
+# first, in #1377, and then needed again by `scripts/run_all_tests.py` — the other
+# pytest caller written in Python rather than as a `make` recipe, and the one `make
+# test` invokes. A second copy of a list of credential sources drifts, and the
+# direction that matters is the quiet one, so there is one copy and both callers read
+# it. Re-exported as module attributes on purpose: this file is loaded by path, and
+# the gate in `scripts/tests/test_offline_suites_are_hermetic.py` reads them off it.
+#
+# Why it matters *here* specifically: the figures this script produces are a
+# ratchet's input and `--write` records them permanently, and with the environment
+# readable they were **nondeterministic**. `boto3.DEFAULT_SESSION` is created by the
+# first bare `boto3.client(...)` in a process and caches the credentials it resolved,
+# so whether a `try: boto3...get_caller_identity() / except:` branch is covered
+# depends on which test ran *first in its process* — and xdist's `--dist load`
+# partition varies with the worker count and run to run. Measured on
+# `idp_feature_sdk` (461 tests, 0 errors, 0 skips in every cell): `pack.py` at 99.44%
+# or 100.00% from one run to the next at a fixed `-n 4`, and under this
+# neutralisation 100.00% at every worker count tried. Issue #1377.
 
 
 def first_party_pythonpath() -> str:
