@@ -45,13 +45,14 @@ def _repo_root() -> Path:
 
 
 if _CANONICAL_SANITIZER not in sys.modules:
-    _path = _repo_root() / "lib/idp_common_pkg/idp_common/utils/log_sanitizer.py"
+    _path = (
+        _repo_root() / "lib/idp_common_pkg/idp_common/utils/log_sanitizer.py"
+    )
     _spec = importlib.util.spec_from_file_location(_CANONICAL_SANITIZER, _path)
     assert _spec is not None and _spec.loader is not None, f"cannot load {_path}"
     _module = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_module)
     sys.modules[_CANONICAL_SANITIZER] = _module
-
 
 # --- No outbound AWS from this suite -----------------------------------------
 # Measured in #1398: this suite issued requests that reached botocore's real send,

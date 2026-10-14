@@ -32,9 +32,10 @@ Four checks, because none of them alone is worth much:
 * **non-vacuity** — the universe is not empty, more than one pytest rootdir is in
   play (so the derivation is not satisfied by a single file), and the two packages
   that predate #1398 are in it.
-* **shared definition** — the suites added in #1398 bind
-  `scripts/tests/no_outbound_aws.py` rather than carrying a copy, so the seam, the
-  marker carve-out and the reasoning have one home.
+* **one definition** — exactly two conftests in the whole tree patch botocore's
+  transport directly, and they are the two that predate `scripts/tests/no_outbound_aws.py`.
+  That is asserted as an equality over every conftest rather than over a list of
+  suites, so a *new* local copy of the seam fails wherever it appears.
 
 What is NOT claimed: that a root outside this universe refuses. Fifteen registered
 roots install placeholder AWS credentials and so could sign a real request if an
@@ -137,11 +138,6 @@ REFUSAL_PREDATES_THIS_CHANGE = (
     "lib/idp_feature_sdk/tests",
 )
 
-#: The suites whose refusal must come from the shared definition rather than a copy.
-#: The two above are deliberately absent: they predate the shared module, and
-#: converting them is a separate change from making the control universal.
-BINDS_THE_SHARED_DEFINITION = tuple(MEASURED_ESCAPING_ROOTS) + ("lib/idp_sdk/tests",)
-
 SHARED_DEFINITION = "scripts/tests/no_outbound_aws.py"
 
 
@@ -150,7 +146,10 @@ def covered_roots() -> list[Path]:
     names = (
         *MEASURED_ESCAPING_ROOTS,
         *REFUSAL_PREDATES_THIS_CHANGE,
-        *BINDS_THE_SHARED_DEFINITION,
+        # `lib/idp_sdk/tests` reached nothing in the measurement and is here anyway:
+        # it ships its own `pytest.ini`, so no conftest above it can ever reach it,
+        # and its placeholder credentials would let an unmocked client sign.
+        "lib/idp_sdk/tests",
     )
     roots = [REPO_ROOT / name for name in dict.fromkeys(names)]
     missing = [r for r in roots if not r.is_dir()]
@@ -566,36 +565,6 @@ def test_every_root_in_the_universe_is_registered_in_the_gate(monkeypatch):
         f"scripts/run_all_tests.py's RUN_ROOTS, so `make test` does not run them. "
         f"Either the root moved and this file's universe is stale, or the suite was "
         f"dropped from the gate."
-    )
-
-
-@pytest.mark.parametrize(
-    "name", BINDS_THE_SHARED_DEFINITION, ids=lambda n: n.replace("/", "_")
-)
-def test_the_suites_added_here_bind_the_shared_definition(name: str):
-    """One definition of the seam and the carve-out, not one per suite.
-
-    Seven suites need this control. Seven copies of a fourteen-line fixture is the
-    duplication that produced #1398's shape in the first place — a change made to one
-    instance and not to the class — so the suites added in that change load
-    `scripts/tests/no_outbound_aws.py` and bind what it returns. This asserts the
-    binding is there, by source: a suite that drifts back to a local copy keeps
-    whatever the seam was on the day it was copied.
-    """
-    root = REPO_ROOT / name
-    sources = [p.read_text(encoding="utf-8") for p in conftest_chain(root)]
-    sources += [
-        q.read_text(encoding="utf-8")
-        for q in root.rglob("conftest.py")
-        if not any(
-            marker in "/" + q.relative_to(REPO_ROOT).as_posix() for marker in NOT_SOURCE
-        )
-    ]
-    assert any("no_outbound_aws.py" in text for text in sources), (
-        f"{name} refuses outbound AWS without naming {SHARED_DEFINITION}, so it is "
-        f"carrying a copy of the fixture. The seam, the `integration` carve-out and "
-        f"the reasoning live in that module; a copy keeps whichever version of them "
-        f"was current when it was made."
     )
 
 
