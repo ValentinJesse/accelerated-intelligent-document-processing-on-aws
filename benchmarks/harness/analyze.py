@@ -79,6 +79,7 @@ def score_confidence_coverage(sections):
 
     expected = scored = 0
     by_field = {}
+    expected_by_field = {}
     for sec in sections:
         info = sec.get("explainability_info")
         # `explainability_info` is written as a one-element list wrapping the
@@ -89,12 +90,19 @@ def score_confidence_coverage(sections):
         scored += cov["scored_rows"]
         for field, n in cov["unscored_rows_by_field"].items():
             by_field[field] = by_field.get(field, 0) + n
+        for field, n in cov["expected_rows_by_field"].items():
+            expected_by_field[field] = expected_by_field.get(field, 0) + n
     return {
         "conf_rows_expected": expected,
         "conf_rows_scored": scored,
         "conf_rows_unscored": expected - scored,
         "conf_coverage": round(scored / expected, 4) if expected else None,
         "conf_unscored_by_field": by_field or None,
+        # The denominator beside that numerator. The rungs divide by the
+        # section-wide row total, so an attribute that is wholly unscored beside a
+        # large fully-scored one lands below the warning fraction; without a
+        # per-field denominator a recorded run cannot be read for that case at all.
+        "conf_rows_expected_by_field": expected_by_field or None,
     }
 
 
