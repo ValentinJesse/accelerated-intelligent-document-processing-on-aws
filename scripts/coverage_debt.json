@@ -288,6 +288,7 @@
         "scripts/generate_hook_point_reachability.py": 67.15,
         "scripts/generate_multi_instance_paystub.py": 0.0,
         "scripts/generate_standard_classes.py": 0.0,
+        "scripts/hermetic_aws_env.py": 91.67,
         "scripts/hooks/check_commit_text.py": 98.48,
         "scripts/hooks/check_shared_branch.py": 95.46,
         "scripts/malware_gate_burst.py": 97.71,
