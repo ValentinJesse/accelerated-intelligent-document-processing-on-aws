@@ -409,8 +409,11 @@ def _summary(cbd, findings):
         "step_results": {"Step 3: Default config": {"status": "passed", "error": ""}},
         "teardown": {"retained": False, "findings": []},
     }
+    # Keyed by sweep since #1434 made the table cover all six Step 0 sweeps; the
+    # other five are absent here, which is their "not reported" state and renders
+    # rows `_sweep_rows` does not match.
     return cbd.build_consolidated_summary(
-        "idp-0101-000000", primary, [], True, findings
+        "idp-0101-000000", primary, [], True, {"cleanup_stale_idp_buckets": findings}
     )
 
 
@@ -565,11 +568,36 @@ def test_main_fails_the_run_on_a_sweep_finding():
     )
 
 
+def _names_carrying(main, name):
+    """`name` plus any local main() assigns a value that mentions it.
+
+    One hop, because since #1434 the six Step 0 sweeps reach the table through a
+    mapping keyed by sweep rather than one argument each. The claim asserted
+    below is unchanged — the sweep's outcome has to arrive at the table — and
+    only the route is wider. That the mapping actually carries THIS sweep under
+    THIS key is pinned in test_startup_sweep_outcomes.py, over every sweep in the
+    registry rather than this one.
+    """
+    carried = {name}
+    for node in ast.walk(main):
+        if not isinstance(node, ast.Assign):
+            continue
+        mentioned = {
+            inner.id for inner in ast.walk(node.value) if isinstance(inner, ast.Name)
+        }
+        if carried & mentioned:
+            carried |= {
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            }
+    return carried
+
+
 def test_main_passes_the_sweep_result_to_the_consolidated_summary():
     """The row in the published table, as well as the exit code."""
     main = _main_function()
     name = _sweep_result_name(main)
     assert name
+    carried = _names_carrying(main, name)
 
     passed_to = [
         node
@@ -577,8 +605,8 @@ def test_main_passes_the_sweep_result_to_the_consolidated_summary():
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "build_consolidated_summary"
-        and name
-        in {
+        and carried
+        & {
             inner.id
             for arg in [*node.args, *(kw.value for kw in node.keywords)]
             for inner in ast.walk(arg)
