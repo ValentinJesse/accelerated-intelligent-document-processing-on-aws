@@ -315,6 +315,29 @@ catches it.
     Three verdicts, not two: ✅ PASSED, ❌ FAILED, and **⚠️ UNVERIFIED** when the
     monitor handed off before the pipeline reached a terminal state — the job
     exits 0 in that case as well, so a green job is two different claims.
+
+    ⚠️ A post from `integration_tests` can only describe a run that **reached**
+    `integration_tests`. A nightly that fails in `fast_checks` has that job
+    *skipped*, so the `after_script` never runs and the channel gets nothing —
+    and a silent nightly is indistinguishable from one nobody scheduled. The
+    `nightly_notification` job in the `notify` stage covers that: it runs
+    `when: always` on a scheduled pipeline, stays quiet when
+    `integration_tests` already posted (it keys on a `slack_posted.txt` artifact
+    written only on a *successful* post), and otherwise sends
+    **❌ FAILED BEFORE THE DEPLOY**, which states plainly that nothing was
+    deployed and no integration test ran. If the deploy ran but its own post
+    failed, the fallback sends the summary instead as
+    **⚠️ RESULT NOT DELIVERED**. It declares **no `needs`** on purpose — GitLab
+    skips a job whose needed job was skipped, which would reproduce the silence
+    — and posts with `urllib`, because `curl` is not in the job's image.
+    Pinned by `scripts/sdlc/tests/test_nightly_notification.py`.
+
+    This was the shape of the 2026-10-14 20:03 run: `package_tests` failed
+    because Claude Sonnet 4 reached the end-of-life date AWS published for it and
+    the LEGACY expiry alarm in `scripts/tests/test_model_surface_consistency.py`
+    fired **with no code change at all**. A dated alarm can take the nightly out
+    on a tree nobody touched, so "the pipeline was silent" must never be
+    readable as "nothing happened".
   - **Email** — the *Pipeline status emails* integration sends pipeline failures
     on the default branch to the team distribution list. ⚠️ It fires for **any**
     failed `develop` pipeline, not just the nightly: GitLab cannot filter
