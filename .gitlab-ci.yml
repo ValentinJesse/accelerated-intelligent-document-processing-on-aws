@@ -932,7 +932,7 @@ srt_security_review:
     - apt-get update -y
     - apt-get install curl python3-pip -y
     # Install Python dependencies for SRT setup script
-    - pip install --upgrade pip
+    - pip install --upgrade pip PyYAML
 
   script:
     - echo "Running SRT (Sample Security Review Tool) security assessment..."
