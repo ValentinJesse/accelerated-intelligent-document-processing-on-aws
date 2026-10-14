@@ -498,11 +498,26 @@ def _report_sweep_not_completed(func, findings):
     The print is unconditional while the returned reason is a candidate: `main()`
     keeps the first reason it has, so a real deploy failure is never masked, but
     a sweep that did not complete says so in the log either way.
+
+    The sweep is named from STARTUP_SWEEPS rather than passed in, so the reason a
+    reader is sent after cannot drift from the row they will look at.
     """
     label = next((s.label for s in STARTUP_SWEEPS if s.func == func), func)
     reason = f"{label} did not complete: {'; '.join(findings)}"
     print(f"❌ {reason}")
     return reason
+
+
+def _first_failure_reason(existing, candidate):
+    """Keep the run's FIRST one-line root cause; a later one is a candidate only.
+
+    A function rather than an inline `existing or candidate`, because this is the
+    one decision in the verdict that a mutation sample could not kill: inverting
+    it mis-attributes the 💥 line and the failure email without changing whether
+    the run fails, so nothing short of running `main()` end to end notices. Named
+    here, it is one site with a direct test instead of one per caller with none.
+    """
+    return existing or candidate
 
 
 def cleanup_stale_bda_blueprints():
@@ -8581,25 +8596,25 @@ def main():
         reason = _report_sweep_not_completed(
             "cleanup_stale_idp_stacks", stale_stack_findings
         )
-        failure_reason = failure_reason or reason
+        failure_reason = _first_failure_reason(failure_reason, reason)
     if apigw_vpc_sweep_findings:
         stack_success = False
         reason = _report_sweep_not_completed(
             "cleanup_stale_apigw_test_vpcs", apigw_vpc_sweep_findings
         )
-        failure_reason = failure_reason or reason
+        failure_reason = _first_failure_reason(failure_reason, reason)
     if stale_bucket_findings:
         stack_success = False
         reason = _report_sweep_not_completed(
             "cleanup_stale_idp_buckets", stale_bucket_findings
         )
-        failure_reason = failure_reason or reason
+        failure_reason = _first_failure_reason(failure_reason, reason)
     if stale_policy_findings:
         stack_success = False
         reason = _report_sweep_not_completed(
             "cleanup_stale_idp_policies", stale_policy_findings
         )
-        failure_reason = failure_reason or reason
+        failure_reason = _first_failure_reason(failure_reason, reason)
 
     # Step 5: Print the deterministic consolidated status table FIRST (always
     # renders, Bedrock or not — the GitLab log needs a reliable "every test +

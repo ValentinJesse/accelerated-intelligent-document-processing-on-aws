@@ -830,6 +830,50 @@ def test_main_routes_every_sweep_result_into_the_status_table(sweep):
 
 
 # ---------------------------------------------------------------------------
+# The one-line root cause: which sweep it names, and which reason wins
+#
+# #1433's mutation sample left one survivor here — the precedence of `main()`'s
+# one-line `failure_reason` — and recorded it as unpinned, because asserting it
+# meant running `main()` end to end. Both halves of it are pinned below instead,
+# by naming the two decisions: the sweep a reason is attributed to, and which of
+# two reasons is kept. Inverting either mis-sends a reader without changing
+# whether the run fails, which is why nothing else notices.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sweep", _sweep_names())
+def test_the_one_line_reason_names_the_sweep_it_is_about(cbd, capsys, sweep):
+    entry = next(s for s in cbd.STARTUP_SWEEPS if s.func == sweep)
+    other_labels = [s.label for s in cbd.STARTUP_SWEEPS if s.func != sweep]
+
+    reason = cbd._report_sweep_not_completed(sweep, ["could not enumerate"])
+
+    assert entry.label in reason, reason
+    assert "could not enumerate" in reason, reason
+    assert not any(label in reason for label in other_labels), (
+        f"the reason for {sweep} names another sweep, so the 💥 line and the "
+        f"failure email send a reader after the wrong one: {reason}"
+    )
+    # Printed unconditionally: `main()` may keep an earlier reason, but a sweep
+    # that did not complete has to say so in the log either way.
+    assert reason in capsys.readouterr().out
+
+
+def test_the_first_root_cause_wins_over_a_later_one(cbd):
+    """A real deploy failure must not be masked by a Step 0 sweep.
+
+    And the reverse: with nothing else to report, the sweep's reason has to be
+    the one that reaches the 💥 line, or the run goes red naming nothing.
+    """
+    assert cbd._first_failure_reason("publish/build failed: boom", "sweep") == (
+        "publish/build failed: boom"
+    )
+    assert cbd._first_failure_reason("", "sweep did not complete") == (
+        "sweep did not complete"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The interaction between the stack sweep and the bucket sweep
 #
 # #1434 asks whether an inert stack sweep makes the bucket sweep's
