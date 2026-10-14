@@ -383,6 +383,14 @@ def generate_stack_name():
 # The retention-marker WRITE (`retain_failed_stack`) is covered by the same check
 # through a stated root rather than a call edge, because the sweeps read what it
 # writes: a throttle there tears down the stack a failed run asked to keep.
+#
+# That premise is what a handler may decide ON; it is not a licence to treat
+# every unanswerable condition as the permissive answer. Where a call did not
+# answer, the item is left alone and reported in its own counter — the age gates
+# (`_listing_age_seconds`) and the retention-marker read (`_retention_markers`)
+# both do this, and the second splits by WHICH call failed, since a marker whose
+# body cannot be parsed is genuinely one nobody can understand while a marker
+# whose read was refused says nothing either way (#1445).
 # ---------------------------------------------------------------------------
 
 #: Opens every Step 0 sweep finding, so the outcome is readable by something
@@ -5945,6 +5953,50 @@ def delete_apigw_test_vpc(vpc_stack_name):
         return False
 
 
+def _listing_age_seconds(created, now):
+    """Age in seconds of a listing's creation timestamp, or None if unestablishable.
+
+    The one age computation behind every age gate in this module, so they cannot
+    answer the same question differently — four siblings deciding it
+    independently and reaching opposite answers is what #1445 was about.
+
+    None is returned for an absent value, one that is not a datetime, and one
+    that is naive (no tzinfo) — subtracting a naive datetime from an aware `now`
+    raises, which inside a reaper's blanket `except` abandons the whole sweep
+    rather than skipping one item.
+
+    ⚠️ Every caller must read None as "the age gate cannot be satisfied", never
+    as old enough. An age that cannot be established is not the same claim as
+    being old enough to delete, and an API answer that cannot establish
+    something is not evidence for it — these gates are the last thing between a
+    listing and a delete call against a shared CI account.
+    """
+    if not isinstance(created, datetime) or created.tzinfo is None:
+        return None
+    return (now - created).total_seconds()
+
+
+def _report_age_unestablishable(names, consequence):
+    """Name every item a sweep left alone because its age was not establishable.
+
+    One site for every age gate here, so what they say about the same decision
+    cannot drift, with the `consequence` naming what the sweep in question would
+    have done. Named rather than only counted: this should not happen, and a
+    silent skip leaves the resource accumulating with nothing saying which one.
+
+    Reported in its own counter rather than folded into the too-young one,
+    because "younger than the gate" and "age unknown" are different facts and
+    only the second needs looking at. Silent when the list is empty — a sweep
+    that reports something on every green deploy trains the reader to ignore the
+    row, which is the failure #1391 was.
+    """
+    for name in sorted(names):
+        print(
+            f"  ⚠️ {name}: age not establishable from the listing — NOT reaped "
+            f"({consequence})"
+        )
+
+
 # Only reap *-apigw-vpc stacks older than this. A manual/local PRIVATE-VPC
 # test can legitimately be running concurrently with a CI job; a young stack
 # may be that in-flight test, so the age gate prevents this reaper from
@@ -5962,7 +6014,10 @@ def cleanup_stale_apigw_test_vpcs():
 
     Age-gated (APIGW_VPC_STALE_AGE_SECONDS): a manual VPC test could be running
     concurrently, so only stacks older than the threshold are deleted — never a
-    possibly-in-flight one.
+    possibly-in-flight one. The gate fails CLOSED and its skip is reported in
+    its own counter: a stack whose `CreationTime` the listing did not carry has
+    an age that cannot be established, which is not the same claim as being old
+    enough to delete (#1445).
 
     ONE enumeration, `list_stacks`, and it is what selection reads, so a failure
     there means no `*-apigw-vpc` stack was considered. Returns the Step 0 sweep
@@ -5986,6 +6041,7 @@ def cleanup_stale_apigw_test_vpcs():
         # clocks can skew); use a timezone-aware now from the newest stack's tz.
         now = datetime.now(tz=timezone.utc)
         stale, skipped_young = [], 0
+        age_unestablishable = []
         paginator = cf.get_paginator("list_stacks")
         for page in paginator.paginate(
             StackStatusFilter=[
@@ -6002,9 +6058,14 @@ def cleanup_stale_apigw_test_vpcs():
                 name = s.get("StackName", "")
                 if not (name.startswith("idp-") and name.endswith("-apigw-vpc")):
                     continue
-                created = s.get("CreationTime")
-                age = (now - created).total_seconds() if created else None
-                if age is None or age >= APIGW_VPC_STALE_AGE_SECONDS:
+                age = _listing_age_seconds(s.get("CreationTime"), now)
+                if age is None:
+                    # Fails CLOSED, like every other guard in this layer: with no
+                    # age the gate cannot be satisfied, and this path deletes a
+                    # VPC that may be an in-flight manual test.
+                    age_unestablishable.append(name)
+                    continue
+                if age >= APIGW_VPC_STALE_AGE_SECONDS:
                     stale.append(name)
                 else:
                     skipped_young += 1
@@ -6020,6 +6081,11 @@ def cleanup_stale_apigw_test_vpcs():
         )
 
     try:
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes a VPC that "
+            "may still be in use",
+        )
         if not stale:
             print(
                 f"✅ No stale apigw test VPC stacks to reap "
@@ -6148,8 +6214,33 @@ def collect_failure_evidence(stack_name, result):
 
 
 def _retention_markers(s3, bucket):
-    """Return {stack_name: keep_until_iso} for every retention marker present."""
-    markers = {}
+    """Return ({stack_name: keep_until_iso}, {stack_name: why the read failed}).
+
+    TWO failure classes, and they are different facts about a marker rather than
+    two spellings of one (#1445):
+
+      * the GetObject ANSWERED and what came back cannot be understood — not
+        JSON, or JSON with no `keep_until`. That is "a marker nobody can parse",
+        and it lands in the first dict with an empty value, which reads as
+        expired: a marker that cannot be understood must not protect its stack
+        forever, which is the leak the reaper exists to stop.
+      * the GetObject DID NOT answer — a denial, expired credentials, a retry
+        budget the client exhausted. That establishes nothing about what the
+        marker says, so it lands in the SECOND dict and the caller keeps the
+        stack. "Could not read it this run" converges on the next run, where the
+        same call is made again; expiring on it reaps a stack a failed run
+        deliberately asked to keep, however young, since the marker overrides
+        the age gate.
+
+    The split is structural — which call is inside which `try` — rather than a
+    test on an exception class, so it does not depend on botocore raising a
+    recognisable type for every durable condition. `_THROTTLE_RETRY_CONFIG` on
+    the caller's client has already absorbed the `SlowDown`/`Throttling`/5xx
+    class by the time anything arrives here, so the second dict holds the
+    durable conditions; those do not become readable by being retried once more
+    inside this loop, and nothing here reaps on them.
+    """
+    markers, unreadable = {}, {}
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=f"{RETENTION_S3_PREFIX}/"):
         for obj in page.get("Contents", []):
@@ -6158,14 +6249,20 @@ def _retention_markers(s3, bucket):
             if not name:
                 continue
             try:
-                body = json.loads(
-                    s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
-                )
-                markers[name] = body.get("keep_until", "")
+                raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            except Exception as e:  # noqa: BLE001
+                # The API did not answer. Nothing is established about what this
+                # marker says, so the caller must not act as though it said
+                # "expired".
+                unreadable[name] = str(e)
+                continue
+            try:
+                markers[name] = json.loads(raw.decode()).get("keep_until", "")
             except Exception:  # noqa: BLE001
-                # An unreadable marker must not protect a stack forever.
+                # The answer arrived and is unintelligible. An unreadable marker
+                # must not protect a stack forever.
                 markers[name] = ""
-    return markers
+    return markers, unreadable
 
 
 def retain_failed_stack(stack_name):
@@ -6203,18 +6300,28 @@ def retain_failed_stack(stack_name):
     try:
         s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
+        readable, unreadable = _retention_markers(s3, bucket)
         live = {
             name: until
-            for name, until in _retention_markers(s3, bucket).items()
+            for name, until in readable.items()
             if _keep_until_in_future(until, now)
         }
-        if stack_name not in live and len(live) >= MAX_RETAINED_STACKS:
+        # A marker whose read FAILED counts against the ceiling, because the
+        # reaper keeps its stack for the same reason (#1445) — so the slot is
+        # genuinely occupied and the ~122 IAM roles behind it are genuinely
+        # held. Treating it as free would let the count drift below the number
+        # of stacks actually retained, which is the quota exhaustion this
+        # ceiling exists to bound. A marker that merely cannot be PARSED is
+        # already in `readable` with an empty value and does not hold a slot:
+        # the reaper reaps it.
+        held = {**{name: "could not be read" for name in unreadable}, **live}
+        if stack_name not in held and len(held) >= MAX_RETAINED_STACKS:
             print(
-                f"⚠️  {len(live)} stack(s) already retained "
+                f"⚠️  {len(held)} stack(s) already retained "
                 f"(ceiling {MAX_RETAINED_STACKS}) — tearing {stack_name} down "
                 "instead so the account's IAM role headroom is not consumed."
             )
-            for name, until in sorted(live.items()):
+            for name, until in sorted(held.items()):
                 print(f"     holding a slot: {name} until {until}")
             return False
 
@@ -6265,15 +6372,26 @@ def _keep_until_in_future(keep_until, now):
 
 
 def _expired_retention_markers(bucket, now):
-    """Return ({stack_name: until} still protected, [names whose marker expired])."""
+    """Return the three answers a retention marker can give, not two.
+
+    `({stack_name: until} still protected, [expired], {name: why unreadable})`.
+
+    The third is separate because it is a different claim: an expired marker
+    says the run's own deadline has passed, which positively licenses reaping
+    even a stack younger than the age gate, while a marker whose read did not
+    answer says nothing at all — see `_retention_markers` for the split. Folding
+    the third into the second is what let one failed GetObject reap a stack a
+    failed run asked to keep (#1445).
+    """
     s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
+    readable, unreadable = _retention_markers(s3, bucket)
     protected, expired = {}, []
-    for name, until in _retention_markers(s3, bucket).items():
+    for name, until in readable.items():
         if _keep_until_in_future(until, now):
             protected[name] = until
         else:
             expired.append(name)
-    return protected, expired
+    return protected, expired, unreadable
 
 
 def _drop_retention_marker(bucket, stack_name):
@@ -6309,6 +6427,11 @@ def cleanup_stale_ci_diagnostics():
     raises. Of the six sweeps this is the one whose finding does NOT fail the
     run — see its `why` in STARTUP_SWEEPS.
 
+    The window fails CLOSED and its skip is reported in its own counter, the
+    same way as the age gates above: an object whose `LastModified` the
+    listing did not carry has an age that cannot be established, which is not
+    the same claim as being past the retention window (#1445).
+
     An object that would not delete stays best effort and is NOT a finding.
     """
     bucket = _diagnostics_bucket()
@@ -6327,16 +6450,21 @@ def cleanup_stale_ci_diagnostics():
         s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         stale = []
+        age_unestablishable = []
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(
             Bucket=bucket, Prefix=f"{DIAGNOSTICS_S3_PREFIX}/"
         ):
             for obj in page.get("Contents", []):
-                modified = obj.get("LastModified")
-                if (
-                    modified
-                    and (now - modified).total_seconds() > DIAGNOSTICS_RETENTION_SECONDS
-                ):
+                age = _listing_age_seconds(obj.get("LastModified"), now)
+                if age is None:
+                    # Already the closed direction before #1445 — an object with
+                    # no usable `LastModified` was never selected — but silently,
+                    # and a naive one abandoned the whole sweep. Through the
+                    # shared helper it is one skipped object, in the same counter
+                    # the other gates use.
+                    age_unestablishable.append(obj["Key"])
+                elif age > DIAGNOSTICS_RETENTION_SECONDS:
                     stale.append(obj["Key"])
     except Exception as e:  # noqa: BLE001
         return _sweep_finding(
@@ -6345,6 +6473,11 @@ def cleanup_stale_ci_diagnostics():
         )
 
     try:
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the retention window cannot be applied, and this path deletes the "
+            "evidence bundle",
+        )
         if not stale:
             print("✅ No expired diagnostics bundles")
             return []
@@ -6408,6 +6541,18 @@ def cleanup_stale_idp_stacks():
     would delete the service role and permissions boundary out from under the
     very stack being preserved, leaving something that can no longer be deleted
     cleanly.
+
+    THREE answers from a marker, not two, and the third keeps the stack (#1445):
+    a marker that cannot be PARSED expires, because one nobody can understand
+    must not pin a retention slot forever, while a marker whose read did not
+    ANSWER establishes nothing — that run's stacks are left in place and
+    reported in their own counter, and the next run makes the same call again.
+    The age gate fails closed on the same reasoning, in its own counter too: a
+    stack whose `CreationTime` the listing did not carry has an age that cannot
+    be established, which is not the same claim as being old enough to delete.
+    Neither is a sweep finding: every stack the listing returned was considered,
+    and ending a night's run red for a skipped item would make the row that
+    reports a genuinely inert sweep worth less.
     """
     print("🧹 Cleaning up stale idp- test stacks (IAM role leak guard)...")
 
@@ -6419,12 +6564,18 @@ def cleanup_stale_idp_stacks():
         now = datetime.now(tz=timezone.utc)
         stale, skipped_young = [], 0
         skipped_retained = 0
+        age_unestablishable = []
+        #: {run_prefix: why} for a run whose marker read did not answer. Its own
+        #: counter rather than folded into `skipped_retained`, because "retained
+        #: on purpose" and "cannot tell whether it was retained" are different
+        #: facts and only the second needs looking at.
+        markers_unreadable = {}
 
         bucket = _diagnostics_bucket()
-        protected, expired = ({}, [])
+        protected, expired, unreadable = ({}, [], {})
         if bucket:
             try:
-                protected, expired = _expired_retention_markers(bucket, now)
+                protected, expired, unreadable = _expired_retention_markers(bucket, now)
             except Exception as e:  # noqa: BLE001
                 # Failing to read markers must not stop the reaper, but it must
                 # not silently un-protect a retained stack either: with no
@@ -6463,15 +6614,28 @@ def cleanup_stale_idp_stacks():
                 if run_prefix in protected:
                     skipped_retained += 1
                     continue
-                created = s.get("CreationTime")
-                age = (now - created).total_seconds() if created else None
+                # Before the age gate AND before the expiry override: the read
+                # of this run's marker did not answer, so whether the run asked
+                # for the stack to be kept is unknown. Keeping it costs a
+                # retention slot until the next run re-reads the marker, which
+                # is the same call and converges; reaping it destroys the
+                # evidence a failed run deliberately preserved (#1445).
+                if run_prefix in unreadable:
+                    markers_unreadable[run_prefix] = unreadable[run_prefix]
+                    continue
+                age = _listing_age_seconds(s.get("CreationTime"), now)
                 # An expired marker overrides the age gate: the run that wrote it
                 # asked for the stack to be kept until a deadline that has now
                 # passed, which is a stronger statement than "too young to be a
                 # leak" and is the only thing that frees up a retention slot.
                 if run_prefix in expired:
                     stale.append(name)
-                elif age is None or age >= IDP_STACK_STALE_AGE_SECONDS:
+                elif age is None:
+                    # Fails CLOSED, with its own counter: the listing carried no
+                    # usable `CreationTime`, so the age gate cannot be satisfied,
+                    # and this path deletes a run's stacks.
+                    age_unestablishable.append(name)
+                elif age >= IDP_STACK_STALE_AGE_SECONDS:
                     stale.append(name)
                 else:
                     skipped_young += 1
@@ -6487,6 +6651,17 @@ def cleanup_stale_idp_stacks():
             print(f"  ({skipped_retained} retained idp- stack(s) skipped)")
         if skipped_young:
             print(f"  ({skipped_young} young idp- stack(s) skipped — may be in-flight)")
+        for run_prefix, why in sorted(markers_unreadable.items()):
+            print(
+                f"  ⚠️ {run_prefix}: retention marker could not be read ({why}) "
+                "— NOT reaped, since whether this run asked to keep its stacks "
+                "is unknown; the next run re-reads the marker"
+            )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes a run's "
+            "stacks and the IAM stack behind them",
+        )
         if not stale:
             print("✅ No stale idp- test stacks to reap")
             # Still drop expired markers: a marker whose stack is already gone
@@ -6601,8 +6776,16 @@ def cleanup_stale_idp_buckets():
     Safety: a bucket is deleted only if BOTH
       * its run-prefix (idp-MMDD-HHMMSS) has NO surviving CloudFormation stack
         (so no in-flight/partly-deployed run owns it), AND
-      * it is older than IDP_BUCKET_STALE_AGE_SECONDS (backstop for a brand-new
-        bucket whose stack hasn't registered yet).
+      * its age is KNOWN and exceeds IDP_BUCKET_STALE_AGE_SECONDS (a backstop
+        for a brand-new bucket whose stack hasn't registered yet).
+
+    Both fail CLOSED, the age one included (#1445): a bucket whose
+    `CreationDate` the listing did not carry has an age that cannot be
+    established, which is not the same claim as being old enough to delete, and
+    this path empties the bucket before deleting it. It is reported in its own
+    counter rather than folded into the too-young one, because "younger than the
+    gate" and "age unknown" are different facts and only the second needs
+    looking at.
 
     Returns a list of finding strings; an EMPTY list means the sweep demonstrably
     ran — it enumerated the account and considered every `idp-` bucket in it.
@@ -6649,6 +6832,7 @@ def cleanup_stale_idp_buckets():
 
     try:
         stale, skipped_protected, skipped_young = [], 0, 0
+        age_unestablishable = []
         for b in listed:
             name = b.get("Name", "")
             if not name.startswith("idp-"):
@@ -6657,9 +6841,14 @@ def cleanup_stale_idp_buckets():
             if m and m.group(1) in protected:
                 skipped_protected += 1
                 continue
-            created = b.get("CreationDate")
-            age = (now - created).total_seconds() if created else None
-            if age is not None and age < IDP_BUCKET_STALE_AGE_SECONDS:
+            age = _listing_age_seconds(b.get("CreationDate"), now)
+            if age is None:
+                # Fails CLOSED, like the live-stack guard above it: with no age
+                # the gate cannot be satisfied, and this path empties a bucket
+                # before deleting it, so being wrong destroys its contents.
+                age_unestablishable.append(name)
+                continue
+            if age < IDP_BUCKET_STALE_AGE_SECONDS:
                 skipped_young += 1
                 continue
             stale.append(name)
@@ -6669,6 +6858,11 @@ def cleanup_stale_idp_buckets():
                 f"  ({skipped_protected} protected by a live stack, "
                 f"{skipped_young} younger than the age gate — skipped)"
             )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path empties the bucket "
+            "before deleting it",
+        )
         if not stale:
             print("✅ No stale idp- test buckets to reap")
             return []
@@ -6690,9 +6884,11 @@ def cleanup_stale_idp_buckets():
     except Exception as e:  # noqa: BLE001
         # Not a per-bucket delete failure — those are caught in the loop above
         # and never arrive here. This is the selection or iteration itself
-        # giving out part-way (an undateable CreationDate is the live shape),
-        # which leaves the buckets after it unconsidered. Partial is not clean,
-        # so it is a finding for the same reason enumeration is.
+        # giving out part-way, which leaves the buckets after it unconsidered.
+        # Partial is not clean, so it is a finding for the same reason
+        # enumeration is. An undateable `CreationDate` used to arrive here as a
+        # TypeError and cost the whole sweep; `_listing_age_seconds` answers
+        # None for it instead, so that shape is now one skipped bucket.
         return _sweep_finding(
             "the sweep gave out part-way through the buckets it listed, so an "
             f"unknown number were never considered: {e}"
@@ -6710,16 +6906,12 @@ IDP_POLICY_STALE_AGE_SECONDS = 6 * 3600  # 6h
 def _policy_age_seconds(policy, now):
     """Age of a `list_policies` entry in seconds, or None if not establishable.
 
-    None is returned for an absent `CreateDate`, one that is not a datetime, and
-    one that is naive (no tzinfo) — subtracting a naive datetime from an
-    aware `now` raises, which inside the reaper's blanket `except` would abandon
-    the whole sweep rather than one policy. The caller must treat None as "the
-    age gate cannot be satisfied", never as old enough.
+    The field name is the only thing specific to policies here; the three ways
+    an age can fail to be establishable, and the rule that None means "the age
+    gate cannot be satisfied" rather than "old enough", are shared with the
+    other three gates in `_listing_age_seconds`.
     """
-    created = policy.get("CreateDate")
-    if not isinstance(created, datetime) or created.tzinfo is None:
-        return None
-    return (now - created).total_seconds()
+    return _listing_age_seconds(policy.get("CreateDate"), now)
 
 
 def cleanup_stale_idp_policies():
@@ -6820,11 +7012,10 @@ def cleanup_stale_idp_policies():
                 f"  ({skipped_protected} protected by a live stack, "
                 f"{skipped_young} younger than the age gate — skipped)"
             )
-        for name in sorted(age_unestablishable):
-            print(
-                f"  ⚠️ {name}: age not establishable from the listing — NOT "
-                "reaped (the age gate cannot be satisfied, and this path deletes)"
-            )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes",
+        )
         if not stale:
             print("✅ No orphaned idp- IAM managed policies to reap")
             return []
