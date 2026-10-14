@@ -76,6 +76,30 @@
 #                  the referenced object existing (getStepFunctionExecution)
 #                  has its args replaced at run time by apply_dynamic_args in
 #                  scripts/test_api_rbac.py.
+#   object_scoped_roles: [Annotator, ...] — roles the FIELD-level policy admits
+#                  and a PER-OBJECT control in the resolver refuses for the args
+#                  above. The dynamic matrix then asserts a refusal that is NOT
+#                  attributed to the group floor (authzControl != api-group-floor),
+#                  which is two assertions in one cell: the floor still admits the
+#                  role, AND the per-object control still refuses an object outside
+#                  the caller's scope.
+#                  ⚠️ The cell needs the authzControl label (#1308), so against a
+#                  stack deployed before that field existed it records "could not be
+#                  run" — blocking, and not a pass — rather than a verdict it has no
+#                  way to reach. Redeploy to evaluate it.
+#                  Every role named here must appear in
+#                  `groups:` — scripts/test_api_rbac.py exits non-zero otherwise,
+#                  because on a role the policy EXCLUDES the cell would assert the
+#                  opposite of the floor's job.
+#                  Use it only where the ordinary remedy is unavailable. Normally an
+#                  allowed role refused by a per-object control is a cell that did
+#                  not measure the group check (scored ERROR, see issue #1308), and
+#                  the fix is to give the operation an argument that control admits.
+#                  The three review mutations have no such argument: the control
+#                  reads the named document's TestSetId from the tracking table, so
+#                  the only admitting argument is a real document in a real test
+#                  set, which the matrix would then have Admin and Reviewer perform
+#                  a real review mutation against.
 #   skip_allowed:  true -> dynamic test exercises ONLY the denied cells
 #                  (unauth + disallowed roles); the allowed-role call is
 #                  skipped because it would do real work (start an LLM agent,
@@ -852,6 +876,15 @@ operations:
     kind: mutation
     enforced_in: src/lambda/complete_section_review/index.py
     args: { objectKey: "__x__", sectionId: "1" }
+    object_scoped_roles: [Annotator]
+    note: >-
+      The Annotator cell asserts a refusal that is NOT the group floor's.
+      _assert_annotator_scope reads this objectKey's TestSetId out of the tracking
+      table before completing anything, and `__x__` names no document, so a scoped
+      annotator is refused for the object rather than for their group. The pair of
+      failures that assertion catches: a 403 labelled api-group-floor (the manifest
+      stopped admitting Annotator) and no refusal at all (an annotator completed a
+      review on a document belonging to no test set of theirs).
   claimReview:
     # Annotator annotates test-set ground truth; the resolver additionally
     # requires the document's test set to be in their allowedTestSets.
@@ -859,6 +892,15 @@ operations:
     kind: mutation
     enforced_in: src/lambda/complete_section_review/index.py
     args: { objectKey: "__x__" }
+    object_scoped_roles: [Annotator]
+    note: >-
+      As completeSectionReview, and for this operation specifically: claimReview is
+      what makes a queue entry exclusive to one annotator, so "refused for the
+      object" is the answer that keeps one annotator from claiming a document in a
+      test set they were never assigned. _assert_annotator_scope runs before
+      claim_review, and `__x__` names no document, so the refusal is the per-object
+      one and a 403 from the group floor instead would mean the manifest no longer
+      admits the role.
   releaseReview:
     # Annotator annotates test-set ground truth; the resolver additionally
     # requires the document's test set to be in their allowedTestSets.
@@ -866,6 +908,13 @@ operations:
     kind: mutation
     enforced_in: src/lambda/complete_section_review/index.py
     args: { objectKey: "__x__" }
+    object_scoped_roles: [Annotator]
+    note: >-
+      As claimReview, and for this operation specifically: releasing another
+      annotator's claim is how a queue entry would be taken from them, so a caller
+      not assigned to the document's test set must be refused for the object.
+      _assert_annotator_scope runs before release_review, and `__x__` names no
+      document, so the refusal is the per-object one.
   skipAllSectionsReview:
     groups: [Admin, Reviewer]
     kind: mutation

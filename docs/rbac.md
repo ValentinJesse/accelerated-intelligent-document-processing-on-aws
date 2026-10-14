@@ -491,6 +491,18 @@ that read "employee personal information (name, address, Social Security Number)
 pay period dates") to `getStepFunctionExecution` (317,614 bytes of execution input
 and step history) with no prior knowledge of the deployment.
 
+**That refusal is asserted against a deployed stack, per operation.** `make
+api-test` creates one temporary Cognito user per group **and one in no group at
+all**, and drives every operation as each of them: the groupless caller must be
+refused by every policy except the 8 `ANY` ones, and the refusal must carry
+`authzControl: "api-group-floor"` — a refusal attributed to a per-object control
+instead means the floor let a caller it must refuse reach a resolver, and is
+reported as a failure rather than a pass. The five group users include `Annotator`,
+whose access is scoped per object, so the harness seeds its `allowedTestSets` with
+the ids the requests name; the three review mutations keep driving the per-object
+refusal, since on those the only argument that control admits would be a real
+document in a real test set.
+
 `ANY_GROUP` is written as a sentinel rather than as the five group names because
 the policy is about the *vocabulary*, not about five particular names:
 `scripts/sdlc/generate_api_rbac_manifest.py` resolves it against the
@@ -845,7 +857,7 @@ The UI adapts based on the user's role and scope:
 
 ## User Management
 
-Admins can create users with any of the four roles via the User Management page. Each user is:
+Admins can create users with any of the five roles via the User Management page. Each user is:
 1. Created in DynamoDB (source of truth)
 2. Synced to Cognito (for authentication)
 3. Added to the appropriate Cognito group (for authorization)
