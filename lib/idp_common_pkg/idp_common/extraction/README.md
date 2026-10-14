@@ -2316,6 +2316,72 @@ signals make both loud without changing what is extracted:
   attributed to it; and because the recorded corpus cannot bound the false-failure rate —
   it holds no legitimately-empty-list document that also carries a same-width table, so
   the case needs its own measurement. Tracked with the narrowing in GitHub issue #1046.
+- `extraction_partial_row_shortfall` (warning, **always**) — the band the half ratio left
+  silent, and the reason it was there to leave: ⚠️ **`_OCR_ROW_SHORTFALL_RATIO` goes quiet
+  well before half the document is gone.** Sweeping every extracted count from 1 to 800
+  against one 800-row / 17-page rendering, `extraction_rows_below_ocr_estimate` fires from
+  1 through 408 and stops at 409. The matched evidence is 817 rows — 800 data rows plus the
+  column heading reprinted once per page — and half of 817 is 408.5, so a section returning
+  **409 of 800 rows, having lost 48.9% of the document, carried no processing issue at all**
+  and `_generate_processing_report` wrote `Status: SUCCESS` over it (#1361, measured
+  2026-10-14). That is worse than the invisible loss #843 was built for: a reader who knows
+  about #843 reads the silence as a clean run.
+
+  The cause is a units mismatch rather than a badly chosen constant. The ratio is a
+  **multiplicative** slack standing in for an **additive** imprecision — one reprinted
+  heading row per page — so the tolerance scales with the document while the thing it
+  absorbs does not: at 17 pages the slack is ~24x the inflation, and the factor is
+  proportional to the page count. The inflation is computable exactly, because `_ocr_tables`
+  emits one entry per page-repeat and counts the row before each `|---|` separator as one of
+  that entry's rows: `_heading_rows_for_width` is the **number** of matched tables, and
+  `summed − that` is the OCR's data-row count (817 − 17 = 800, asserted against renderings
+  of known size in `TestTheDeductionIsExact` rather than assumed). A run whose separator is
+  its first line has no heading to deduct, so subtracting one under-states the body by one —
+  which lowers the bar and can only suppress a firing.
+
+  So this code compares `extracted` against the data-row count, with everything else
+  inherited unchanged: the same `_ocr_tables` evidence, the same exact-width matching and
+  section-wide sum, the same group-by-width, the same `maxItems` ceiling, the same
+  `_OCR_ROW_ESTIMATE_MIN` evidence floor, and the same skip for empty groups and lists of
+  scalars. The two codes are **mutually exclusive** on a group (the material one wins and
+  the branch `continue`s), which `test_the_two_codes_are_mutually_exclusive_across_the_whole_sweep`
+  holds over all 800 counts.
+
+  ⚠️ **The residual tolerance is a row GAP, not a ratio, and that is the point.**
+  `_OCR_ROW_GAP_MIN` is defined **as** `_OCR_ROW_ESTIMATE_MIN` rather than given its own
+  value: the smallest gap the check will speak about is the smallest table it will speak
+  about at all. What that buys is a silent band bounded in **absolute** rows — at most **29
+  rows missing, whatever the document's size** — where before it was a fraction, so the worst
+  undetected loss was 48.9% at 800 rows, at 1,600 and at 3,200 alike.
+  `TestTheSilentBandIsBoundedInAbsoluteRows` asserts that across five sizes, because a test at
+  one size passes on a mutation that restores a ratio with a different constant. Two
+  consequences worth knowing: the band only exists once half the evidence exceeds the gap
+  floor, so on a section whose matched evidence is under ~60 rows the two bars meet and this
+  code never fires; and the 29-row residual is real, so a silent section is not a complete
+  one.
+
+  Severity is `warning` **unconditionally** and `extraction.row_shortfall_action` does
+  **not** govern it — the same reasoning as `extraction_output_truncated`. A deployment that
+  set `fail` chose it against the half-ratio bar, and widening the knob to this band would
+  start failing documents that complete today; whether a materially short extraction ought to
+  fail at some other bar is a product question, and what this changes is only whether the
+  loss is reported. `_fail_on_row_shortfall` reads `ROW_SHORTFALL_CODE` at `error` severity
+  and nothing else, so the section completes — and the issue is still durable, which
+  `test_the_section_completes_and_the_issue_is_persisted` drives through the real
+  `_save_results` tail. The reader-facing effect is the report status line moving from
+  `SUCCESS` to `COMPLETED WITH WARNINGS`, which is also the fingerprint for "observable": a
+  variant that emitted this at a severity nothing reads would leave that line alone.
+
+  ⚠️ **It inherits the width-only attribution, so a firing is a shortfall to confirm.**
+  `_expected_rows_for_width` sums every same-width table in the section, which can only ever
+  **inflate** the evidence — nothing subtracts — so the bar is upward-biased and the message
+  says so in as many words. `details` carries `ocr_matched_table_rows` (the raw sum),
+  `ocr_heading_rows` (the deduction), `ocr_estimated_rows` (the bar the ratio is taken
+  against) and `missing_rows`, so `extracted + missing == estimated` and
+  `extracted / estimated == ratio` both hold and the denominator is auditable from the issue
+  alone. That matters here specifically: taken against `ocr_matched_table_rows` instead, the
+  #1361 case reads 0.501 rather than 0.511 and nothing else in the issue looks wrong.
+  `tests/unit/extraction/test_partial_row_shortfall.py` is the whole surface.
 - `extraction_list_truncated` (warning) — a non-empty list came back under its schema
   `minItems`. The one completeness signal with no false positives by construction, because
   the config author declared the floor rather than a heuristic inferring it. ⚠️ **What

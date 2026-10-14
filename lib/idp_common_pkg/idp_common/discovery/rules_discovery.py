@@ -798,11 +798,20 @@ class RulesDiscovery:
             if len(rule_props) == 0:
                 return False, "rule_properties must contain at least one rule"
 
-            # Validate each rule property has a description
+            # Validate each rule property has a NON-EMPTY description.
+            #
+            # Truthiness, not presence: ``RuleValidationService._get_rule_metadata``
+            # keeps a rule only ``if description``, so a rule emitted as
+            # ``{"description": ""}`` satisfied this gate, was persisted, and was
+            # then dropped at evaluation time with nothing reporting it — one rule
+            # short of the policy, reported as a clean validation. Refusing it here
+            # routes the model through the existing retry-with-feedback loop
+            # instead, which is the same trade ``RulesTruncatedError`` makes: a
+            # failed job beats a silently incomplete compliance ruleset.
             for rule_id, rule_def in rule_props.items():
                 if not isinstance(rule_def, dict):
                     return False, f"Rule '{rule_id}' must be an object"
-                if "description" not in rule_def:
+                if not rule_def.get("description"):
                     return False, f"Rule '{rule_id}' missing 'description' field"
 
             return True, ""

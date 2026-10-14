@@ -2230,10 +2230,34 @@ class ExtractionService:
 
     #: Below this many matching OCR table rows the row-shortfall check stays quiet.
     _OCR_ROW_ESTIMATE_MIN = 30
-    #: Extracted rows below this fraction of the matched OCR rows are a shortfall.
-    #: Column-heading rows repeated per page inflate the estimate a little, so the
-    #: bar is "less than half", not "fewer".
+    #: Extracted rows below this fraction of the matched OCR rows are a MATERIAL
+    #: shortfall — the one ``extraction.row_shortfall_action`` governs.
     _OCR_ROW_SHORTFALL_RATIO = 0.5
+    #: The smallest row gap this check will speak about at all, and the reason it
+    #: is the same number as ``_OCR_ROW_ESTIMATE_MIN`` rather than a second knob.
+    #:
+    #: ``_OCR_ROW_SHORTFALL_RATIO`` is a MULTIPLICATIVE slack standing in for an
+    #: ADDITIVE imprecision — a column heading reprinted once per page — so the
+    #: tolerance grows with the document while the thing it absorbs does not. On a
+    #: 17-page 800-row statement the OCR evidence is 817 rows, of which 17 are
+    #: headings (2.1%), and half of 817 is 408.5: an extraction returning 409 of
+    #: the 800 rows, losing 48.9% of the document, crossed no bar and carried no
+    #: processing issue at all (#1361, measured 2026-10-14). The slack was ~24x
+    #: the imprecision it was chosen for, and the factor is proportional to the
+    #: page count.
+    #:
+    #: The imprecision is computable exactly — ``_ocr_tables`` emits one entry per
+    #: page-repeat and each entry's ``rows`` includes its heading row, so
+    #: ``_heading_rows_for_width`` is the whole of it — which leaves the
+    #: width-only attribution in ``_expected_rows_for_width`` as the only reason
+    #: to tolerate anything further. That one can only INFLATE the evidence (an
+    #: unrelated table of the same width is summed in; nothing ever subtracts), so
+    #: the honest bound on it is "a gap no larger than a table the check would
+    #: decline to speak about anyway". That is ``_OCR_ROW_ESTIMATE_MIN``, so this
+    #: is defined as that value rather than chosen: the silent band becomes
+    #: bounded in ABSOLUTE rows (at most 29, whatever the document's size) instead
+    #: of proportional to it (408 at 800 rows, 1,600 at 3,200).
+    _OCR_ROW_GAP_MIN = _OCR_ROW_ESTIMATE_MIN
     #: A pipe-delimited run shorter than this is not a table (a prose line with a
     #: "|", a two-line caption).
     _OCR_TABLE_MIN_ROWS = 3
@@ -2326,6 +2350,21 @@ class ExtractionService:
     #: already opted into ``fail``.
     OUTPUT_TRUNCATED_CODE = "extraction_output_truncated"
 
+    #: The ``ProcessingIssue.code`` for the band ``_OCR_ROW_SHORTFALL_RATIO``
+    #: leaves silent: fewer rows than the OCR's matched tables actually hold, by
+    #: more than their reprinted headings can explain, but not under half. It is
+    #: the same evidence and the same arithmetic as ``ROW_SHORTFALL_CODE``, read
+    #: against the data-row count instead of half of the inflated one.
+    #:
+    #: ``warning`` severity, always, and deliberately NOT governed by
+    #: ``extraction.row_shortfall_action`` — for the reason
+    #: ``OUTPUT_TRUNCATED_CODE`` is not either. Widening that knob to cover this
+    #: band would start FAILING runs that complete today on any deployment that
+    #: has already opted into ``fail``, and whether a materially short extraction
+    #: should fail is a product decision rather than a detection one. Detection is
+    #: what is fixed here; the consequence is unchanged.
+    PARTIAL_ROW_SHORTFALL_CODE = "extraction_partial_row_shortfall"
+
     def _row_shortfall_action(self) -> str:
         """``extraction.row_shortfall_action`` — ``"fail"`` or ``"warn"``.
 
@@ -2353,6 +2392,24 @@ class ExtractionService:
         table lacks (a derived Balance) is not compared at all.
         """
         return sum(tb["rows"] for tb in tables if tb["cols"] == n_props)
+
+    @classmethod
+    def _heading_rows_for_width(cls, n_props: int, tables: list[dict[str, int]]) -> int:
+        """Column-heading rows included in ``_expected_rows_for_width``'s sum.
+
+        ``_ocr_tables`` emits one entry per page-repeat of a table and counts the
+        row before the ``|---|`` separator — the heading — as one of that entry's
+        ``rows``. So the heading inflation in the summed evidence is exactly the
+        NUMBER of matched tables, and ``summed - this`` is the OCR's data-row
+        count: measured on the renderings this check is tested against, the
+        identity holds exactly (817 summed − 17 tables = 800 rows).
+
+        One shape is off by one in the SAFE direction. A run whose separator is
+        its first line has no heading row to count, so its entry's ``rows`` are
+        all data and subtracting one under-states the body by one — which lowers
+        the bar and can only suppress a firing, never cause one.
+        """
+        return sum(1 for tb in tables if tb["cols"] == n_props)
 
     @staticmethod
     def _declared_max_items(spec: Any) -> int | None:
@@ -3980,10 +4037,104 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
                 extracted = sum(
                     1 for _lb, rows, _mx in members for r in rows if isinstance(r, dict)
                 )
-                if (
-                    expected < self._OCR_ROW_ESTIMATE_MIN
-                    or extracted >= expected * self._OCR_ROW_SHORTFALL_RATIO
-                ):
+                if expected < self._OCR_ROW_ESTIMATE_MIN:
+                    continue  # too little evidence to say anything either way
+                if extracted >= expected * self._OCR_ROW_SHORTFALL_RATIO:
+                    # The band #843's half ratio left silent. At 409 extracted of
+                    # 817 summed OCR rows — 409 of the document's 800 real rows,
+                    # 48.9% lost — NOTHING was reported, so a reader who knows
+                    # about the row check concluded the section was fine (#1361).
+                    # Same evidence, same group, same `maxItems` cap; the only
+                    # change is the bar, read against the OCR's DATA rows rather
+                    # than half of the heading-inflated count. See
+                    # `_OCR_ROW_GAP_MIN` for why the residual tolerance is a row
+                    # gap and not a ratio.
+                    heading_rows = self._heading_rows_for_width(n_props, tables)
+                    ocr_body = max(0, ocr_rows - heading_rows)
+                    body_bar = (
+                        ocr_body if group_cap is None else min(ocr_body, group_cap)
+                    )
+                    missing = body_bar - extracted
+                    if missing < self._OCR_ROW_GAP_MIN:
+                        continue
+                    # `missing >= _OCR_ROW_GAP_MIN` and `extracted >= 0` make
+                    # `body_bar` at least that floor, so the ratio below cannot
+                    # divide by zero.
+                    fields_str = ", ".join(labels)
+                    # Only when the declared ceiling actually binds, so the
+                    # wording is unchanged for every schema that declares none.
+                    partial_cap_clause = (
+                        f", bounded to {body_bar} by the declared maxItems of the "
+                        f"list field(s)"
+                        if group_cap is not None and group_cap < ocr_body
+                        else ""
+                    )
+                    partial_rec = (
+                        " Simple extraction returns one response per section and "
+                        "stops early on long lists; for documents this size use "
+                        "Advanced (agentic) extraction, which shards."
+                        if not is_agentic
+                        else " Check that the table-parsing tool was used."
+                    )
+                    issues.append(
+                        ProcessingIssue(
+                            stage="extraction",
+                            severity="warning",
+                            code=self.PARTIAL_ROW_SHORTFALL_CODE,
+                            message=(
+                                f"Extracted {extracted} row(s) for list field(s) "
+                                f"{fields_str}, but the section's OCR text holds "
+                                f"{body_bar} data row(s) in {n_props}-column "
+                                f"table(s) of that shape "
+                                f"({ocr_rows} counted, less {heading_rows} "
+                                f"reprinted column-heading row(s))"
+                                f"{partial_cap_clause} — "
+                                f"{missing} row(s) are unaccounted for. That is "
+                                f"at or above half the evidence, so "
+                                f"{self.ROW_SHORTFALL_CODE} does not fire and "
+                                "extraction.row_shortfall_action does not apply: "
+                                "the run reports success and scalar fields are "
+                                "unaffected. Evidence is matched on column width "
+                                "only and summed over the section, so an "
+                                "unrelated table of the same width inflates this "
+                                "figure; treat it as a shortfall to confirm "
+                                "rather than a certain loss." + partial_rec
+                            ),
+                            root_cause=(
+                                f"{'agentic' if is_agentic else 'traditional'} "
+                                f"extraction with model "
+                                f"{self._pending_extraction_model or self.config.extraction.model}; "
+                                f"{extracted} extracted rows vs {body_bar} "
+                                f"matching OCR table data rows for {fields_str}"
+                            ),
+                            section_id=section_id,
+                            details={
+                                "list_fields": labels,
+                                "item_property_count": n_props,
+                                "extracted_rows": extracted,
+                                # The bar the ratio is taken against, so
+                                # `extracted / ocr_estimated_rows == ratio` and
+                                # `extracted + missing_rows == ocr_estimated_rows`
+                                # both hold. `ocr_matched_table_rows` is the raw
+                                # sum this check does NOT use as its bar, and
+                                # `ocr_heading_rows` is the difference, so the
+                                # denominator is auditable from the issue alone.
+                                "ocr_estimated_rows": body_bar,
+                                "ocr_matched_table_rows": ocr_rows,
+                                "ocr_heading_rows": heading_rows,
+                                "missing_rows": missing,
+                                "declared_max_items": group_cap,
+                                "ratio": round(extracted / body_bar, 3),
+                                # What this issue is NOT: the material bar it sits
+                                # above, named so a report can show both.
+                                "material_shortfall_ratio": (
+                                    self._OCR_ROW_SHORTFALL_RATIO
+                                ),
+                                "ocr_tables": tables,
+                                "agentic": is_agentic,
+                            },
+                        )
+                    )
                     continue
                 fields_str = ", ".join(labels)
                 # What `minItems` buys is MODE-DEPENDENT, and recommending it
