@@ -53,6 +53,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 
 pytestmark = pytest.mark.unit
 
@@ -64,6 +65,38 @@ STALE_AGE_SECONDS = 31 * 24 * 3600
 
 #: A run prefix whose stacks are all gone, so nothing protects its leftovers.
 DEAD_RUN = "idp-0101-000000"
+
+#: A second run prefix, for the mixed case: one run whose liveness is readable
+#: beside one whose is not.
+OTHER_RUN = "idp-0202-000000"
+
+
+def _client_error(code, message, operation="DescribeStacks"):
+    """A REAL botocore `ClientError` carrying a real error code.
+
+    Real rather than a stand-in, for two reasons that both make the assertions
+    below vacuous if it is faked. The fix turns on reading `Error.Code` off the
+    payload, so a double raising a bare `Exception`, or a `ClientError` built
+    with an empty `response`, cannot distinguish the branches it is testing. And
+    the handler this replaces named a CLIENT-BOUND exception class,
+    `cf_client.exceptions.ClientError`: botocore's error factory sets that
+    attribute to `botocore.exceptions.ClientError` itself
+    (`botocore/errorfactory.py`), so this is the one object both the old handler
+    and the new one actually catch. Raise anything else and the old code misses
+    its own `except`, the exception lands in the sweep's outer handler, a finding
+    comes back — and the test goes green against the defect.
+    """
+    return ClientError({"Error": {"Code": code, "Message": message}}, operation)
+
+
+#: What CloudFormation answers for a stack that genuinely is not there. The code
+#: is stated by the `DescribeStacks` API reference ("If the stack doesn't exist,
+#: a ValidationError is returned") and carried in botocore's own service model
+#: documentation string for the operation; the message wording is not in the API
+#: reference, and is the shape moto reproduces (`moto/cloudformation/
+#: exceptions.py`) and the shape two call sites in this repository already match
+#: on.
+STACK_GONE = ("ValidationError", f"Stack with id {DEAD_RUN} does not exist")
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +121,45 @@ class _FakePaginator:
         return self._pages
 
 
+class _FakeClientExceptions:
+    """`client.exceptions` for the fake, carrying the real `ClientError`.
+
+    The production handler for the per-prefix liveness check used to name
+    `cf_client.exceptions.ClientError`. Without this attribute that expression
+    raises `AttributeError` while the original exception is being handled, the
+    sweep's outer `except Exception` catches that instead, and a finding comes
+    back for the wrong reason — so the pre-fix run would look correct. The
+    attribute is botocore's own class, which is what a real client exposes.
+    """
+
+    ClientError = ClientError
+
+
 class _FakeAws:
     """Account contents plus a chosen failure, standing in for every client."""
 
-    def __init__(self, contents=None, failing=None, breaking=None):
+    exceptions = _FakeClientExceptions()
+
+    def __init__(
+        self,
+        contents=None,
+        failing=None,
+        breaking=None,
+        stack_errors=None,
+        stack_statuses=None,
+    ):
         self.contents = contents or {}
         self.failing = failing
         self.breaking = breaking
+        #: {StackName: (code, message)} — what `describe_stacks` raises for that
+        #: name, as a real ClientError. The per-prefix liveness question, which
+        #: is a different surface from `failing`: these calls are answered, with
+        #: an error that may or may not establish the run is over.
+        self.stack_errors = stack_errors or {}
+        #: {StackName: StackStatus}, for a run that answers as live.
+        self.stack_statuses = stack_statuses or {}
         self.deleted = []
+        self.described = []
 
     def _check(self, api):
         if self.failing == api:
@@ -116,10 +180,15 @@ class _FakeAws:
 
     def describe_stacks(self, StackName):  # noqa: N803 - boto3 casing
         self._check("describe_stacks")
-        # Terminal, so the BDA sweep reads the run as inactive and its
+        self.described.append(StackName)
+        if StackName in self.stack_errors:
+            code, message = self.stack_errors[StackName]
+            raise _client_error(code, message)
+        # Terminal by default, so the BDA sweep reads the run as over and its
         # blueprints as stale. A describe that cannot answer is a different
-        # question, handled by the sweep's own per-prefix handler.
-        return {"Stacks": [{"StackStatus": "DELETE_COMPLETE"}]}
+        # question, driven through `stack_errors`.
+        status = self.stack_statuses.get(StackName, "DELETE_COMPLETE")
+        return {"Stacks": [{"StackStatus": status}]}
 
     # --- per-item actions -------------------------------------------------
     def _delete(self, api, name):
@@ -306,9 +375,26 @@ _SWEEP_SPECS = {
 }
 
 
-def _install(cbd, monkeypatch, sweep, *, with_target, failing=None, breaking=None):
+def _install(
+    cbd,
+    monkeypatch,
+    sweep,
+    *,
+    with_target,
+    failing=None,
+    breaking=None,
+    contents=None,
+    stack_errors=None,
+    stack_statuses=None,
+):
     """Point the harness at the fake account and return it."""
-    aws = _FakeAws(_contents(cbd, sweep, with_target), failing, breaking)
+    aws = _FakeAws(
+        contents if contents is not None else _contents(cbd, sweep, with_target),
+        failing,
+        breaking,
+        stack_errors=stack_errors,
+        stack_statuses=stack_statuses,
+    )
     monkeypatch.setattr(cbd.boto3, "client", lambda *a, **k: aws)
     monkeypatch.setattr(cbd.boto3, "resource", lambda *a, **k: _FakeS3Resource())
     # The BDA sweep paces its deletes; nothing here is waiting on AWS.
@@ -926,3 +1012,350 @@ def test_stacks_the_stack_sweep_left_behind_protect_their_buckets(cbd, monkeypat
         "would blame it for the stack sweep's failure"
     )
     assert deleted == []
+
+
+# ---------------------------------------------------------------------------
+# The BDA sweep's PER-PREFIX liveness check: "gone" and "could not tell" are
+# different answers (#1440)
+#
+# This is the one check in the six that asks a question per item on a path that
+# deletes: for each run prefix behind a blueprint or project, is that run's
+# CloudFormation stack still there? `describe_stacks` raises `ClientError` for a
+# stack that genuinely is not there AND for `Throttling`, `AccessDenied` and
+# anything else, and the handler used to record every one of them as "this run
+# has no active stack" — which is the answer that permits the delete.
+#
+# ⚠️ The failure mode coincides with the condition the check exists to guard: a
+# `DescribeStacks` is throttled when several runs are in flight, which is exactly
+# when a blueprint belongs to a run that is still executing. Nothing here claims
+# a blueprint has ever actually been lost this way; it is a latent direction,
+# fixed in the direction the rest of this module already takes.
+#
+# Four directions, and the second is the one a careless fix breaks: protecting
+# everything makes the reaper permanently inert, which is #1434's defect pointed
+# the other way.
+# ---------------------------------------------------------------------------
+
+
+def _bda_contents(*run_prefixes):
+    """Account contents holding one LIVE blueprint per run prefix."""
+    return {
+        "list_blueprints": [
+            {
+                "blueprints": [
+                    {
+                        "blueprintName": prefix,
+                        "blueprintArn": f"arn:fake:blueprint/{prefix}",
+                    }
+                    for prefix in run_prefixes
+                ]
+            }
+        ],
+        "projects": [],
+    }
+
+
+#: Error codes that do NOT establish the run is over, so each must leave the
+#: prefix in place. The last two are the point of the list rather than padding:
+#: an `AccessDenied` is a durable condition that answers nothing about the
+#: account, and an unrecognised code has to take the same branch, since the safe
+#: direction is the one an unfamiliar condition must fall into.
+UNANSWERED_LIVENESS_ERRORS = (
+    ("Throttling", "Rate exceeded"),
+    ("ThrottlingException", "Rate exceeded"),
+    ("RequestLimitExceeded", "Request limit exceeded"),
+    ("AccessDenied", "User is not authorized to perform cloudformation:DescribeStacks"),
+    ("SomeCodeNobodyHasSeenYet", "an answer this code has never been read against"),
+    # A ValidationError whose message is about the REQUEST, not the stack's
+    # existence. `ValidationError` is CloudFormation's catch-all 400, so the code
+    # alone cannot carry the claim.
+    ("ValidationError", "1 validation error detected: Value '' at 'stackName'"),
+)
+
+
+@pytest.mark.parametrize(
+    ("code", "message"), UNANSWERED_LIVENESS_ERRORS, ids=lambda v: str(v)[:40]
+)
+def test_an_unanswered_liveness_check_protects_the_prefix(
+    cbd, monkeypatch, capsys, code, message
+):
+    """Direction 1: could not tell → nothing deleted, and the sweep says so."""
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN),
+        stack_errors={DEAD_RUN: (code, message)},
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.described == [DEAD_RUN], "the liveness check was never attempted"
+    assert aws.deleted == [], (
+        f"a {code} on the liveness check deleted {aws.deleted} — the blueprint "
+        f"of a run whose stack this sweep could not read, which on a throttle is "
+        f"a run that is most likely still executing"
+    )
+    assert findings, (
+        f"a {code} left the prefix unexamined and the sweep reported nothing, so "
+        f"the run cannot tell this apart from a sweep that established every "
+        f"run was over"
+    )
+    assert all(f.startswith(cbd.SWEEP_NOT_COMPLETED) for f in findings), findings
+    assert DEAD_RUN in findings[0], (
+        f"the finding does not name the prefix it could not establish: {findings}"
+    )
+    assert code in findings[0], (
+        f"the finding does not carry the error code, so a reader cannot tell a "
+        f"throttle from a denial: {findings}"
+    )
+    assert "No stale BDA resources found" not in capsys.readouterr().out
+
+
+def test_a_stack_that_genuinely_does_not_exist_is_still_reaped(
+    cbd, monkeypatch, capsys
+):
+    """Direction 2: the half a fix that protects everything breaks.
+
+    A `ValidationError` naming a stack that is not there is a positive answer —
+    the run is over — and its blueprints are exactly what this reaper exists to
+    take. Protecting those too would make the sweep permanently inert, which is
+    #1434's defect pointed the other way, and it would pass direction 1.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN),
+        stack_errors={DEAD_RUN: STACK_GONE},
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == [f"arn:fake:blueprint/{DEAD_RUN}"], (
+        "the run's stack is gone and its blueprint was left behind — the reaper "
+        "is inert"
+    )
+    assert findings == [], f"a completed sweep reported {findings}"
+    assert cbd.SWEEP_NOT_COMPLETED not in capsys.readouterr().out
+
+
+def test_a_live_stack_protects_its_blueprints_and_is_not_a_finding(cbd, monkeypatch):
+    """Direction 3: an answered liveness check is a COMPLETED sweep.
+
+    Nothing to reap because the run is still going is the quiet path, and a
+    reaper that reports a problem on every green deploy trains the reader to
+    ignore the row.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN),
+        stack_statuses={DEAD_RUN: "CREATE_IN_PROGRESS"},
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == []
+    assert findings == [], f"a live run is not a sweep failure, yet got {findings}"
+
+
+def test_one_unanswered_prefix_does_not_make_the_whole_sweep_inert(cbd, monkeypatch):
+    """Direction 4: per prefix, not per sweep.
+
+    The protection is scoped to the prefix whose question went unanswered. A
+    reaper that gave up on the first throttle would stop reaping on exactly the
+    busy nights that leak the most, and would report the same finding either way
+    — so the finding alone does not establish this.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN, OTHER_RUN),
+        stack_errors={
+            DEAD_RUN: STACK_GONE,
+            OTHER_RUN: ("ThrottlingException", "Rate exceeded"),
+        },
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == [f"arn:fake:blueprint/{DEAD_RUN}"], (
+        f"expected only the established-gone run's blueprint to be taken, got "
+        f"{aws.deleted}"
+    )
+    assert findings and OTHER_RUN in findings[0], findings
+    assert DEAD_RUN not in findings[0], (
+        f"the finding names a prefix the sweep DID establish, which sends a "
+        f"reader after a run that is genuinely over: {findings}"
+    )
+
+
+def test_the_liveness_client_rides_out_the_throttle_class_before_it_decides(
+    cbd, monkeypatch
+):
+    """The throttle should not reach the decision at all.
+
+    The adaptive config is the first half of this fix and the handler is the
+    second; with the retry removed a single `Rate exceeded` reaches a handler
+    that then has to make a judgement it cannot make well. Asserted on the
+    Config the client is built with, the way the IAM-burst equivalent in
+    `test_variant_probes.py` is.
+    """
+    seen = []
+    aws = _FakeAws(_bda_contents(DEAD_RUN))
+
+    def _client(name, *a, **k):
+        seen.append((name, k.get("config")))
+        return aws
+
+    monkeypatch.setattr(cbd.boto3, "client", _client)
+    monkeypatch.setattr(cbd.time, "sleep", lambda *_a, **_k: None)
+
+    cbd.cleanup_stale_bda_blueprints()
+
+    by_service = dict(seen)
+    cfg = by_service.get("cloudformation")
+    assert cfg is not None, "the liveness client was built without a Config"
+    assert cfg.retries["mode"] == "adaptive", cfg.retries
+    assert cfg.retries["max_attempts"] >= 5, cfg.retries
+
+
+def test_a_partial_liveness_sweep_is_a_warning_row_and_not_a_red_run(cbd):
+    """The verdict the registry takes for this sweep, applied to the new finding.
+
+    `fails_run=False` was decided for an INERT sweep, and this finding means a
+    prefix was left in place — the same unmeasured leak, so the same verdict. The
+    row still has to render, because a protection that reports nothing is how the
+    reaper's silence was a problem in the first place.
+    """
+    entry = next(
+        s for s in cbd.STARTUP_SWEEPS if s.func == "cleanup_stale_bda_blueprints"
+    )
+    assert entry.fails_run is False
+
+    finding = f"{cbd.SWEEP_NOT_COMPLETED} could not establish whether {DEAD_RUN}"
+    text = _summary(cbd, {"cleanup_stale_bda_blueprints": [finding]})
+
+    assert "OVERALL: PASS" in text
+    row = _row_for(cbd, text, "cleanup_stale_bda_blueprints")
+    assert row.startswith("⚠️"), row
+    assert DEAD_RUN in text, "the prefix left in place is not named in the table"
+
+
+def test_two_unanswered_prefixes_are_both_named_and_counted(cbd, monkeypatch):
+    """The finding is per prefix, so the reader gets the whole list.
+
+    A count with one example would send somebody looking at one run while
+    another was left in the same state, and the next run's output is the only
+    other place that pairing exists.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN, OTHER_RUN),
+        stack_errors={
+            DEAD_RUN: ("Throttling", "Rate exceeded"),
+            OTHER_RUN: ("AccessDenied", "not authorized"),
+        },
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == []
+    assert len(findings) == 1, findings
+    assert DEAD_RUN in findings[0] and OTHER_RUN in findings[0], findings
+    assert "2" in findings[0], (
+        f"the count of unanswered prefixes is missing: {findings}"
+    )
+    assert "; " in findings[0], (
+        f"two prefixes are run together in one unreadable string: {findings}"
+    )
+
+
+def test_a_describe_that_answers_with_no_stack_protects_the_prefix(cbd, monkeypatch):
+    """A response shape this code cannot read is not an absence it can act on.
+
+    `DescribeStacks` asked about a named stack either answers with that stack or
+    raises, so an empty `Stacks` list is not a documented answer at all. Reading
+    it as "no stack, therefore the run is over" would put a shape nobody has
+    seen on the branch that deletes.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN),
+    )
+    monkeypatch.setattr(aws, "describe_stacks", lambda StackName: {"Stacks": []})  # noqa: N803
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == []
+    assert findings and DEAD_RUN in findings[0], findings
+    assert "no stack" in findings[0], (
+        f"the finding does not say what was wrong with the answer: {findings}"
+    )
+
+
+def test_an_exception_that_is_not_a_client_error_also_protects_the_prefix(
+    cbd, monkeypatch
+):
+    """A connection failure or an expired credential carries no error code.
+
+    There is nothing to read a code off, so there is nothing that could
+    establish the run is over — and the detail has to name the exception type,
+    since that is the only thing a reader has to go on.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents(DEAD_RUN),
+    )
+
+    def _boom(StackName):  # noqa: N803 - boto3 casing
+        raise ConnectionError("could not reach the endpoint")
+
+    monkeypatch.setattr(aws, "describe_stacks", _boom)
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.deleted == []
+    assert findings and DEAD_RUN in findings[0], findings
+    assert "ConnectionError" in findings[0], (
+        f"the finding names neither a code nor an exception type: {findings}"
+    )
+
+
+def test_a_name_with_no_run_prefix_is_never_reaped(cbd, monkeypatch):
+    """A name that carries no `idp-MMDD-HHMMSS` prefix has no stack to ask about.
+
+    No liveness question is asked for it, so nothing could have established that
+    its run is over, and the same rule applies: no answer, no delete. The
+    direction matters because this one is not even reported — it is skipped
+    silently — so if it were reaped it would be reaped with no check at all.
+    """
+    aws = _install(
+        cbd,
+        monkeypatch,
+        "cleanup_stale_bda_blueprints",
+        with_target=True,
+        contents=_bda_contents("idp-weird"),
+    )
+
+    findings = cbd.cleanup_stale_bda_blueprints()
+
+    assert aws.described == [], "a prefixless name should ask nothing of CloudFormation"
+    assert aws.deleted == [], f"a name with no run prefix was reaped: {aws.deleted}"
+    assert findings == []

@@ -417,7 +417,10 @@ STARTUP_SWEEPS = (
             "assert a severity this repository cannot support, so it gets the "
             "row — which is what #1391 was actually about, a log line nobody "
             "read — and not the exit code. Measuring a quota is what would flip "
-            "this, in this one place."
+            "this, in this one place. The decision survives this sweep's second "
+            "finding source unchanged: a prefix whose liveness cannot be read is "
+            "left in place (#1440), so what that costs is the same unmeasured "
+            "leak the rest of this reason is about."
         ),
     ),
     StartupSweep(
@@ -520,6 +523,66 @@ def _first_failure_reason(existing, candidate):
     return existing or candidate
 
 
+#: The CloudFormation error code for a stack that is not there. `DescribeStacks`
+#: models no error shapes at all, so botocore raises a generic `ClientError` and
+#: the code has to be read off the payload — which is also what makes a gone
+#: stack indistinguishable from a throttle or a denial at the bare `except`. The
+#: API reference states this code: "If the stack doesn't exist, a
+#: ValidationError is returned."
+_STACK_GONE_ERROR_CODE = "ValidationError"
+
+#: ...and the message fragment that says a `ValidationError` is about the
+#: stack's EXISTENCE rather than about the request. `ValidationError` is
+#: CloudFormation's catch-all 400 — a malformed stack name arrives under it, and
+#: so does `Parameters: [X] do not exist in the template` on a neighbouring
+#: operation — so the code by itself does not establish absence on a path that
+#: deletes. Two other call sites here already draw the line in the same place:
+#: `_iam_stack_presence` below, and the feature launch-URL resolver in
+#: `feature-platform/main-stack-extensions/lambdas/get_feature_launch_url`.
+#:
+#: The cost of requiring the message is worth stating in the direction it falls:
+#: were CloudFormation to reword it, every prefix would read as unanswered, so
+#: the sweep would reap nothing AND report a finding every run. Inert and loud,
+#: rather than over-eager and quiet.
+_STACK_GONE_MESSAGE = "does not exist"
+
+
+def _run_stack_liveness(cf_client, stack_name, active_statuses):
+    """(active, detail) for a run's stack — True, False, or None for unanswered.
+
+    `None` is the state this function exists to produce, and a caller that
+    deletes on the answer has to read it as "leave this one alone".
+    `describe_stacks` raises `ClientError` both for a stack that genuinely is
+    not there, which really does mean the run is over, and for `Throttling`,
+    `ThrottlingException`, `RequestLimitExceeded`, `AccessDenied`, expired
+    credentials and anything else. Only the first says the run is over, and a
+    handler that collapses the two reaches for the one answer that permits
+    deleting an in-flight run's resources — at precisely the moment that answer
+    is most likely to be wrong, since a `DescribeStacks` is throttled when
+    several runs are in flight (#1440).
+
+    So absence is established positively, by the error code AND the message, and
+    every other outcome answers None — an unrecognised code included, because
+    the safe branch is the one an unfamiliar condition has to take. `detail` is
+    the reason, for the caller to put in its finding.
+    """
+    try:
+        resp = cf_client.describe_stacks(StackName=stack_name)
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == _STACK_GONE_ERROR_CODE and _STACK_GONE_MESSAGE in str(e):
+            return False, ""
+        return None, f"{code or type(e).__name__}: {e}"
+
+    stacks = resp.get("Stacks") or []
+    if not stacks:
+        # Asked about a named stack, DescribeStacks either answers with it or
+        # raises, so an empty list is a response this code cannot read rather
+        # than an absence it can act on.
+        return None, "DescribeStacks answered with no stack and no error"
+    return stacks[0].get("StackStatus", "") in active_statuses, ""
+
+
 def cleanup_stale_bda_blueprints():
     """Delete BDA projects, blueprint versions, and blueprints whose stacks are no longer active.
 
@@ -528,6 +591,12 @@ def cleanup_stale_bda_blueprints():
     produce a finding. Returns the Step 0 sweep outcome described at
     STARTUP_SWEEPS: an empty list only if both listings answered and every idp-
     blueprint and project in them was considered. Never raises.
+
+    "Considered" includes the per-prefix liveness question, which is the second
+    way this sweep can fail to complete: a prefix whose `DescribeStacks` could
+    not be answered is left in place AND reported, rather than read as a run that
+    is over. See `_run_stack_liveness` for why that direction is the only safe
+    one on a path that deletes (#1440).
 
     One blueprint or project that would not delete stays best effort and is NOT a
     finding — the loops below name it and the next run takes it.
@@ -582,25 +651,36 @@ def cleanup_stale_bda_blueprints():
             print("✅ No stale BDA resources found")
             return []
 
-        # Check stack status for each unique stack prefix
+        # Check stack status for each unique stack prefix. THREE answers rather
+        # than two — live, established gone, and unanswered — and only the middle
+        # one may lead to a delete. See _run_stack_liveness.
         stack_cache = {}
+        liveness_unanswered = {}
         for name, _ in blueprints + projects:
             parts = name.split("-")
             if len(parts) >= 3:
                 prefix = f"{parts[0]}-{parts[1]}-{parts[2]}"
                 if prefix not in stack_cache:
-                    try:
-                        resp = cf_client.describe_stacks(StackName=prefix)
-                        status = resp["Stacks"][0]["StackStatus"]
-                        stack_cache[prefix] = status in active_statuses
-                    except cf_client.exceptions.ClientError:
-                        stack_cache[prefix] = False
+                    active, detail = _run_stack_liveness(
+                        cf_client, prefix, active_statuses
+                    )
+                    stack_cache[prefix] = active
+                    if active is None:
+                        liveness_unanswered[prefix] = detail
 
         def _is_stale(name):
+            """Stale only where the run's stack is POSITIVELY established gone.
+
+            `is False` rather than a falsy test: the cache's third value is None
+            for a prefix whose liveness could not be read, `not None` is True,
+            and that hands an unanswerable question the one answer that deletes
+            an in-flight run's blueprints (#1440). A prefix missing from the
+            cache answers None here too, for the same reason.
+            """
             parts = name.split("-")
-            if len(parts) >= 3:
-                return not stack_cache.get(f"{parts[0]}-{parts[1]}-{parts[2]}", False)
-            return False
+            if len(parts) < 3:
+                return False
+            return stack_cache.get(f"{parts[0]}-{parts[1]}-{parts[2]}") is False
 
         # Step 1: Delete projects first (blueprints are referenced by projects)
         deleted_projects = 0
@@ -634,9 +714,28 @@ def cleanup_stale_bda_blueprints():
                     print(f"  ⚠️ Failed to delete blueprint {name}: {e}")
                     time.sleep(0.5)
 
+        live = sum(1 for active in stack_cache.values() if active)
         print(
-            f"✅ Cleaned up {deleted_projects} projects, {deleted_bps} blueprints (skipped active stacks)"
+            f"✅ Cleaned up {deleted_projects} projects, {deleted_bps} blueprints "
+            f"(skipped {live} live run(s), {len(liveness_unanswered)} unanswered)"
         )
+        if liveness_unanswered:
+            # Not an enumeration failure and not a stuck delete: the listings
+            # answered and nothing was refused, but for these prefixes the
+            # question "is this run still going?" has no answer, so their
+            # blueprints and projects were left where they are. A sweep that
+            # could not establish liveness for part of what it listed has not
+            # completed, and saying so is the whole of what this costs.
+            detail = "; ".join(
+                f"{prefix} ({why})"
+                for prefix, why in sorted(liveness_unanswered.items())
+            )
+            return _sweep_finding(
+                f"could not establish whether the run behind "
+                f"{len(liveness_unanswered)} of the idp- blueprint/project "
+                f"prefix(es) it listed is still in flight, so those were left in "
+                f"place rather than reaped: {detail}"
+            )
         return []
     except Exception as e:  # noqa: BLE001
         # Not a per-resource delete failure — those are caught in the loops above
