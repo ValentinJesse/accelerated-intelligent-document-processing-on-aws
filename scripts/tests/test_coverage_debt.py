@@ -2201,3 +2201,239 @@ class TestWriteMissingCannotMoveAnExistingFloor:
         recorded = json.loads(path.read_text())["trees"][tree.name]
         assert recorded["files"] == {"pkg/mod.py": 88.0}
         assert recorded["total"] == 88.0
+
+
+def _commands_named(message: str) -> set[str]:
+    """Every write flag a message offers, read so the two can be told apart.
+
+    `--write-missing` *contains* `--write`, so a plain substring test for the wide flag
+    is satisfied by the narrow one and an assertion built on it passes against the
+    message it was written to reject. The longer flag is matched first and consumed, so
+    "names one and not the other" becomes a question with an answer — which is the only
+    form in which this property can be asserted at all.
+    """
+    named: set[str] = set()
+    rest = message
+    for flag in ("--write-missing", "--write"):
+        if flag in rest:
+            named.add(flag)
+            rest = rest.replace(flag, "")
+    return named
+
+
+@pytest.mark.unit
+class TestTheRemedyNamesTheCommandThatFixesThatFinding:
+    """A printed remedy is run, so each finding must name the command *it* needs.
+
+    One remedy served every finding, and it was `--write`. For the two findings that need
+    nothing but new entries that command is wider than the finding: `--write` re-records
+    every measured tree wholesale, so following it to record one new module also accepts
+    the running machine's figure for every other file in that tree. Counted twice on the
+    `scripts` tree — once while closing #1256 and again in #1421 — one file needed
+    recording and `--write` would have raised ten existing floors with it, two of them on
+    files whose host-versus-CI discrepancy is deliberately pinned and must stay visible.
+    The gate goes green either way and the diff looks like bookkeeping, which is what
+    makes a printed command the strongest possible nudge toward the wrong action.
+
+    What is asserted here is the distinction in **both** directions, because asserting
+    only that `--write-missing` appears somewhere passes on a message naming both flags
+    and leaves the reader exactly as stuck. Every case is driven through the real
+    function against a report that produces that one finding, and the two cases that
+    genuinely need the wider command are pinned as keeping it — together with the
+    measurement that makes `--write` the right answer there, so a later edit cannot
+    "fix" them by symmetry.
+    """
+
+    def _tree(self, monkeypatch, tmp_path, recorded, measured, tracked, **report):
+        tree = _fake_tree(tmp_path)
+        path = _install(
+            monkeypatch,
+            tmp_path,
+            [tree],
+            {"trees": {tree.name: {"total": 50.0, "files": dict(recorded)}}}
+            if recorded is not None
+            else {"trees": {}},
+        )
+        _write_tree_report(tree, measured, total=99.0, **report)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: list(tracked))
+        return tree, path
+
+    def _only(self, problems: list[str], needle: str) -> str:
+        matching = [p for p in problems if needle in p]
+        assert len(matching) == 1, f"expected one {needle!r} finding, got {problems}"
+        return matching[0]
+
+    def test_an_unratcheted_file_is_told_to_use_write_missing_and_not_bare_write(
+        self, monkeypatch, tmp_path
+    ):
+        """The finding is one absent entry, and `--write-missing` adds exactly that.
+
+        The fixture is deliberately lopsided: the recorded file is measured *higher* than
+        its floor, so `--write` would move it and `--write-missing` provably cannot. A
+        fixture where the recorded figure matched would be fixed identically by either
+        command and would assert nothing.
+        """
+        tree, _ = self._tree(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0, "new.py": 97.71},
+            tracked=["pkg/old.py", "pkg/new.py"],
+        )
+        problems, _ = ccd.check_tree(tree, {"pkg/old.py": 40.0})
+        remedy = self._only(problems, "unratcheted")
+        assert _commands_named(remedy) == {"--write-missing"}, remedy
+        assert "cannot raise or lower an existing floor" in remedy, remedy
+
+    def test_running_the_remedy_it_prints_records_the_entry_and_moves_no_floor(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The flag is parsed out of the printed message and then run.
+
+        This is the assertion the two incidents would have failed: following the gate's
+        own instruction has to fix the finding it was printed for and nothing else. With
+        the old message the flag read out of it is `--write`, and the recorded floor
+        below moves from 40.00 to 95.00 — so the test is about the remedy's *effect*
+        rather than about its wording.
+        """
+        tree, path = self._tree(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/old.py": 40.0},
+            measured={"old.py": 95.0, "new.py": 97.71},
+            tracked=["pkg/old.py", "pkg/new.py"],
+        )
+        problems, _ = ccd.check_tree(tree, {"pkg/old.py": 40.0})
+        named = _commands_named(self._only(problems, "unratcheted"))
+        assert len(named) == 1, f"the remedy must name one command, not {named}"
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", *named])
+        assert ccd.main() == 0
+        capsys.readouterr()
+        files = json.loads(path.read_text())["trees"][tree.name]["files"]
+        assert files["pkg/old.py"] == 40.0, (
+            f"the remedy printed for one absent entry moved an existing floor: {files}"
+        )
+        assert files["pkg/new.py"] == 97.71, files
+        assert ccd.check().code == 0, "the remedy it printed did not clear the finding"
+
+    def test_a_tree_with_no_baseline_is_told_to_use_write_missing_too(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Nothing in this tree is ratcheted, and `--write-missing` records it in full.
+
+        The narrow flag is the right answer for a reason that is a property of
+        `write_baseline`, not of the flag's name: a tree with no entry has nothing to
+        preserve, so `missing_only` falls through to the ordinary full record — total,
+        conditions and every file. What it does *not* do is re-record the other measured
+        trees, which is the whole difference, so a second tree is registered here with a
+        floor its report exceeds and asserted unmoved.
+        """
+        unratcheted, other = _fake_tree(tmp_path, "fresh"), _fake_tree(tmp_path, "aged")
+        path = _install(
+            monkeypatch,
+            tmp_path,
+            [unratcheted, other],
+            {"trees": {"aged": {"total": 50.0, "files": {"pkg/mod.py": 40.0}}}},
+        )
+        _write_tree_report(unratcheted, {"mod.py": 88.0}, total=88.0)
+        _write_tree_report(other, {"mod.py": 95.0}, total=95.0)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+
+        remedy = self._only(ccd.check().problems, "no recorded baseline")
+        assert _commands_named(remedy) == {"--write-missing"}, remedy
+
+        monkeypatch.setattr(sys, "argv", ["check_coverage_debt.py", "--write-missing"])
+        assert ccd.main() == 0
+        capsys.readouterr()
+        written = json.loads(path.read_text())["trees"]
+        assert written["fresh"]["files"] == {"pkg/mod.py": 88.0}
+        assert written["fresh"]["conditions"]["collected"] == 7
+        assert written["aged"]["files"] == {"pkg/mod.py": 40.0}, (
+            "recording the unratcheted tree moved another tree's floor"
+        )
+
+    def test_a_baseline_with_no_conditions_keeps_write_because_only_write_adds_them(
+        self, monkeypatch, tmp_path
+    ):
+        """The one finding `--write-missing` genuinely cannot fix, so it still says
+        `--write` — and says that the command is the wider one.
+
+        This finding is only reachable for a tree that *has* recorded files (it is quoted
+        beside a fall), and `missing_only` preserves such an entry verbatim. A conditions
+        record is written only as part of recording a whole tree, so naming the narrow
+        flag here would print a remedy that runs, reports success, and leaves the finding
+        exactly where it was. The behavioural half of that claim is measured in the next
+        test rather than asserted in prose.
+        """
+        tree = _fake_tree(tmp_path)
+        _write_tree_report(tree, {"mod.py": 80.0}, tests=437, skipped=24)
+        monkeypatch.setattr(ccd, "tracked_source_files", lambda t: ["pkg/mod.py"])
+        problems, _ = ccd.check_tree(tree, {"pkg/mod.py": 100.0}, None)
+        remedy = self._only(problems, "records no measurement conditions")
+        assert "--write" in _commands_named(remedy), remedy
+        assert "--write-missing cannot" in remedy, (
+            "the reader is told to use the wider command without being told why the "
+            f"narrow one is not offered: {remedy}"
+        )
+        assert "every measured tree" in remedy, remedy
+
+    @pytest.mark.parametrize("missing_only", [True, False])
+    def test_only_the_wide_command_captures_conditions_on_an_existing_entry(
+        self, monkeypatch, tmp_path, capsys, missing_only
+    ):
+        """Why the remedy above is `--write`, measured on both modes of one function.
+
+        A tree recorded before `conditions` existed has files and no conditions, which is
+        exactly the state the finding reports. `--write-missing` leaves it in that state;
+        `--write` captures them. Parametrised over the same fixture so the two answers are
+        a property of the mode rather than of two differently built trees.
+        """
+        tree, path = self._tree(
+            monkeypatch,
+            tmp_path,
+            recorded={"pkg/mod.py": 40.0},
+            measured={"mod.py": 90.0},
+            tracked=["pkg/mod.py"],
+            tests=100,
+            skipped=4,
+        )
+        assert ccd.write_baseline(missing_only=missing_only) == 0
+        capsys.readouterr()
+        entry = json.loads(path.read_text())["trees"][tree.name]
+        assert ("conditions" in entry) is (not missing_only), entry
+        if missing_only:
+            assert entry["files"] == {"pkg/mod.py": 40.0}, (
+                "the narrow mode moved a floor while failing to add conditions"
+            )
+
+    @pytest.mark.parametrize(
+        ("recorded", "measured", "needle"),
+        [
+            ({"pkg/mod.py": 90.0}, {"mod.py": 60.0}, "fell from"),
+            ({"pkg/gone.py": 50.0}, {"mod.py": 90.0}, "does not mention it"),
+        ],
+    )
+    def test_the_findings_that_need_the_wider_command_still_name_it_and_say_so(
+        self, monkeypatch, tmp_path, recorded, measured, needle
+    ):
+        """Lowering a floor and dropping a stale entry are both outside `missing_only`.
+
+        `--write-missing` preserves every existing entry, so it can neither write a
+        smaller figure over one nor delete one whose file has gone: offering it for these
+        two findings would be the same defect pointing the other way. What changed for
+        them is that the message now says the command re-records every measured tree, so
+        a reader knows what they are accepting before they run it.
+        """
+        tree, _ = self._tree(
+            monkeypatch,
+            tmp_path,
+            recorded=recorded,
+            measured=measured,
+            tracked=list(recorded),
+        )
+        problems, _ = ccd.check_tree(tree, recorded, {"collected": 7, "skipped": 0})
+        remedy = self._only(problems, needle)
+        assert _commands_named(remedy) == {"--write"}, remedy
+        assert "wholesale" in remedy, (
+            f"the wider command is offered without saying what it moves: {remedy}"
+        )
