@@ -75,16 +75,28 @@ A hand-written list of free units would be exactly the defect #1212 is about, on
 level up; an inference from an absence is weaker than a statement of fact, and
 saying which one this is, is the point of this section.
 
-⚠️ **There is a third cost implementation and it does not consult this module.**
-``src/ui/src/components/document-panel/pricing.ts`` is a TypeScript port of
-``_get_unit_cost`` for the web UI's document cost table, and it still returns
-``0`` for every unit a matched entry omits, because the declarations here are
-Python data the browser has no copy of. So for a row this module reports as
-unpriced, the ``metering`` table records NULL with a warning and that panel shows
-$0.00 with no mark. The divergence predates #1206 — it opened with #1212, for the
-non-cache units — and it is recorded in that file's own header rather than fixed
-here, because closing it means getting these declarations in front of the browser.
-The reporting table is the authority meanwhile.
+The web UI is a **client** of this module, not a third implementation
+---------------------------------------------------------------------
+
+``src/ui/src/components/document-panel/pricing.ts`` prices the document cost
+table in the browser, where nothing above can be imported, and it therefore does
+not decide the absent-unit case at all. :func:`declared_free_units` expands these
+registers per pricing key, the ``getPricing`` API response carries the expansion
+as ``nonChargeableUnits``, and the panel reads the verdict off it: a unit the
+expansion names renders as $0.00, and a unit it does not — with a count that is
+not zero — renders as unpriced, which is the same answer this module gives and
+the ``metering`` table records. See
+[#1406](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1406),
+which is what that panel showing a confident $0.00 for a row recorded as NULL was.
+
+Two properties hold that together, and both are asserted rather than intended.
+The expansion is checked against :func:`classify_absent_unit` over every shipped
+pricing key and every unit any of them names
+(``tests/unit/reporting/test_declared_free_units.py``), so the two cannot answer
+differently for a declared unit. And a panel that receives **no** expansion — an
+older deployment's resolver, a failed pricing fetch — reads every omitted unit as
+unpriced rather than as free, so the degradation is in the direction that shows
+the gap instead of hiding it.
 """
 
 from __future__ import annotations
@@ -268,9 +280,9 @@ class CacheUnitOmission:
     (``tests/unit/reporting/bedrock_cache_dimension_digest.py``, refreshable from
     the public files with no credential), and the unreachability premise is
     asserted against the two code constants, for every member — which is what the
-    older allowlist in ``test_pricing_lookup.py`` did for the eight of these
-    eleven whose model ids a template enum or a shipped preset names. The other
-    three — ``us.amazon.nova-premier-v1:0`` and the two
+    older allowlist in ``test_pricing_lookup.py`` did for those of these entries
+    whose model ids a template enum or a shipped preset names. The three that it
+    did not reach — ``us.amazon.nova-premier-v1:0`` and the two
     ``claude-3-haiku-20240307`` profiles — reach a deployment through
     ``pricing.yaml`` itself, which doubles as the set of model ids configuration
     validation accepts (``config.merge_utils._load_valid_bedrock_models``), so
@@ -313,7 +325,7 @@ CACHE_DIMENSION_READING_DATE = "2026-10-13"
 #: Registered in ``scripts/tests/gate_exemptions.json`` as
 #: ``EXPECTED_CACHE_UNIT_OMISSIONS``. Owned by
 #: ``tests/unit/reporting/test_cache_unit_omission_basis.py``, which derives the
-#: universe from ``config_library/pricing.yaml`` itself — so a twelfth entry that
+#: universe from ``config_library/pricing.yaml`` itself — so a further entry that
 #: omits a cache unit fails there rather than inheriting a reason written for
 #: somebody else's model.
 EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
@@ -482,27 +494,6 @@ EXPECTED_CACHE_UNIT_OMISSIONS: tuple[CacheUnitOmission, ...] = tuple(
             "CACHEPOINT_SUPPORTED_MODELS, and Nova does not cache implicitly.",
             ("cacheReadInputTokens",),
         ),
-        (
-            "bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "Claude Sonnet 4.5",
-            True,
-            AWS_BEDROCK_PRICE_LISTS[1],
-            "This entry is the one that already carried a basis, and the basis is "
-            "a live measurement rather than a price-list reading: a repeated "
-            "identical prompt through this GovCloud inference profile still "
-            "reported cacheReadInputTokens=0, so a cachePoint buys nothing there. "
-            "AWS nevertheless publishes both dimensions for the model in BOTH "
-            "GovCloud regions — cache read $0.36/MTok, 5-minute cache write "
-            "$4.50/MTok, in us-gov-west-1 and us-gov-east-1 alike — so the "
-            "omission is not a statement about pricing. The static half of the "
-            "premise is that this id is absent from CACHEPOINT_SUPPORTED_MODELS, "
-            "which no live call is needed to check; the behavioural half cannot "
-            "be re-checked offline, and is exactly why this entry is "
-            "priced_by_aws=True. If the profile ever starts honouring cache "
-            "points, the reads are reported as unpriced instead of billed at "
-            "$0.00 against a published $0.36/MTok.",
-            ("cacheReadInputTokens", "cacheWriteInputTokens"),
-        ),
     )
     for unit in units
 )
@@ -566,8 +557,8 @@ def classify_absent_unit(pricing_key: str, unit: str, value: Any) -> Verdict:
     point — a pricing entry added next month that omits a cache rate is reported
     rather than silently priced at $0.00, which is the class behind
     [#1206](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1206)
-    rather than its eleven instances. A user-supplied pricing table is held to
-    the same rule, and a zero count still costs nothing, so the only rows this
+    rather than the instances that revealed it. A user-supplied pricing table is
+    held to the same rule, and a zero count still costs nothing, so the only rows this
     reaches are ones that metered real cache activity against an entry carrying
     no rate for it.
 
@@ -585,3 +576,40 @@ def classify_absent_unit(pricing_key: str, unit: str, value: Any) -> Verdict:
     if (pricing_key, unit) in _CACHE_OMISSION_FREE:
         return NOT_CHARGEABLE
     return UNKNOWN
+
+
+def declared_free_units(pricing_key: str) -> tuple[str, ...]:
+    """Which units a *declaration* makes free at ``pricing_key``.
+
+    The wire form of the two registers above, for a reader that cannot import
+    them. The web UI's cost table is the one such reader: it receives this for
+    every entry in the pricing configuration, on the ``getPricing`` response, and
+    renders a unit the answer does not name as unpriced rather than as $0.00.
+
+    Expanded per pricing key rather than shipped raw, because the two registers
+    are scoped differently — one per service, one per exact key — and a consumer
+    that re-derived which scope applied to a key would be deciding the absent-unit
+    question a second time in a second language. That is the arrangement this
+    function exists to remove, so it answers in the one form a consumer can use
+    without knowing either scope: the key it already matched, and a set of unit
+    names.
+
+    Only the *declared* half of :func:`classify_absent_unit` is here. The
+    zero-count rule is deliberately absent: it is arithmetic over a number this
+    function is not given — a count of 0 costs 0 at any rate — so folding it in
+    would make a per-key declaration depend on a per-row value, and a consumer
+    holding the count can apply it where it belongs.
+
+    ``pricing_key`` is a *pricing* key, never a metering key, for the reason
+    :func:`pricing_key_service` gives: the service is the leading component, so
+    ``Extraction/bedrock/<model>`` has service ``Extraction``, which no
+    declaration names, and the answer is empty. Both cost implementations and the
+    panel walk a metering key down to a matched pricing key before this matters.
+
+    Returns the names sorted, so the serialized form is stable and a diff in it is
+    a change of substance rather than of iteration order.
+    """
+    service = pricing_key_service(pricing_key)
+    units = {unit for declared, unit in _DECLARED if declared == service}
+    units.update(unit for key, unit in _CACHE_OMISSION_FREE if key == pricing_key)
+    return tuple(sorted(units))

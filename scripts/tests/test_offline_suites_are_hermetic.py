@@ -995,3 +995,232 @@ def test_every_coverage_tree_is_measured_through_the_neutralisation(monkeypatch)
                 f"expected {value!r}. That source is one no unset can reach, so "
                 f"leaving it is enough to make the figures machine-dependent. #1377."
             )
+
+
+# ---------------------------------------------------------------------------
+# The test runner: the other pytest caller that is not a `make` recipe
+# ---------------------------------------------------------------------------
+#
+# `scripts/run_all_tests.py` is what `make test` invokes, so it is the command a
+# developer actually types, and it sat outside this control's universe for exactly
+# the same reason `coverage_all.py` did: it builds its own subprocess environment in
+# Python and spawns pytest itself, so no amount of checking `make` recipes reaches
+# it. Nobody decided it should be unprotected.
+#
+# What that cost, measured over the registered roots in a bare environment with
+# `botocore.endpoint.Endpoint._send` replaced by a recorder that appends the request
+# and then raises — a seam strictly below moto's `before-send` short-circuit, so a
+# record is exactly an escape, and below credential resolution, so the signing
+# credential can be classified by shape without transmitting it. 69 roots, 62 of
+# which reach nothing; the other seven produced 391 requests that would have been
+# sent, 48 of them signed with credentials of a real shape: CloudWatch
+# `PutMetricData` from four roots (35 calls, all writes), S3 `GET` from
+# `benchmarks/tests`, DynamoDB `Scan` from `src/lambda/save_reporting_data`, and one
+# Secrets Manager `GetSecretValue` from a test whose `patch.dict(os.environ, ...,
+# clear=True)` erased its own conftest's placeholder credentials mid-test. Every CI
+# recipe wrapped its pytest in `$(PYTEST_HERMETIC)`, so CI never saw any of it: the
+# gates were green and correct, and `make test` was simply not equivalent to what CI
+# runs. Issue #1398.
+#
+# The three checks below are the same three the coverage producer gets, for the same
+# reasons, plus the one asymmetry this caller has: `--integration` must NOT be
+# stripped, because those suites exist to call real AWS.
+
+
+def _run_all_tests():
+    """`scripts/run_all_tests.py`, imported by path (it is a script, not a package)."""
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "run_all_tests.py"
+    spec = importlib.util.spec_from_file_location("run_all_tests_probe", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_two_python_pytest_callers_share_one_definition():
+    """One list of credential sources, not one per caller.
+
+    The defect this guards is the one that produced #1398 out of #1377: the
+    neutralisation was written for `coverage_all.py`, and the second Python caller
+    needing it was not noticed. A copy would have drifted the same way — so both
+    read `scripts/hermetic_aws_env.py`, and identity (not equality) is what is
+    asserted, because two equal copies are exactly the state this prevents.
+    """
+    coverage = _coverage_all()
+    runner = _run_all_tests()
+    assert coverage.hermetic_aws_env is runner.hermetic_aws_env, (
+        "scripts/coverage_all.py and scripts/run_all_tests.py are using different "
+        "`hermetic_aws_env` functions. Both must import the one in "
+        "scripts/hermetic_aws_env.py; a second copy of a list of credential sources "
+        "drifts, and the direction that matters is the quiet one — a source added to "
+        "$(HERMETIC_AWS) and not to the copy leaves that caller reading it."
+    )
+
+
+def test_the_test_runner_neutralises_everything_the_wrapper_does():
+    """Its variable list is DERIVED from the Makefile here, never compared by eye."""
+    unset, assigned = _hermetic_spec()
+    module = _run_all_tests()
+    shared = sys.modules[module.hermetic_aws_env.__module__]
+    missing = sorted(set(unset) - set(shared.HERMETIC_AWS_UNSET))
+    assert not missing, (
+        f"$({WRAPPER_VAR}) unsets {missing} and hermetic_aws_env.HERMETIC_AWS_UNSET "
+        f"does not, so `make test` runs every root with those AWS sources still "
+        f"readable while every CI recipe strips them. That asymmetry is #1398."
+    )
+    assert shared.HERMETIC_AWS_SET == assigned, (
+        f"$({WRAPPER_VAR}) assigns {assigned} and hermetic_aws_env.HERMETIC_AWS_SET "
+        f"has {shared.HERMETIC_AWS_SET}. These neutralise the sources no unset can "
+        f"reach (the shared config files, and IMDS), and a developer machine's "
+        f"`[default]` profile is a resolvable credential with no AWS_* variable set "
+        f"at all."
+    )
+
+
+def test_the_test_runner_really_leaves_no_resolvable_credentials():
+    """Measured through the function the runner calls, not inferred from its list."""
+    module = _run_all_tests()
+    env = module.hermetic_aws_env(_polluted_env())
+    env["AWS_DEFAULT_REGION"] = "us-east-1"
+    probe = (
+        "import boto3\n"
+        "creds = boto3.Session(region_name='us-east-1').get_credentials()\n"
+        "print('NONE' if creds is None else 'RESOLVED '"
+        " + (creds.access_key or '<empty>'))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"the credentials probe itself failed to run: {result.stderr[-2000:]}"
+    )
+    assert result.stdout.strip() == "NONE", (
+        f"under run_all_tests' neutralisation botocore still resolved credentials "
+        f"(probe said {result.stdout.strip()!r}). `make test` would then sign real "
+        f"requests with them from unit suites that were never meant to reach a "
+        f"network, most of them writes. See #1398."
+    )
+
+
+def _captured_root_environments(monkeypatch, integration: bool) -> dict[str, dict]:
+    """Run `run_gate` over every registered root with the subprocess intercepted.
+
+    Returns root → the environment pytest would have been given. Nothing is executed
+    and nothing is written into the repository: `REPORT_DIR` is redirected and the
+    summary goes with it.
+    """
+    module = _run_all_tests()
+    seen: dict[str, dict[str, str]] = {}
+    real_run = subprocess.run
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _capture(cmd, cwd=None, env=None, **kwargs):
+        # Only the pytest invocations. `run_gate` also shells out to `git rev-parse`
+        # for the summary it writes, and swallowing that would both add a phantom
+        # entry here and make the probe's own count assertion wrong.
+        if not (isinstance(cmd, (list, tuple)) and "pytest" in cmd):
+            return real_run(cmd, cwd=cwd, env=env, **kwargs)
+        # The root is the last argument of the pytest command line the runner builds.
+        seen[str(cmd[-1])] = dict(env or {})
+        return _Result()
+
+    # The pollution has to be visible in `os.environ`, because that is what the
+    # runner builds its child environment from — and a probe built from the ambient
+    # environment measures nothing on a runner, which has no AWS environment to
+    # strip. Same argument as `_polluted_env`'s.
+    polluted = _polluted_env()
+    # ⚠️ The ambient PYTHONPATH has to go, or the pin assertion below passes for the
+    # wrong reason: this suite is itself run with the checkout's roots pinned, so a
+    # runner that had LOST the pin entirely and merely inherited `os.environ` would
+    # still hand its children a PYTHONPATH starting with this checkout. Found by
+    # mutation — `child_env = dict(os.environ)` in place of
+    # `pinned_environment(REPO_ROOT)` survived until this line existed.
+    polluted["PYTHONPATH"] = "/nonexistent/ambient-pythonpath"
+    monkeypatch.setattr(os, "environ", polluted)
+    monkeypatch.setattr(module, "REPORT_DIR", Path(tempfile.mkdtemp()) / "reports")
+    monkeypatch.setattr(module.subprocess, "run", _capture)
+    roots = [r for r in module.RUN_ROOTS if (REPO_ROOT / r).exists()]
+    assert roots, "no registered test root exists on disk; this probe is vacuous"
+    module.run_gate(roots, integration=integration)
+    assert len(seen) == len(roots), (
+        f"expected one intercepted invocation per registered root, captured "
+        f"{len(seen)} of {len(roots)}. A parse or a registry change has made this "
+        f"probe vacuous."
+    )
+    return seen
+
+
+def test_every_test_root_runs_through_the_neutralisation(monkeypatch):
+    """The function existing is not the function being called, for every root.
+
+    This is the half that catches a control present and not consulted. It intercepts
+    the `subprocess.run` the runner makes and inspects the environment pytest would
+    actually have received, per root. A runner that neutralises some roots and not
+    others fails here naming them.
+    """
+    unset, assigned = _hermetic_spec()
+    seen = _captured_root_environments(monkeypatch, integration=False)
+    for root, env in sorted(seen.items()):
+        leaked = sorted(name for name in unset if name in env)
+        assert not leaked, (
+            f"the pytest invocation `make test` makes for {root} still carries "
+            f"{leaked}, so that suite runs against this machine's AWS environment "
+            f"and an unmocked client in it transacts with whichever account the "
+            f"developer is signed in to. Route it through "
+            f"hermetic_aws_env.hermetic_aws_env. #1398."
+        )
+        for name, value in assigned.items():
+            assert env.get(name) == value, (
+                f"the pytest invocation for {root} has {name}={env.get(name)!r}, "
+                f"expected {value!r}. That source is one no unset can reach — a "
+                f"`[default]` profile in the shared credentials file needs no AWS_* "
+                f"variable at all — so leaving it is enough to put the whole run "
+                f"back on the machine's real credentials. #1398."
+            )
+        assert env.get("PYTHONPATH", "").startswith(str(REPO_ROOT)), (
+            f"the pytest invocation for {root} lost this checkout's PYTHONPATH pin "
+            f"(PYTHONPATH={env.get('PYTHONPATH')!r}). The neutralisation must compose "
+            f"with the pin, not replace it: without the pin `import idp_common` "
+            f"follows the editable-install pointer and the gate reports on another "
+            f"checkout, green (#1094)."
+        )
+
+
+def test_the_integration_run_keeps_the_real_aws_environment(monkeypatch):
+    """`--integration` must NOT be stripped: those suites exist to call real AWS.
+
+    The same split `make/hermetic_aws.mk` draws between `$(PYTEST_HERMETIC)` and
+    `$(PYTEST_FIRST_PARTY)`. Asserted in this direction too because a neutralisation
+    applied to everything would not fail loudly — it would turn
+    `make test-integration-all` into a suite that cannot reach the infrastructure it
+    exists to test, which reads as a broken deployment rather than a broken gate.
+    """
+    seen = _captured_root_environments(monkeypatch, integration=True)
+    region_kept = [
+        root for root, env in seen.items() if env.get("AWS_DEFAULT_REGION") is None
+    ]
+    assert not region_kept, (
+        f"the integration run strips AWS_DEFAULT_REGION for {sorted(region_kept)[:5]}"
+        f". `make test-integration-all` calls real AWS; stripping its region and "
+        f"credentials removes the thing those suites test."
+    )
+    for root, env in sorted(seen.items()):
+        assert env.get("AWS_ACCESS_KEY_ID") == SENTINEL_VALUE, (
+            f"the integration invocation for {root} no longer carries the machine's "
+            f"credentials. Those suites exist to call real AWS."
+        )
+        assert env.get("PYTHONPATH", "").startswith(str(REPO_ROOT)), (
+            f"the integration invocation for {root} lost the checkout's PYTHONPATH "
+            f"pin. Needing real credentials is not a reason to lose track of which "
+            f"tree is under test (#1094)."
+        )

@@ -115,7 +115,7 @@ MODEL_MAPPINGS = {
     # LEGACY model takes no further Service Quota increases.
     "us.anthropic.claude-3-5-sonnet-20241022-v2:0": "eu.anthropic.claude-sonnet-4-6",
     "us.anthropic.claude-3-7-sonnet-20250219-v1:0": "eu.anthropic.claude-sonnet-4-6",
-    # Sonnet 4 reaches end of life on 2026-10-14 in both regions, so its EU twin
+    # Sonnet 4 reached end of life on 2026-10-14 in both regions, so its EU twin
     # is no better than the US original — same shape as the 3.5/3.7 rows above.
     "us.anthropic.claude-sonnet-4-20250514-v1:0": "eu.anthropic.claude-sonnet-4-6",
     # Same model in both regions, and still invocable while LEGACY, so this row

@@ -108,6 +108,7 @@ REPO_WALKING_GATES = (
     "test_iam_privilege_escalation.py",
     "test_lambda_log_groups.py",
     "test_log_group_encryption.py",
+    "test_no_outbound_aws_is_universal.py",
     "test_testing_doc.py",
     "test_well_architected_doc.py",
     # Outside this directory: it globs *.yaml from the repo root to check that every

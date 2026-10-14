@@ -396,61 +396,76 @@ pricing:
         price: "4.125E-6"
 
   # GovCloud cross-region inference profile for the same underlying model as
-  # bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 above. The rates below
-  # are the commercial us-west-2 band.
+  # bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0 above.
   #
-  # ⚠️ GOVCLOUD RATES ARE PUBLISHED AND ARE HIGHER THAN THESE — read before
-  # trusting a GovCloud cost report. The AmazonBedrockFoundationModels offer file
-  # version 20261012084008 (published 2026-10-12, retrieved 2026-10-13) prices
-  # this model identically in us-gov-west-1 and us-gov-east-1 at $3.60/MTok input
-  # and $18.00/MTok output, against the $3.30 / $16.50 below, so a GovCloud cost
-  # report built from this row is 8.3% BELOW truth on both token axes. Changing
-  # the rates changes every reported GovCloud cost and belongs in its own change;
-  # the figures are recorded here so the gap is known rather than discovered.
+  # The rates below are the GovCloud band, which is higher than the commercial
+  # one. AWS publishes it in the AmazonBedrockFoundationModels offer file —
+  # version 20261012084008 (published 2026-10-12, retrieved 2026-10-13) — where
+  # this model is priced identically in us-gov-west-1 and us-gov-east-1: $3.60
+  # input, $18.00 output, $0.36 cache read and $4.50 five-minute cache write, all
+  # per MTok. ⚠️ A GovCloud cost figure this deployment reported before issue
+  # #1404 was 8.3% LOW on both token axes, because this row carried the
+  # commercial $3.30 / $16.50 band, so GovCloud costs are not continuous across
+  # that change. The reading is re-derivable with no credential:
+  # tests/unit/reporting/bedrock_govcloud_rate_digest.py --refresh, and
+  # test_govcloud_pricing_rates.py asserts every rate here against it.
   #
-  # No cacheReadInputTokens/cacheWriteInputTokens units: verified live against
+  # The cache units are priced even though a cachePoint is not expected to buy
+  # anything here, and that combination is deliberate. Verified live against
   # us-gov-west-1 that cachePoint does not reduce input tokens through this
-  # inference profile (repeated identical prompt still reports
-  # cacheReadInputTokens=0), so GovCloud Claude calls should always be costed as a
-  # full cache miss. Note what that is and is not a claim about — AWS DOES publish
-  # both cache dimensions for this model in both GovCloud regions (cache read
-  # $0.36/MTok, 5-minute cache write $4.50/MTok), so the omission rests on the
-  # measured behaviour of the profile and on this id being absent from
-  # bedrock.client.CACHEPOINT_SUPPORTED_MODELS, not on the units being free. That
-  # basis is recorded per unit in
-  # idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS, which records it as a
-  # priced dimension — so a cache read metered here is reported as unpriced rather
-  # than billed at $0.00 if the profile ever starts honouring cache points.
+  # inference profile (a repeated identical prompt still reported
+  # cacheReadInputTokens=0), and this id is absent from
+  # bedrock.client.CACHEPOINT_SUPPORTED_MODELS, so no cachePoint is sent to it in
+  # the first place and both counters should meter zero. A zero count costs
+  # nothing whatever the rate is. What the rates buy is the other case: if the
+  # profile ever does honour a cache point, the tokens are costed at the rate AWS
+  # charges rather than reported as an unpriced NULL cost, which is what an
+  # omitted unit on a row AWS prices resolves to (issues #1212 and #1206).
   #
   # Omitting a unit from an entry that otherwise exists resolves to $0.00 only
   # when a declaration in idp_common.metering_units says the unit costs nothing;
-  # anything else is reported as a NULL cost (issues #1212 and #1206). Before the
-  # GitHub issue #926 fix the old substring lookup matched the absent
-  # "cacheReadInputTokens" against this row's "inputTokens" price, so the omission
-  # bought a 10x cache-read rate rather than the intended zero.
+  # anything else is reported as a NULL cost. Before the GitHub issue #926 fix the
+  # old substring lookup matched an absent "cacheReadInputTokens" against this
+  # row's "inputTokens" price, so the omission bought a 10x cache-read rate rather
+  # than the intended zero — hence the explicit units.
+  #
+  # No one-hour-TTL cache write rate, and it is not an omission: AWS publishes one
+  # for this model in both GovCloud regions at $7.20/MTok, but a Converse cache
+  # point carries "type" and has no TTL member, so a one-hour point cannot be
+  # requested from this codebase — both construction sites build type="default".
+  # Bedrock meters a write of either TTL into the same cacheWriteInputTokens
+  # counter (the TTL breakdown comes back separately in usage.cacheDetails), so
+  # the five-minute rate is the right one for the only write this code can
+  # produce. test_govcloud_pricing_rates.py asserts that, at the construction
+  # sites, so a one-hour point added later fails rather than silently under-
+  # reporting its own writes by 37.5% ($4.50 charged against $7.20 published).
   - name: bedrock/us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0
     units:
       - name: inputTokens
-        price: "3.3E-6"
+        price: "3.6E-6"
       - name: outputTokens
-        price: "1.65E-5"
+        price: "1.8E-5"
+      - name: cacheReadInputTokens
+        price: "3.6E-7"
+      - name: cacheWriteInputTokens
+        price: "4.5E-6"
 
   # GovCloud Nova models are invoked with bare model IDs (the us. cross-region
   # inference-profile prefix is invalid in GovCloud), so the us.-prefixed entries
   # above never match at cost-calc time: save_reporting_data._get_unit_cost
   # resolves by EXACT key, and "bedrock/amazon.nova-pro-v1:0" is a different key
   # from "bedrock/us.amazon.nova-pro-v1:0". Without these rows a bare GovCloud
-  # Nova call would be reported as UNPRICED (NULL cost). The rates are the
-  # commercial us-east-1 band.
+  # Nova call would be reported as UNPRICED (NULL cost).
   #
-  # ⚠️ GOVCLOUD RATES ARE PUBLISHED AND ARE HIGHER THAN THESE, as on the us-gov
-  # Claude row above. The AmazonBedrock offer file version 20261010182242
-  # (published 2026-10-10, retrieved 2026-10-13) prices us-gov-west-1 Nova Pro at
-  # $0.96/MTok input and $3.84/MTok output, and Nova Lite at $0.072 / $0.288,
-  # against the $0.80 / $3.20 and $0.06 / $0.24 below — so a GovCloud cost report
-  # from these rows is 16.7% BELOW truth on both token axes. Recorded rather than
-  # corrected here: changing them changes every reported GovCloud cost and belongs
-  # in its own change.
+  # The rates are therefore the GovCloud band, as on the us-gov Claude row above,
+  # and GovCloud is 1.2x commercial on both Nova models. AWS publishes it in the
+  # AmazonBedrock offer file version 20261010182242 (published 2026-10-10,
+  # retrieved 2026-10-13): in us-gov-west-1, Nova Pro at $0.96/MTok input and
+  # $3.84/MTok output, Nova Lite at $0.072 / $0.288. ⚠️ A GovCloud cost figure
+  # this deployment reported before issue #1404 was 16.7% LOW on both token axes,
+  # because these rows carried the commercial us-east-1 $0.80 / $3.20 and $0.06 /
+  # $0.24 band. Note that only us-gov-west-1 sells these two models; AWS publishes
+  # no us-gov-east-1 Nova dimension at all.
   #
   # Cache units omitted, and the basis is per unit in
   # idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS rather than inherited from
@@ -465,16 +480,16 @@ pricing:
   - name: bedrock/amazon.nova-pro-v1:0
     units:
       - name: inputTokens
-        price: "8.0E-7"
+        price: "9.6E-7"
       - name: outputTokens
-        price: "3.2E-6"
+        price: "3.84E-6"
 
   - name: bedrock/amazon.nova-lite-v1:0
     units:
       - name: inputTokens
-        price: "6.0E-8"
+        price: "7.2E-8"
       - name: outputTokens
-        price: "2.4E-7"
+        price: "2.88E-7"
 
   - name: bedrock/us.anthropic.claude-sonnet-4-6
     units:
@@ -960,8 +975,9 @@ pricing:
   # Claude Haiku 5.5, EU geo. Identical to the "us." band: the price list carries
   # the same $0.11 / $0.55 regional rate in every commercial region that sells this
   # model (checked across Frankfurt, Ireland and US East). GovCloud is the one
-  # exception at $0.12 / $0.60, and this file has no "us-gov." entries for any
-  # model, so that band is unrepresented here as well.
+  # exception at $0.12 / $0.60. This file's only "us-gov." row is Claude Sonnet
+  # 4.5's, which is the one GovCloud Claude model the GovCloud preset selects, so
+  # the Haiku 5.5 GovCloud band is unrepresented here.
   - name: bedrock/eu.anthropic.claude-haiku-5-5
     units:
       - name: inputTokens

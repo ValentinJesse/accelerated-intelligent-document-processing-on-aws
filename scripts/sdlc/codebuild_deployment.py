@@ -712,63 +712,248 @@ def create_iam_resources(stack_name, shared_boundary=False):
         return None, None
 
 
+def _aws_error_code(exc):
+    """The AWS error code carried by a botocore ClientError, or "" otherwise.
+
+    Read off the response payload rather than caught by exception class, because
+    the class is minted per client instance (`iam_client.exceptions.*`), so a
+    helper handed a client cannot name it and a `WaiterError` carries no class
+    of ours at all. Both of those were how a failed delete reached a caller that
+    then printed success.
+    """
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        return str(response.get("Error", {}).get("Code", ""))
+    return ""
+
+
+def _policy_attachment_detail(iam_client, policy_arn):
+    """ " (attached to: ...)" for a policy IAM refuses to delete, or "".
+
+    Best effort and purely explanatory: the finding stands whether or not this
+    resolves, so every failure here is swallowed.
+    """
+    try:
+        attached = iam_client.list_entities_for_policy(PolicyArn=policy_arn)
+    except Exception:  # noqa: BLE001
+        return ""
+    names = [
+        role.get("RoleName", "") for role in attached.get("PolicyRoles", []) if role
+    ]
+    names += [
+        user.get("UserName", "") for user in attached.get("PolicyUsers", []) if user
+    ]
+    names = [name for name in names if name]
+    if not names:
+        return ""
+    shown = ", ".join(sorted(names)[:5])
+    return f" (attached to: {shown})"
+
+
+def _delete_managed_policy(iam_client, policy_arn):
+    """Delete one customer-managed policy. Returns (gone, detail).
+
+    `gone` is True when the policy is no longer there, which includes the case
+    where it never was. Non-default versions are pruned first because
+    DeletePolicy refuses while any exist, and a CloudFormation-managed policy
+    that outlived its stack usually has some — pruning is opportunistic, and
+    DeletePolicy remains the only authority on whether the policy is gone.
+    """
+    try:
+        for version in iam_client.list_policy_versions(PolicyArn=policy_arn).get(
+            "Versions", []
+        ):
+            if not version.get("IsDefaultVersion"):
+                iam_client.delete_policy_version(
+                    PolicyArn=policy_arn, VersionId=version["VersionId"]
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        iam_client.delete_policy(PolicyArn=policy_arn)
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == "NoSuchEntity":
+            return True, "not present"
+        if code == "DeleteConflict":
+            return (
+                False,
+                f"still in use{_policy_attachment_detail(iam_client, policy_arn)}",
+            )
+        return False, str(e)
+
+
+def _stack_scoped_policies(iam_client, stack_name):
+    """{PolicyName: Arn} for customer-managed policies named `<stack_name>[-*]`.
+
+    Covers both of the names a run creates — `<stack_name>-PermissionsBoundary`,
+    made outside CloudFormation, and `<stack_name>-iam-PassRolePolicy`, made by
+    the pre-stack — without having to know either in advance.
+
+    Raises on an API error. The caller turns that into a finding: a sweep that
+    could not enumerate its targets has not established that there are none.
+    """
+    found = {}
+    paginator = iam_client.get_paginator("list_policies")
+    for page in paginator.paginate(Scope="Local"):
+        for policy in page.get("Policies", []):
+            name = policy.get("PolicyName", "")
+            if name == stack_name or name.startswith(f"{stack_name}-"):
+                found[name] = policy.get("Arn", "")
+    return found
+
+
+def _iam_stack_presence(cf_client, iam_stack_name):
+    """(present, detail) for the service-role pre-stack.
+
+    present is True, False, or None for "could not be determined" — which the
+    caller must treat as a finding rather than as an absence.
+    """
+    try:
+        stacks = cf_client.describe_stacks(StackName=iam_stack_name).get("Stacks", [])
+    except Exception as e:  # noqa: BLE001
+        if "does not exist" in str(e):
+            return False, ""
+        return None, f"could not read stack {iam_stack_name}: {e}"
+    if not stacks:
+        return False, ""
+    status = stacks[0].get("StackStatus", "UNKNOWN")
+    if status == "DELETE_COMPLETE":
+        return False, ""
+    return True, f"stack {iam_stack_name} still present ({status})"
+
+
+def verify_iam_resources_gone(stack_name):
+    """Assert this run's IAM pre-stack and stack-scoped policies are really gone.
+
+    Returns a list of finding strings; an EMPTY list is the only thing that
+    means verified-gone. This is the check #1391 asks for: after a run, no
+    `<stack_name>-iam` stack and no `<stack_name>-*` managed policy may remain.
+
+    Read entirely from the account — `describe_stacks` and `list_policies` —
+    never from a flag the cleanup set about itself. A cleanup that announced
+    itself and did nothing is the defect; "the cleanup function ran" is the same
+    claim one level up, and three runs' worth of orphaned policies accumulated
+    behind it.
+
+    An API error is a `UNVERIFIED:` finding, not a pass. A check that cannot
+    enumerate its targets has not found them absent — the shape that left the
+    stale-bucket sweep permanently inert behind a warning.
+    """
+    findings = []
+
+    try:
+        cf_client = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
+        present, detail = _iam_stack_presence(cf_client, f"{stack_name}-iam")
+        if present is None:
+            findings.append(f"UNVERIFIED: {detail}")
+        elif present:
+            findings.append(f"LEFT BEHIND: {detail}")
+    except Exception as e:  # noqa: BLE001
+        findings.append(f"UNVERIFIED: could not check {stack_name}-iam: {e}")
+
+    try:
+        iam_client = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
+        for name, arn in sorted(_stack_scoped_policies(iam_client, stack_name).items()):
+            findings.append(
+                f"LEFT BEHIND: managed policy {name}"
+                f"{_policy_attachment_detail(iam_client, arn)}"
+            )
+    except Exception as e:  # noqa: BLE001
+        findings.append(
+            f"UNVERIFIED: could not list {stack_name}-* managed policies: {e}"
+        )
+
+    for finding in findings:
+        print(f"[{stack_name}] ❌ IAM teardown — {finding}")
+    if not findings:
+        print(
+            f"[{stack_name}] ✅ Verified gone: {stack_name}-iam stack and every "
+            f"{stack_name}-* managed policy"
+        )
+    return findings
+
+
 def cleanup_iam_resources(stack_name):
-    """Delete the IAM stack, then this stack's own permissions boundary policy.
+    """Delete the IAM pre-stack and this run's permissions boundary, then verify.
+
+    Returns verify_iam_resources_gone's findings: an EMPTY list means the
+    account demonstrably carries nothing named for this run.
 
     Order matters: the boundary is attached to every role the IDP stack created,
     and IAM refuses to delete a policy still in use as a boundary, so the IDP
     stack (deleted by our caller, cleanup_stack) and then the service-role stack
     must go first.
 
-    Only `<stack_name>-PermissionsBoundary` is deleted. The shared probe boundary
-    (SHARED_BOUNDARY_POLICY_NAME) never matches that name and so survives, which
-    is what lets concurrent probes share it.
+    The two deletes sit in separate blocks and neither can skip the other or the
+    verification. They shared one `try` before, under an inner
+    `except ClientError` that does not catch a `WaiterError` — so a stack-delete
+    wait that timed out skipped the boundary-policy delete entirely, leaving
+    `⚠️ Failed to delete IAM stack` as the only trace of a policy leaked against
+    a per-account quota.
+
+    Only `<stack_name>-PermissionsBoundary` is deleted here. The shared probe
+    boundary (SHARED_BOUNDARY_POLICY_NAME) never matches that name and so
+    survives, which is what lets concurrent probes share it. Any OTHER
+    `<stack_name>-*` policy the verification finds is reported rather than
+    deleted: those belong to CloudFormation, and deleting one out from under a
+    stack that outlived its delete attempt would trade a leak for drift.
+    `cleanup_stale_idp_policies` takes them once their run has no stacks left.
     """
     print(f"[{stack_name}] Cleaning up IAM stack...")
 
+    iam_stack_name = f"{stack_name}-iam"
     try:
-        # Clean up IAM CloudFormation stack (adaptive retry: concurrent teardown
-        # of primary + probe IAM stacks also bursts CFN/IAM mutating calls).
+        # Adaptive retry: concurrent teardown of primary + probe IAM stacks
+        # also bursts CFN/IAM mutating calls.
         cf_client = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
-        iam_stack_name = f"{stack_name}-iam"
         try:
             cf_client.delete_stack(StackName=iam_stack_name)
-
-            # Wait for stack deletion to complete
             waiter = cf_client.get_waiter("stack_delete_complete")
             waiter.wait(
                 StackName=iam_stack_name, WaiterConfig={"MaxAttempts": 30, "Delay": 10}
             )
-
             print(f"[{stack_name}] ✅ Deleted IAM stack: {iam_stack_name}")
-        except cf_client.exceptions.ClientError as e:
+        except Exception as e:  # noqa: BLE001
             if "does not exist" in str(e):
                 print(f"[{stack_name}] ℹ️ IAM stack not found: {iam_stack_name}")
             else:
                 print(f"[{stack_name}] ⚠️ Failed to delete IAM stack: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[{stack_name}] ⚠️ Could not reach CloudFormation for {iam_stack_name}: {e}"
+        )
 
-        # The per-stack boundary policy is created outside CloudFormation, so
-        # nothing deletes it implicitly. Left behind it is a slow leak against
-        # the account's 1500-managed-policy quota, one policy per CI run.
+    # The per-stack boundary policy is created outside CloudFormation, so
+    # nothing deletes it implicitly. Left behind it is a slow leak against the
+    # account's managed-policy quota, one policy per CI run, and the failure it
+    # eventually produces lands on an unrelated deploy.
+    boundary_name = f"{stack_name}-PermissionsBoundary"
+    try:
         iam_client = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
         account_id = boto3.client("sts").get_caller_identity()["Account"]
-        boundary_name = f"{stack_name}-PermissionsBoundary"
         boundary_arn = f"arn:aws:iam::{account_id}:policy/{boundary_name}"
-        try:
-            iam_client.delete_policy(PolicyArn=boundary_arn)
-            print(f"[{stack_name}] ✅ Deleted permissions boundary: {boundary_name}")
-        except iam_client.exceptions.NoSuchEntityException:
-            print(f"[{stack_name}] ℹ️ Permissions boundary not found: {boundary_name}")
-        except iam_client.exceptions.DeleteConflictException:
-            # Still attached as a boundary somewhere — a role the IDP stack
-            # delete left behind. Warn; the stale-stack reaper picks up the rest.
+        gone, detail = _delete_managed_policy(iam_client, boundary_arn)
+        if gone:
+            suffix = f" ({detail})" if detail else ""
             print(
-                f"[{stack_name}] ⚠️ Permissions boundary still in use, not deleted: "
-                f"{boundary_name}"
+                f"[{stack_name}] ✅ Deleted permissions boundary: "
+                f"{boundary_name}{suffix}"
             )
+        else:
+            print(
+                f"[{stack_name}] ⚠️ Permissions boundary not deleted: "
+                f"{boundary_name} — {detail}"
+            )
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[{stack_name}] ⚠️ Could not delete permissions boundary "
+            f"{boundary_name}: {e}"
+        )
 
-    except Exception as e:
-        print(f"[{stack_name}] ❌ Failed to cleanup IAM stack: {e}")
+    return verify_iam_resources_gone(stack_name)
 
 
 def test_step3_default_config(stack_name):
@@ -3648,7 +3833,11 @@ def deploy_and_test_stack(stack_name, admin_email, template_url, progress_cb=Non
                     "redeploying a fresh stack once..."
                 )
                 # Reclaim the rolled-back stack + IAM so the retry starts clean
-                # (same stack name; cleanup is idempotent/best-effort).
+                # (same stack name; cleanup is idempotent/best-effort). The
+                # teardown findings are printed but deliberately not carried:
+                # the next attempt recreates both resources under the same
+                # names, so the verdict belongs to the teardown that follows
+                # the LAST attempt, which main() reads.
                 cleanup_stack({"stack_name": stack_name})
                 deploy_result["retried_transient_logs_race"] = True
                 continue
@@ -5101,7 +5290,17 @@ def cancel_bedrock_ingestion_jobs(stack_name):
 
 
 def cleanup_stack(result):
-    """Clean up stack"""
+    """Delete this run's IDP stack, then its IAM pre-stack and boundary policy.
+
+    Returns cleanup_iam_resources' findings: an EMPTY list means the teardown
+    was verified, anything else names what is still standing.
+
+    The IAM cleanup runs whatever happened to the IDP stack above. It used to
+    sit inside the same `try`, so an exception from the stack delete — or from
+    the ingestion-job cancel before it — returned through `⚠️ Cleanup task
+    failed` with the pre-stack and the boundary policy untouched and nothing
+    downstream ever looking again.
+    """
     stack_name = result.get("stack_name")
     print(f"🧹 Starting cleanup for stack: {stack_name}")
     try:
@@ -5131,11 +5330,47 @@ def cleanup_stack(result):
         )
 
         print(f"[{stack_name}] ✅ Cleanup completed")
-
-        # Clean up CodeBuild-specific IAM resources
-        cleanup_iam_resources(stack_name)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"⚠️ Cleanup task failed: {e}")
+
+    # Clean up CodeBuild-specific IAM resources -- outside the block above on
+    # purpose, so a failure there cannot skip it.
+    return cleanup_iam_resources(stack_name)
+
+
+def teardown_primary_stack(result, stack_name):
+    """Tear this run's resources down, or retain them deliberately and say so.
+
+    Returns {"retained": bool, "findings": [str, ...]}. An empty `findings` on
+    a non-retained run means the teardown was *verified*, not merely attempted.
+
+    The two exits were asymmetric in a way that leaked (#1391). Retention is
+    opt-OUT (IDP_KEEP_FAILED_STACK, default on), so a failing run kept its stack
+    for inspection and skipped cleanup_stack **entirely** — leaving its `-iam`
+    pre-stack at CREATE_COMPLETE and its `-PermissionsBoundary` policy standing.
+    The startup stack reaper later removed the stacks, but nothing had ever
+    removed the policy, so every retained failure leaked one managed policy
+    permanently against a per-account quota.
+
+    Retaining those two *with* the stack is still right: the retained stack's
+    roles carry that boundary, and deleting the stack later needs that service
+    role, so tearing either down now would leave something that can no longer be
+    deleted cleanly. What changed is that the retention is reported as the
+    deferral it is, and `cleanup_stale_idp_policies` reaps the policy once the
+    run has no stacks left.
+    """
+    if not result.get("success") and retain_failed_stack(stack_name):
+        print(f"[{stack_name}] ⏸️  teardown skipped — stack retained for inspection")
+        print(
+            f"[{stack_name}]     kept with it: {stack_name}-iam and "
+            f"{stack_name}-PermissionsBoundary — the retained stack's roles carry "
+            "that boundary and its deletion needs that service role. Reaped by "
+            "cleanup_stale_idp_stacks / cleanup_stale_idp_policies once the "
+            "retention marker expires."
+        )
+        return {"retained": True, "findings": []}
+
+    return {"retained": False, "findings": cleanup_stack(result)}
 
 
 # ---------------------------------------------------------------------------
@@ -6003,6 +6238,129 @@ def cleanup_stale_idp_buckets():
         print(f"✅ Reaped {deleted}/{len(stale)} stale idp- test bucket(s)")
     except Exception as e:  # noqa: BLE001
         print(f"⚠️ Stale idp- bucket cleanup failed: {e}")
+
+
+# Reap orphaned idp- run-scoped IAM managed policies older than this. Same
+# rationale as the stack and bucket reapers, with one difference that makes it
+# load-bearing: a managed policy is NOT owned by any stack once its run is torn
+# down, so the stack reaper cannot reach it, and managed policies are a
+# per-account quota — the eventual failure lands on an unrelated deploy.
+IDP_POLICY_STALE_AGE_SECONDS = 6 * 3600  # 6h
+
+
+def _policy_age_seconds(policy, now):
+    """Age of a `list_policies` entry in seconds, or None if not establishable.
+
+    None is returned for an absent `CreateDate`, one that is not a datetime, and
+    one that is naive (no tzinfo) — subtracting a naive datetime from an
+    aware `now` raises, which inside the reaper's blanket `except` would abandon
+    the whole sweep rather than one policy. The caller must treat None as "the
+    age gate cannot be satisfied", never as old enough.
+    """
+    created = policy.get("CreateDate")
+    if not isinstance(created, datetime) or created.tzinfo is None:
+        return None
+    return (now - created).total_seconds()
+
+
+def cleanup_stale_idp_policies():
+    """Reap orphaned `idp-MMDD-HHMMSS*` IAM managed policies whose run is gone.
+
+    Two names leak here. `<stack>-PermissionsBoundary` is created outside
+    CloudFormation by create_iam_resources, so nothing removes it implicitly;
+    `<stack>-iam-PassRolePolicy` belongs to the pre-stack and survives a
+    pre-stack delete that did not complete. Either one outliving its run is
+    permanent: no stack owns it, so cleanup_stale_idp_stacks cannot see it.
+
+    Safety — a policy is deleted only if ALL of:
+      * its name carries a run prefix (idp-MMDD-HHMMSS), which is also what
+        excludes SHARED_BOUNDARY_POLICY_NAME: the shared probe boundary is named
+        for no run, so it can never match and concurrent probes keep sharing it,
+      * that run has NO surviving CloudFormation stack — so an in-flight run, and
+        a stack deliberately retained for inspection, are both untouchable, and
+      * its age is KNOWN and exceeds IDP_POLICY_STALE_AGE_SECONDS, a backstop for
+        the window between creating the boundary and the stack that will protect
+        it.
+
+    Every one of those three fails CLOSED, the age one included: a policy whose
+    `CreateDate` the listing did not carry has an age that cannot be
+    established, which is not the same claim as being old enough to delete, and
+    this is the one path here that issues `delete_policy` against a shared CI
+    account. It is reported in its own counter rather than folded into the
+    too-young one, because "younger than the gate" and "age unknown" are
+    different facts and only the second needs looking at. The distinction is the
+    same one verify_iam_resources_gone draws between a finding and an
+    `UNVERIFIED:` — an API answer that cannot establish something is not
+    evidence for it.
+
+    Convergent rather than immediate: the stack reaper above only *issues* its
+    deletes, so a run reaped this minute still has stacks and is skipped here
+    until the next run. Best effort — never raises.
+    """
+    print("🧹 Cleaning up orphaned idp- IAM managed policies (quota leak guard)...")
+    try:
+        iam = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
+        now = datetime.now(tz=timezone.utc)
+        protected = _live_idp_run_prefixes()
+
+        stale, skipped_protected, skipped_young = [], 0, 0
+        # Not spelled with a word from exemption_discovery.NAME_VOCABULARY (an
+        # earlier `unknown_age` was discovered through `KNOWN_`), because this
+        # is not a gate carve-out and no registry entry could say anything
+        # useful about it: the members are whatever the live listing failed to
+        # date, so there is no authored judgement to write and no ratchet that
+        # could test one.
+        age_unestablishable = []
+        paginator = iam.get_paginator("list_policies")
+        for page in paginator.paginate(Scope="Local"):
+            for policy in page.get("Policies", []):
+                name = policy.get("PolicyName", "")
+                match = _IDP_RUN_PREFIX_RE.match(name)
+                if not match:
+                    continue
+                if match.group(1) in protected:
+                    skipped_protected += 1
+                    continue
+                age = _policy_age_seconds(policy, now)
+                if age is None:
+                    # Age not establishable, so the age gate cannot be satisfied.
+                    # Named rather than counted: this should not happen, and a
+                    # silent skip would leave a policy accumulating against the
+                    # quota with nothing saying which one.
+                    age_unestablishable.append(name)
+                    continue
+                if age < IDP_POLICY_STALE_AGE_SECONDS:
+                    skipped_young += 1
+                    continue
+                stale.append((name, policy.get("Arn", "")))
+
+        if skipped_protected or skipped_young:
+            print(
+                f"  ({skipped_protected} protected by a live stack, "
+                f"{skipped_young} younger than the age gate — skipped)"
+            )
+        for name in sorted(age_unestablishable):
+            print(
+                f"  ⚠️ {name}: age not establishable from the listing — NOT "
+                "reaped (the age gate cannot be satisfied, and this path deletes)"
+            )
+        if not stale:
+            print("✅ No orphaned idp- IAM managed policies to reap")
+            return
+
+        deleted = 0
+        for name, arn in sorted(stale):
+            gone, detail = _delete_managed_policy(iam, arn)
+            if gone:
+                deleted += 1
+            else:
+                # Loud, because this is the path on which the quota keeps
+                # filling: the policy is still there and nothing else will take
+                # it until whatever holds it is gone.
+                print(f"[{name}] ⚠️ managed policy NOT deleted — {detail}")
+        print(f"✅ Reaped {deleted}/{len(stale)} orphaned idp- IAM managed policy/ies")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ Orphaned idp- IAM policy cleanup failed: {e}")
 
 
 def validate_apigw_global_hosting(stack_name):
@@ -7146,6 +7504,10 @@ def _run_probe_attempt(probe, admin_email, template_url, vpc_params):
         _capture_cf_events(result, stack_name)
         return result
     finally:
+        # A probe's teardown findings are printed by the verification but do NOT
+        # change its verdict: a probe uses the shared boundary policy, so it
+        # creates no per-run policy of its own, and probes are off by default in
+        # CI. Folding them into the probe result is a separate change.
         cleanup_stack({"stack_name": stack_name})
 
 
@@ -7406,6 +7768,34 @@ def build_consolidated_summary(
                 )
                 overall_ok = False
 
+    # Teardown of this run's own IAM resources. Rendered from the verification
+    # read back off the account, never from the fact that a cleanup was called:
+    # "the cleanup ran" is the claim that let three runs' permissions-boundary
+    # policies survive while the log said cleanup was handled.
+    lines.append("")
+    lines.append("🧹 Teardown (IAM pre-stack + permissions boundary)")
+    teardown = (primary_result or {}).get("teardown")
+    if not publish_success or teardown is None:
+        lines.append(row("cancelled", "Not reached"))
+    elif teardown.get("retained"):
+        lines.append(
+            row(
+                "skipped",
+                f"Retained for inspection — {stack_name}-iam and its boundary "
+                "policy are reaped with the retention marker",
+            )
+        )
+    elif teardown.get("findings"):
+        for finding in teardown["findings"]:
+            lines.append(row("failed", "IAM teardown", finding))
+        overall_ok = False
+    else:
+        lines.append(
+            row(
+                "passed", f"Verified gone: {stack_name}-iam and {stack_name}-* policies"
+            )
+        )
+
     # Deployment-variant probes
     lines.append("")
     lines.append("🔬 Deployment-variant probes")
@@ -7498,6 +7888,11 @@ def main():
     # reaping here (CloudFormation can't delete a non-empty bucket, so they'd
     # otherwise leak — thousands accumulated this way).
     cleanup_stale_idp_buckets()
+    # Managed policies after the stacks, for the same reason and with the same
+    # protection: a policy is only reaped once its run has no stacks left, so
+    # this converges the ones a retained failure deliberately left behind (and
+    # the ones already orphaned by runs that predate the verification below).
+    cleanup_stale_idp_policies()
     # Evidence bundles from runs long since diagnosed. Not reaped by an S3
     # lifecycle rule because the bucket is not managed by this repository.
     cleanup_stale_ci_diagnostics()
@@ -7630,12 +8025,12 @@ def main():
 
         # Step 4: clean up the primary stack (the APIGW thread cleans up its own
         # stack in its finally block) -- unless this run is keeping it for
-        # inspection, in which case the startup reaper takes it once the
-        # retention marker expires.
-        if not result["success"] and retain_failed_stack(stack_name):
-            print(f"[{stack_name}] ⏸️  teardown skipped — stack retained for inspection")
-        else:
-            cleanup_stack(result)
+        # inspection, in which case the startup reapers take it, its pre-stack
+        # and its boundary policy once the retention marker expires.
+        #
+        # Reached on BOTH the success and the failure path, and the result is a
+        # verification read back off the account rather than a cleanup message.
+        result["teardown"] = teardown_primary_stack(result, stack_name)
 
         if diagnostics_uri:
             ai_summary = f"{ai_summary}\n\n📦 Evidence bundle: {diagnostics_uri}"
@@ -7725,6 +8120,20 @@ def main():
         stack_success = False
         if not failure_reason:
             failure_reason = f"--headless template validation failed: {headless_detail}"
+
+    # Fold the teardown verification (Step 4) into the verdict. A leaked IAM
+    # pre-stack or managed policy is a per-account quota consumed, so the
+    # failure it produces surfaces at an unrelated deploy days later with
+    # nothing to connect it back — which is why this is a run failure and not a
+    # warning. A warning-level line is exactly what three runs' orphaned
+    # policies, one of them from a run that passed, accumulated behind.
+    teardown_findings = (result or {}).get("teardown", {}).get("findings") or []
+    if teardown_findings:
+        stack_success = False
+        detail = "; ".join(teardown_findings)
+        print(f"[{stack_name}] ❌ IAM teardown NOT verified: {detail}")
+        if not failure_reason:
+            failure_reason = f"IAM teardown not verified: {detail}"
 
     # Step 5: Print the deterministic consolidated status table FIRST (always
     # renders, Bedrock or not — the GitLab log needs a reliable "every test +

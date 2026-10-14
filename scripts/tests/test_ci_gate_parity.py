@@ -68,6 +68,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -1388,4 +1389,290 @@ def test_the_integration_pytest_tier_runs_in_no_ci() -> None:
         f"({offenders}). That is a real improvement, but the "
         "`test-integration-all` entry in GATES_DELIBERATELY_OUT_OF_CI says the "
         "opposite — rewrite it, and delete this test or invert it."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# per-job toolchains: a suite's inputs have to reach the job that runs it,
+# before the step that runs it
+# --------------------------------------------------------------------------- #
+
+#: The ``make`` targets through which a CI job reaches ``scripts/tests``, and so
+#: ``scripts/tests/test_ui_test_discovery.py``, whose three calibrations consult the
+#: installed Vitest. ``test-packages-cicd`` runs that suite directly;
+#: ``coverage-all-cicd`` re-runs it in order to measure it, which drags the same
+#: toolchain requirement into a job whose name and ``script:`` block say nothing
+#: about it. Both spellings are listed because either one alone would leave a job
+#: that runs the suite outside the universe below.
+SCRIPTS_SUITE_TARGETS = ("test-packages-cicd", "coverage-all-cicd")
+
+#: The composite-action input by which a GitHub job asks for the UI's npm
+#: dependencies. GitHub Actions has no YAML anchors, so the install itself lives in
+#: ``.github/actions/python-env/action.yml`` and the job's side of it is this input
+#: — which is a string, and proves nothing on its own. That is why
+#: :func:`test_the_github_ui_deps_input_actually_installs_the_dependencies` is a
+#: separate assertion rather than a clause of the one before it.
+UI_DEPS_INPUT = "ui-deps"
+
+
+def _gitlab_job_commands() -> dict[str, list[str]]:
+    """``{job name: its before_script + script}``, in order, merge keys resolved.
+
+    A list rather than one blob because the order is part of what is asserted: an
+    install that lands after the step it is installing for is not an install. And
+    parsed rather than sliced out of the text by indentation, because a job's
+    toolchain arrives through a merge key (``<<: *fast_check_job``) as readily as
+    through its own lines, and a text slice cannot follow one.
+    """
+    loaded = yaml.safe_load(GITLAB.read_text(encoding="utf-8"))
+    jobs: dict[str, list[str]] = {}
+    for name, body in loaded.items():
+        if not isinstance(body, dict) or "script" not in body:
+            continue
+        jobs[name] = [
+            str(line)
+            for line in list(body.get("before_script") or [])
+            + list(body.get("script") or [])
+        ]
+    return jobs
+
+
+def _github_job_steps() -> dict[str, list[str]]:
+    """``{job name: one string per step}``, in order.
+
+    A step contributes either its shell text or, when it ``uses`` a composite
+    action **in this repository**, a rendering of the inputs it passed — because
+    that is how a GitHub job asks for a toolchain. Reading only the shell would
+    report the UI dependencies as missing from every job while they were being
+    installed, which is the false-alarm direction :func:`_github_ci_text` was
+    written about; reading only the inputs would accept one no action honours,
+    which is the assertion after this one.
+    """
+    loaded = yaml.safe_load(GITHUB_TESTS.read_text(encoding="utf-8"))
+    jobs: dict[str, list[str]] = {}
+    for name, body in (loaded.get("jobs") or {}).items():
+        rendered: list[str] = []
+        for step in body.get("steps") or []:
+            uses = str(step.get("uses", ""))
+            if uses.startswith("./"):
+                passed = " ".join(
+                    f"{key}={value}" for key, value in (step.get("with") or {}).items()
+                )
+                rendered.append(f"uses {uses} with {passed}")
+            else:
+                rendered.append(str(step.get("run", "")))
+        jobs[name] = rendered
+    return jobs
+
+
+def _installs_the_ui_deps(command: str) -> bool:
+    """Does ``command`` install the UI's npm dependencies?
+
+    Either spelling counts: ``npm ci`` run against ``src/ui``, or
+    ``ui-deps=true`` passed to a composite action in this repository. One line has
+    to carry both halves of the first, so a ``cd src/ui`` in one command and an
+    ``npm ci`` in an unrelated one do not add up to an install. Run through
+    :func:`_uncommented` first — a commented-out install reads to a substring
+    search exactly like a live one, which is the first of the escapes
+    ``scripts/tests/test_ui_test_discovery.py`` documents against itself.
+    """
+    for line in _uncommented(command).splitlines():
+        # `src/ui` as a whole path element, so a neighbouring directory does not
+        # read as the UI: `cd src/ui-staging && npm ci` contains `src/ui` as a
+        # substring and installs this suite nothing. (`src/ui/` still matches.)
+        if "npm ci" in line and re.search(r"src/ui(?![\w-])", line):
+            return True
+        if line.lstrip().startswith("uses ./") and f"{UI_DEPS_INPUT}=true" in line:
+            return True
+    return False
+
+
+def _runs_the_scripts_suite(command: str) -> bool:
+    return any(_invokes(_uncommented(command), t) for t in SCRIPTS_SUITE_TARGETS)
+
+
+def _first_index(commands: list[str], predicate) -> int | None:
+    return next((i for i, c in enumerate(commands) if predicate(c)), None)
+
+
+def _ci_jobs_running_the_scripts_suite() -> dict[str, dict[str, list[str]]]:
+    """``{config name: {job name: ordered commands}}`` for jobs running the suite.
+
+    Derived from the ``make`` targets rather than listed by job name, so a third
+    job that starts running the suite is covered the day it is added rather than
+    the day somebody remembers a list.
+    """
+    out: dict[str, dict[str, list[str]]] = {}
+    for label, jobs in (
+        (GITLAB.name, _gitlab_job_commands()),
+        (GITHUB_TESTS.name, _github_job_steps()),
+    ):
+        out[label] = {
+            name: commands
+            for name, commands in jobs.items()
+            if any(_runs_the_scripts_suite(c) for c in commands)
+        }
+    return out
+
+
+@pytest.mark.unit
+def test_every_ci_job_running_this_suite_installs_the_ui_deps() -> None:
+    """A job that runs ``scripts/tests`` installs the UI's npm dependencies first.
+
+    ``scripts/tests/test_ui_test_discovery.py`` holds hand-written copies of
+    Vitest's file-naming convention — the twelve extensions ``?(c|m)[jt]s?(x)``
+    expands to, and ``defaultInclude`` itself — and those literals are the *input*
+    to its gate assertions: the file set it calls the universe is derived from
+    them. Three assertions calibrate them against the installed Vitest, and those
+    three need ``src/ui/node_modules``.
+
+    Until #1390 no job that ran that suite had it. ``node`` was on the runner for
+    basedpyright and the UI's dependencies were installed in a different job, so
+    the calibrations skipped — on **both** platforms, in all four jobs — and a skip
+    exits 0. Nothing escalated, and the literals went unchecked against the tool
+    they describe for as long as that lasted. A Vitest upgrade broadening its own
+    convention is the live case: the gate would keep asserting against the stale
+    expansion, pass, and quietly stop covering the new spelling, which is the exact
+    failure that module was written to prevent.
+
+    Both platforms at once, because giving one a toolchain and not the other is the
+    asymmetry this module exists for, and it has already cost ``package_tests`` a
+    red run once — see the toolchain notes in ``.gitlab-ci.yml``.
+
+    **And in that order.** A ``cd src/ui && npm ci`` that sits after the step
+    running the suite is a step that looks exactly like a fix and is not one: the
+    install happens, the job's log shows it, and the suite that needed it has
+    already skipped past. Presence alone cannot tell the two apart.
+    """
+    discovered = _ci_jobs_running_the_scripts_suite()
+
+    # Both platforms are read, asserted by NAME rather than by iterating whatever
+    # the dict happens to hold. A per-platform loop over the keys cannot see a
+    # platform that is not a key: dropping one of the two pairs in
+    # _ci_jobs_running_the_scripts_suite leaves this test green over the other
+    # side alone, which is a parity test that has stopped comparing — measured as
+    # a surviving mutant, not imagined.
+    assert set(discovered) == {GITLAB.name, GITHUB_TESTS.name}, (
+        f"this test read {sorted(discovered)}, not both CI configurations. Parity "
+        "is the claim; one side alone cannot carry it."
+    )
+
+    # Non-vacuity, per platform: a side whose jobs are not found cannot have an
+    # offender, so the loop below would pass by reading nothing.
+    for platform, jobs in discovered.items():
+        assert jobs, (
+            f"no job in {platform} was found running any of {SCRIPTS_SUITE_TARGETS}. "
+            "Either the suite has stopped running there — which "
+            "test_gate_runs_in_both_cis is the gate for — or it is invoked in a form "
+            "this discovery cannot see, in which case fix the discovery rather than "
+            "the expectation: with an empty universe this test reports nothing."
+        )
+
+    missing: list[str] = []
+    late: list[str] = []
+    for platform, jobs in discovered.items():
+        for name, commands in jobs.items():
+            installs = _first_index(commands, _installs_the_ui_deps)
+            runs = _first_index(commands, _runs_the_scripts_suite)
+            if installs is None:
+                missing.append(f"{platform}: job `{name}`")
+            elif runs is not None and installs > runs:
+                late.append(
+                    f"{platform}: job `{name}` (installs at step {installs}, runs "
+                    f"the suite at step {runs})"
+                )
+
+    assert not missing, (
+        "these CI jobs run scripts/tests without installing the UI's npm "
+        "dependencies, so test_ui_test_discovery.py's three calibrations cannot run "
+        "there:\n  " + "\n  ".join(missing) + "\n\n"
+        "On GitLab add `cd src/ui && npm ci --prefer-offline --no-audit && cd ../..` "
+        "to the job's before_script, with the src/ui/node_modules cache block the "
+        f'other jobs declare. On GitHub pass `{UI_DEPS_INPUT}: "true"` to the '
+        "python-env composite action. That module now FAILS rather than skips when "
+        "it finds them missing under CI, so such a job is red rather than quietly "
+        "incomplete — but the remedy is the dependencies, not relaxing it back to a "
+        "skip (#1390)."
+    )
+    assert not late, (
+        "these CI jobs install the UI's npm dependencies only AFTER the step that "
+        "runs scripts/tests, which is the same as not installing them as far as the "
+        "suite is concerned:\n  " + "\n  ".join(late)
+    )
+
+
+@pytest.mark.unit
+def test_the_github_ui_deps_input_actually_installs_the_dependencies() -> None:
+    """The input the assertion above accepts has to do something.
+
+    ``ui-deps: "true"`` in a workflow is a string handed to a composite action. If
+    no step in that action is conditioned on it, or the step it is conditioned on
+    installs nothing, the assertion above would read the request and call it
+    satisfied — a gate measuring an intention rather than an effect, which is the
+    shape of defect this module's docstring is about.
+
+    Composite actions are globbed rather than named, so the input may be honoured
+    by whichever of them the jobs use.
+    """
+    actions = sorted(GITHUB_ACTIONS_DIR.glob("*/action.yml"))
+    assert actions, (
+        f"no composite action found under {GITHUB_ACTIONS_DIR.name}, so this test "
+        "read nothing"
+    )
+
+    requested = sorted(
+        name
+        for name, commands in _github_job_steps().items()
+        if any(
+            c.lstrip().startswith("uses ./") and f"{UI_DEPS_INPUT}=true" in c
+            for c in commands
+        )
+    )
+    # The value the jobs actually pass, which the honouring condition below has to
+    # be the condition FOR. Without this the check accepts any condition that
+    # merely mentions the input: `if: inputs.ui-deps == 'yes'` names it, installs
+    # nothing for a job passing "true", and survived this test as written. Nothing
+    # here evaluates a GitHub expression — that is a language, not a string — but
+    # requiring the passed value to appear in the condition is enough to tell a
+    # live comparison from one that can never be true.
+    passed_value = "true"
+    # Deliberately conditional, and deliberately NOT guarded by `assert requested`.
+    # The claim here is "an input that is passed must do something", which is
+    # vacuous when nothing passes it — and in that state the assertion above is the
+    # one that fails, because it requires every suite-running job to install the
+    # dependencies by SOME route. Demanding a non-empty `requested` here would
+    # instead demand that GitHub use the input route specifically, so an inline
+    # `cd src/ui && npm ci` in the job — which installs them perfectly well, and is
+    # how `ui_tests` does it — would be reported as a defect. The two assertions
+    # together leave no gap: this one cannot be satisfied by an inert input, and
+    # that one cannot be satisfied by no input at all.
+    if not requested:
+        return
+
+    honouring: list[str] = []
+    for action in actions:
+        loaded = yaml.safe_load(action.read_text(encoding="utf-8"))
+        # The input has to be DECLARED as well as tested. An undeclared input
+        # passed through `with:` is a warning on GitHub rather than an error, and
+        # `inputs.ui-deps` then evaluates to the empty string — so the condition
+        # below is false, nothing is installed, and the workflow still runs. The
+        # suite catches that at CI time now (it fails rather than skips), but an
+        # offline gate that can see it should.
+        if UI_DEPS_INPUT not in (loaded.get("inputs") or {}):
+            continue
+        for step in (loaded.get("runs") or {}).get("steps") or []:
+            condition = str(step.get("if", ""))
+            if (
+                UI_DEPS_INPUT in condition
+                and f"'{passed_value}'" in condition
+                and _installs_the_ui_deps(str(step.get("run", "")))
+            ):
+                honouring.append(action.parent.name)
+                break
+    assert honouring, (
+        f'{requested} pass `{UI_DEPS_INPUT}: "{passed_value}"`, but no composite '
+        f"action under {GITHUB_ACTIONS_DIR.name} has a step whose `if:` tests that "
+        f"input against '{passed_value}' AND runs `npm ci` in src/ui. The input is "
+        "therefore inert, and those jobs run scripts/tests with no UI dependencies "
+        "while appearing to ask for them."
     )

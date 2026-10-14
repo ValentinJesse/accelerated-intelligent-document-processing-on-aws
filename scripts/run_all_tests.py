@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from first_party_paths import pinned_environment  # noqa: E402
+from hermetic_aws_env import hermetic_aws_env  # noqa: E402
 from standing_failures import (  # noqa: E402
     BaselineError,
     compare,
@@ -473,7 +474,31 @@ def run_gate(roots: list[str], integration: bool) -> int:
     # that tree, and reports green while doing it, because the package it imported
     # is a real revision of this one (#1094). Built once: the value is absolute and
     # identical for every root.
+    #
+    # Then strip the machine's AWS environment, exactly as `$(HERMETIC_AWS)` strips
+    # it from every pytest invocation written as a `make` recipe. This runner is what
+    # `make test` invokes and it went through no such wrapper, so the whole-suite
+    # local gate was exactly as exposed as a bare `pytest` while every CI recipe was
+    # protected — `make test` was not equivalent to what CI runs, in a dimension
+    # nobody was tracking. Measured over the registered roots in a bare environment,
+    # with botocore's real send replaced by a recorder that raises: requests that
+    # would have been sent reached CloudWatch `PutMetricData`, DynamoDB, S3 and
+    # Secrets Manager, signed with whatever credentials the machine could resolve,
+    # and most of them were writes into whichever account the developer is signed in
+    # to. Issue #1398.
+    #
+    # `-m "not integration"` is not a substitute: every escaping request came from a
+    # test nobody had marked, which is the whole reason they escaped.
+    #
+    # NOT under `--integration`, and that split is the same one `make/hermetic_aws.mk`
+    # draws between `$(PYTEST_HERMETIC)` and `$(PYTEST_FIRST_PARTY)`: the
+    # integration-marked suites exist to call real AWS, so stripping the credentials
+    # and the region would remove the thing they test. The pin above applies to both,
+    # because needing real credentials is not a reason to lose track of which
+    # checkout is under test.
     child_env = pinned_environment(REPO_ROOT)
+    if not integration:
+        child_env = hermetic_aws_env(child_env)
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
