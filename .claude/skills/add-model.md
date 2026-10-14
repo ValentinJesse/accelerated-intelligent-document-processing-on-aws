@@ -107,6 +107,14 @@ Cross-check against the file map below.
 - [ ] `src/lambda/update_configuration/index.py` — `US_ONLY_MODELS` (or EU
       filtering). Keep explicit sets complete even when a `startswith` fallback
       covers the new ID.
+- [ ] `src/lambda/update_configuration/index.py` — Canada: if ca-central-1 has
+      no inference profile and no in-region hosting for the new ID (check with
+      `aws bedrock list-inference-profiles --region ca-central-1 --type-equals
+      SYSTEM_DEFINED` and `aws bedrock list-foundation-models --region
+      ca-central-1`), add it to `CA_UNAVAILABLE_MODELS`; otherwise Canada
+      picklists offer it and it fails at inference. If it becomes a shipped
+      default that Canada cannot call, also add a one-way swap to
+      `CA_MODEL_MAPPINGS`.
 - [ ] `src/ui/src/constants/schemaConstants.ts` — dropdown `{label,value}` per
       model.
 - [ ] `src/ui/.../SchemaInspector.tsx` — any other hardcoded UI list.
@@ -125,8 +133,8 @@ Cross-check against the file map below.
 - [ ] `docs/*.md` — every feature doc that lists models: `openai-models.md` (or
       a new dedicated guide if materially different), `configuration.md`,
       `discovery.md`, `extraction-and-confidence.md`, `service-tiers.md`,
-      `web-ui.md`, `eu-region-model-support.md`, `policy-discovery.md`,
-      `idp-cli.md`, `cross-account-bedrock.md`.
+      `web-ui.md`, `eu-region-model-support.md`, `canada-region-model-support.md`,
+      `policy-discovery.md`, `idp-cli.md`, `cross-account-bedrock.md`.
 - [ ] `docs/README.md` — index link if a new doc was added.
 - [ ] `CHANGELOG.md` — `[Unreleased]` entry stating what IS and IS NOT supported
       (regions, caching, GovCloud, agentic/discovery).

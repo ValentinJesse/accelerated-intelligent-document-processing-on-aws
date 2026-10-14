@@ -1273,6 +1273,23 @@ pricing:
         price: "5.0E-6"
 
   # ---------------------------------------------------------------------------
+  # Amazon Bedrock Models - Amazon Nova (Canada)
+  # ---------------------------------------------------------------------------
+  # Canada (Central) rates from the AWS Price List API (usagetype CAN1-NovaLite-*,
+  # retrieved 2026-10-11); cache writes billed at the input rate, as the US/EU
+  # Nova rows.
+  - name: bedrock/ca.amazon.nova-lite-v1:0
+    units:
+      - name: inputTokens
+        price: "6.4E-8"
+      - name: outputTokens
+        price: "2.56E-7"
+      - name: cacheReadInputTokens
+        price: "1.6E-8"
+      - name: cacheWriteInputTokens
+        price: "6.4E-8"
+
+  # ---------------------------------------------------------------------------
   # Amazon Bedrock Models - Global/Cross-Region
   # ---------------------------------------------------------------------------
   # Same rates as bedrock/us.amazon.nova-pro-v1:0 — the global inference profile
