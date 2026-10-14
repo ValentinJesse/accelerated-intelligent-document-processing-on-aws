@@ -186,6 +186,56 @@ pricing:
   # ---------------------------------------------------------------------------
   # Amazon Bedrock Models - Amazon Nova (US)
   # ---------------------------------------------------------------------------
+  #
+  # ⚠️ Every Nova row in this file — us., eu. and global., Lite / Pro / 2-Lite and
+  # the priority and flex tiers — prices cacheWriteInputTokens at "0.0", and that
+  # is a reading of AWS's price list rather than a convention. Nova charges for
+  # cache READS and not for the write that populates the cache, which is the
+  # opposite of Claude (1.25x input) and the reason the two families must not
+  # share a multiplier. Every cache-write dimension AWS publishes for a Nova model
+  # is exactly $0.0000000000, in every region and in all three service tiers
+  # (standard, flex, priority) — read from the public AmazonBedrock offer file,
+  # which is the same source `bedrock_cache_dimension_digest.py` digests and where
+  # Nova Lite, Nova Pro, Nova Micro and Nova 2.0 Lite each carry exactly ONE
+  # distinct cache-write rate: zero. These rows used to charge the full input
+  # rate.
+  #
+  # The rate is only half the fact, and the other half is what makes a zero
+  # correct rather than merely cheap: `cacheWriteInputTokens` is DISJOINT from
+  # `inputTokens` in Bedrock's Converse usage block, so a zero rate drops a charge
+  # AWS does not make instead of discounting one it does. Measured on
+  # us.amazon.nova-lite-v1:0, same content, nonce held fixed (see
+  # tests/unit/reporting/test_nova_cache_write_pricing.py, which carries the usage
+  # blocks as a fixture and prices them):
+  #
+  #   no cachePoint     inputTokens=39011                      totalTokens=39013
+  #   cachePoint, cold  inputTokens=10    cacheWrite=39001     totalTokens=39013
+  #   cachePoint, warm  inputTokens=10    cacheRead=39001      totalTokens=39013
+  #
+  # `inputTokens` falls to a 10-token residual and the 39,001 prefix tokens move
+  # into the cache unit; totalTokens is invariant and equals the sum of the four
+  # units in all three calls. So the units partition the prompt exactly, and the
+  # over-report the old rate produced was cache-write volume x the input rate —
+  # which is the entire input cost of the prefix, meaning a cold cached call was
+  # reported at exactly what an uncached one would have cost and the write-side
+  # saving of prompt caching did not appear in the cost report at all. Had the
+  # units been INCLUSIVE the same entry would have been a double-count and the
+  # remedy would have been in the metering rather than here; that is why this was
+  # measured and not reasoned about.
+  #
+  # Priced at "0.0" rather than omitted and registered in
+  # `idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS`, deliberately. That
+  # register answers "why does this entry OMIT a unit", and these entries do not
+  # omit one — AWS publishes a dimension here, at zero, and an explicit rate
+  # states that where `priced_by_aws=False` would flatten "published at $0.00"
+  # and "no such dimension" into one flag. It is also the only option that reaches
+  # the whole class: the register's price-list premise identifies a model by
+  # matching the entry's own input and output rates against the committed digest,
+  # the digest excludes the flex and priority variants on purpose, and 7 of these
+  # 14 rows therefore have an empty candidate set and cannot be registered without
+  # widening a shared gate's exemption. A zero rate reaches all 14 identically,
+  # and `test_every_selectable_model_prices_all_four_token_units` wants all four
+  # units present on a selectable model anyway.
   - name: bedrock/us.amazon.nova-lite-v1:0
     units:
       - name: inputTokens
@@ -195,7 +245,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "1.5E-8"
       - name: cacheWriteInputTokens
-        price: "6.0E-8"
+        price: "0.0"
   
   - name: bedrock/us.amazon.nova-pro-v1:0
     units:
@@ -206,7 +256,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "2.0E-7"
       - name: cacheWriteInputTokens
-        price: "8.0E-7"
+        price: "0.0"
   
   - name: bedrock/us.amazon.nova-2-lite-v1:0
     units:
@@ -217,7 +267,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "7.5E-8"
       - name: cacheWriteInputTokens
-        price: "3.0E-7"
+        price: "0.0"
   
   - name: bedrock/us.amazon.nova-2-lite-v1:0:priority
     units:
@@ -228,7 +278,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "1.31E-7"
       - name: cacheWriteInputTokens
-        price: "5.25E-7"
+        price: "0.0"
   
   - name: bedrock/us.amazon.nova-2-lite-v1:0:flex
     units:
@@ -239,7 +289,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "3.75E-8"
       - name: cacheWriteInputTokens
-        price: "1.5E-7"
+        price: "0.0"
   
   # Nova Premier reached end of life on 2026-09-14 and is no longer selectable
   # (removed from every model enum). This entry stays because pricing lookup is
@@ -894,7 +944,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "1.9E-8"
       - name: cacheWriteInputTokens
-        price: "7.8E-8"
+        price: "0.0"
   
   - name: bedrock/eu.amazon.nova-pro-v1:0
     units:
@@ -905,7 +955,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "2.6E-7"
       - name: cacheWriteInputTokens
-        price: "1.0E-6"
+        price: "0.0"
   
   - name: bedrock/eu.amazon.nova-2-lite-v1:0
     units:
@@ -916,7 +966,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "9.75E-8"
       - name: cacheWriteInputTokens
-        price: "3.9E-7"
+        price: "0.0"
 
   # EU Priority / Flex service tiers for eu.amazon.nova-2-lite. Both IDs are
   # template AllowedValues AND members of CACHEPOINT_SUPPORTED_MODELS, so they do
@@ -938,7 +988,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "1.71E-7"
       - name: cacheWriteInputTokens
-        price: "6.83E-7"
+        price: "0.0"
 
   - name: bedrock/eu.amazon.nova-2-lite-v1:0:flex
     units:
@@ -949,7 +999,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "4.88E-8"
       - name: cacheWriteInputTokens
-        price: "1.95E-7"
+        price: "0.0"
 
   # ---------------------------------------------------------------------------
   # Amazon Bedrock Models - Anthropic Claude (EU)
@@ -1249,7 +1299,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "2.0E-7"
       - name: cacheWriteInputTokens
-        price: "8.0E-7"
+        price: "0.0"
 
   - name: bedrock/global.amazon.nova-2-lite-v1:0
     units:
@@ -1260,7 +1310,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "7.5E-8"
       - name: cacheWriteInputTokens
-        price: "3.0E-7"
+        price: "0.0"
   
   - name: bedrock/global.amazon.nova-2-lite-v1:0:priority
     units:
@@ -1271,7 +1321,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "1.31E-7"
       - name: cacheWriteInputTokens
-        price: "5.25E-7"
+        price: "0.0"
   
   - name: bedrock/global.amazon.nova-2-lite-v1:0:flex
     units:
@@ -1282,7 +1332,7 @@ pricing:
       - name: cacheReadInputTokens
         price: "3.75E-8"
       - name: cacheWriteInputTokens
-        price: "1.5E-7"
+        price: "0.0"
   
   - name: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
     units:

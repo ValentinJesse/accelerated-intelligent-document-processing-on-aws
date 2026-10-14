@@ -88,6 +88,7 @@ import api_security_cases as sec  # noqa: E402
 from rbac_common import (  # noqa: E402
     AWS_BIN,
     aws,
+    cognito_groups_for_user,
     create_cognito_user,
     delete_cognito_user,
     enable_admin_auth,
@@ -97,7 +98,37 @@ from rbac_common import (  # noqa: E402
     restore_auth_flows,
 )
 
-ROLES = ["Admin", "Author", "Viewer", "Reviewer"]
+#: Every Cognito group `template.yaml` creates, which is the population the matrix
+#: has to report over: it reports a verdict per (operation, role) cell, so a role
+#: the deployment has and this list does not is a row of the policy that nothing
+#: drives while the report reads complete.
+#:
+#: `Annotator` was the missing one, and it is the role whose access is scoped PER
+#: OBJECT (`allowedTestSets` — the only such role), so the seven test-set
+#: operations that admit it had no live cell at all. See `_seed_annotator_scope`
+#: for why driving it needs a scope seeded first. Issue #1065.
+ROLES = ["Admin", "Author", "Viewer", "Reviewer", "Annotator"]
+#: A caller holding NO Cognito group. Not a role and deliberately not in `ROLES`:
+#: no `AWS::Cognito::UserPoolGroup` has this name, which is the whole point — every
+#: group-restricted policy must refuse it, `ANY_GROUP` must refuse it (that is what
+#: the sentinel exists to say), `IAM_ONLY` must refuse it, and the 8 `ANY`
+#: operations must admit it, since they consult authentication only.
+#:
+#: It is a principal the deployment really produces rather than a synthetic one:
+#: with `AllowedSignUpEmailDomain` set the user pool permits self-service sign-up,
+#: so anyone at that domain can register and hold a valid token with an empty
+#: `cognito:groups` claim, and a half-finished onboarding leaves the same account
+#: behind. `classify()` needs no new branch for it — a name no group list contains
+#: takes the "disallowed role" arm, where the assertion is "refused", which is the
+#: polarity this harness is already built around.
+NO_GROUP = "NoGroup"
+#: Every principal the group matrix drives, in report order. The role users plus the
+#: groupless one; the unauthenticated cell is driven separately inside the matrix.
+MATRIX_PRINCIPALS = [*ROLES, NO_GROUP]
+#: Named because this role needs setup no other role needs — a seeded
+#: `allowedTestSets` row — so the seeding and the matrix must agree on the spelling.
+ANNOTATOR_ROLE = "Annotator"
+assert ANNOTATOR_ROLE in ROLES, "the Annotator row is seeded but never driven"
 # A second, independent user for indirect-object-reference (IDOR) tests: proves
 # User B cannot reach User A's data. Created as an Author (a normal, non-admin
 # authenticated user).
@@ -141,8 +172,105 @@ def load_expectations():
     with EXPECTATIONS_PATH.open() as fh:
         spec = yaml.safe_load(fh)
     ops = spec["operations"]
+    _reject_unknown_operation_keys(ops)
     _resolve_any_group(ops)
+    _check_object_scoped_roles(ops)
     return ops, (spec.get("known_gaps") or {})
+
+
+def _check_object_scoped_roles(ops):
+    """``object_scoped_roles:`` must name a principal the operation ADMITS.
+
+    The key inverts a cell's assertion from "the group floor let this caller
+    through" to "the group floor let this caller through and a per-object control
+    then refused the object" (see :func:`classify_object_scoped`). Both readings
+    require the field-level policy to admit the role. Named on a role the policy
+    *excludes*, the cell would assert that the group floor is NOT what refuses a
+    caller the group floor exists to refuse — the exact inversion of the property,
+    scored as a pass. Fatal before the first request, since no response can tell
+    the two apart afterwards.
+    """
+    bad = []
+    for field, cfg in ops.items():
+        declared = cfg.get("object_scoped_roles") or []
+        if not declared:
+            continue
+        if not isinstance(declared, list):
+            bad.append(f"{field}: object_scoped_roles must be a list, got {declared!r}")
+            continue
+        groups = cfg.get("groups")
+        for role in declared:
+            if role not in MATRIX_PRINCIPALS:
+                bad.append(
+                    f"{field}: object_scoped_roles names '{role}', which is not a "
+                    f"principal the matrix drives ({MATRIX_PRINCIPALS})"
+                )
+            elif not isinstance(groups, list) or role not in groups:
+                bad.append(
+                    f"{field}: object_scoped_roles names '{role}', but the "
+                    f"operation's policy is {groups!r}, which does not admit it — "
+                    "the cell would assert the opposite of the group floor's job"
+                )
+    if not bad:
+        return
+    for line in bad:
+        print(f"ERROR: {line}", file=sys.stderr)
+    sys.exit(2)
+
+
+#: Every key an operation entry may declare. The scanner already enforces this for
+#: the `function_url_endpoints:` section, with the reason spelled out there: each key
+#: is read by name, so a misspelling makes the setting VANISH rather than misfire,
+#: and `residual_gapp:` for `residual_gap:` was measured leaving that scan at zero
+#: failures while quietly dropping a gap from the register.
+#:
+#: The `operations:` section had no such check, and it carries keys that invert a
+#: cell's expected polarity — `object_scoped_roles` and `skip_allowed` both do — so a
+#: typo there turns an assertion into a different assertion with nothing printed.
+#: Fatal rather than a warning: this runs before any request, and continuing would
+#: report verdicts the file did not ask for.
+OPERATION_ENTRY_KEYS = frozenset(
+    {
+        "alias_of",
+        "args",
+        "conditional",
+        "enforced_in",
+        "groups",
+        "kind",
+        "known_gap",
+        "note",
+        "object_scoped_roles",
+        "ownership",
+        # Read by scan_api_rbac.py rather than here (documented intentional drift
+        # between the code's group set and the schema directive's). No operation
+        # declares it today, which is exactly why it has to be listed: a key only
+        # the other consumer reads is the one this check would otherwise reject.
+        "schema_groups",
+        "scope_checked",
+        "scope_enforced_in",
+        "scope_filtered",
+        "skip_allowed",
+    }
+)
+
+
+def _reject_unknown_operation_keys(ops):
+    """Fail before the first request if an operation declares a key nothing reads."""
+    bad = {
+        field: sorted(set(cfg) - OPERATION_ENTRY_KEYS)
+        for field, cfg in ops.items()
+        if isinstance(cfg, dict) and set(cfg) - OPERATION_ENTRY_KEYS
+    }
+    if not bad:
+        return
+    for field, keys in sorted(bad.items()):
+        print(
+            f"ERROR: {field} declares unknown key(s) {keys} in "
+            f"{EXPECTATIONS_PATH.name} — a key read by name is silently ignored "
+            f"when it is misspelled (known: {sorted(OPERATION_ENTRY_KEYS)})",
+            file=sys.stderr,
+        )
+    sys.exit(2)
 
 
 def _resolve_any_group(ops):
@@ -192,20 +320,165 @@ def _resolve_any_group(ops):
     print(f"  {ANY_GROUP} resolves to {names}")
 
 
-def setup_users(ctx):
+def setup_users(ctx, ops=None):
     for role in ROLES:
         create_cognito_user(ctx, test_email(role), role, TEST_PW)
+    # A caller in NO group. `group=None` is what skips the add-to-group call; the
+    # membership is read back below, because "created" and "in no group" are two
+    # separate Cognito API calls and this principal's entire value is the second.
+    create_cognito_user(ctx, test_email(NO_GROUP), None, TEST_PW)
     # Scoped user: an Author in Cognito, restricted via UsersTable.
     create_cognito_user(ctx, test_email(SCOPED), "Author", TEST_PW)
     # Second independent user (Author) for IDOR tests — a distinct Cognito sub so
     # "User B cannot reach User A's data" is a real cross-identity check.
     create_cognito_user(ctx, test_email(USER_B), "Author", TEST_PW)
+    _verify_group_memberships(ctx)
     _seed_scoped_user(ctx)
+    _seed_annotator_scope(ctx, ops)
     enable_admin_auth(ctx)
     print(
         f"Created test users: {', '.join(test_email(r) for r in ROLES)}, "
+        f"{test_email(NO_GROUP)} (no group), "
         f"{test_email(SCOPED)} (scoped to [{SCOPE_VERSION}])"
     )
+
+
+def _verify_group_memberships(ctx):
+    """Read every matrix principal's group membership back out of the pool.
+
+    The matrix reports a verdict per (operation, role) cell and names the role in
+    every row, so the one assumption it cannot afford is that a user is in the group
+    its name says. ``admin-add-user-to-group`` is a separate call from
+    ``admin-create-user`` and this harness tolerates a pre-existing user, so a
+    leftover account from an interrupted run — or a groupless user that quietly
+    acquired a group — would have the whole row reported under the wrong role.
+
+    The groupless principal is the one that matters most, and it fails in the
+    direction that is otherwise invisible: a ``NoGroup`` user holding, say,
+    ``Viewer`` is refused by nothing it should be refused by, every
+    ``ANY_GROUP`` cell reads as correctly admitted, and the run is green while
+    asserting the opposite of what it claims.
+
+    Fatal, not a warning. Continuing would publish a matrix whose row labels are
+    wrong, which is worse than not running.
+    """
+    wrong = []
+    for role in ROLES:
+        held = cognito_groups_for_user(ctx, test_email(role))
+        if held != [role]:
+            wrong.append(f"{role} user holds {held or 'no group'}, expected ['{role}']")
+    held = cognito_groups_for_user(ctx, test_email(NO_GROUP))
+    if held:
+        wrong.append(f"{NO_GROUP} user holds {held}, expected no group at all")
+    if wrong:
+        print("ERROR: test-user group membership is not what the matrix assumes:")
+        for line in wrong:
+            print(f"  {line}")
+        raise RuntimeError(
+            "test-user group membership does not match the matrix's row labels"
+        )
+    print(f"  group membership verified for {', '.join(MATRIX_PRINCIPALS)}")
+
+
+def test_set_ids_in_play(ops):
+    """Every ``testSetId`` the matrix will send, from the expectations file.
+
+    Derived rather than written down, so the Annotator's seeded scope is exactly the
+    set of ids the requests name. Writing the ids here instead would leave the scope
+    and the arguments free to drift: change an operation's ``testSetId`` in the YAML
+    and the seeded Annotator stops being scoped to the set it addresses, which turns
+    seven cells from "the group floor admitted this caller" into "a per-object
+    control refused the object" with no diff anywhere near the seeding.
+
+    Reads nested ``input:`` maps too, because four of these operations take their id
+    inside one.
+    """
+    found = set()
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "testSetId" and isinstance(value, str) and value:
+                    found.add(value)
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    for cfg in (ops or {}).values():
+        _walk((cfg or {}).get("args"))
+    return sorted(found)
+
+
+def _seed_annotator_scope(ctx, ops):
+    """Give the Annotator an ``allowedTestSets`` covering the ids the matrix sends.
+
+    ``assert_can_access_test_set`` requires an **explicit** scope for an Annotator —
+    an Annotator with none is denied everything rather than granted everything — so
+    an unseeded Annotator is refused by a PER-OBJECT control on all seven test-set
+    operations it is admitted to. Those cells exist to assert that the group floor
+    admits the role; a per-object refusal means they measured something else, which
+    `classify()` correctly scores as a cell that did not run (#1308).
+
+    The remedy #1308 prescribes is to give the operation an argument the per-object
+    control admits, so the group floor is what answers. Here the argument is fixed
+    (a test-set id that does not exist, shared with every other role's cell) and the
+    scope is the movable half, so this seeds the scope instead: the Annotator is
+    assigned exactly the ids the requests name. The sets still do not exist, so each
+    operation then answers its own 404 — the same conclusive not-found Admin and
+    Author get, and the same cell semantics as every other role.
+
+    This does NOT make the per-object control untested: `allowedTestSets` enforcement
+    is asserted directly in `lib/idp_common_pkg/tests/unit/test_testset_scope.py`, and
+    the three review operations keep driving it live through `object_scoped_roles`,
+    where the refusal is the expected answer.
+
+    ⚠️ The row carries no ``allowedConfigVersions``. Adding one would scope this
+    caller on a second, unrelated axis and turn its `getConfigVersion` cell into a
+    config-scope assertion; absence means "unrestricted" there, which is what every
+    ordinary user has.
+    """
+    if not ctx.get("users_table"):
+        print("WARN: UsersTable not found — Annotator test-set scope not seeded.")
+        return
+    ids = test_set_ids_in_play(ops)
+    if not ids:
+        print("WARN: no testSetId in the expectations file — nothing to scope to.")
+        return
+    uid = f"rbac-test-annotator-{uuid.uuid4()}"
+    email = test_email(ANNOTATOR_ROLE)
+    item = {
+        "PK": {"S": f"USER#{uid}"},
+        "SK": {"S": f"USER#{uid}"},
+        "userId": {"S": uid},
+        "email": {"S": email},
+        "persona": {"S": ANNOTATOR_ROLE},
+        "status": {"S": "active"},
+        "allowedTestSets": {"L": [{"S": i} for i in ids]},
+    }
+    sub = _cognito_sub(ctx, email)
+    if sub:
+        # Recorded so the row matches what user_management writes. No SUB# pointer
+        # is written: `get_allowed_test_sets` resolves through EmailIndex only, and a
+        # pointer carries no `allowedTestSets`, so an emailless pointer would be
+        # litter and an email-bearing one could be returned in the row's place.
+        item["cognitoSub"] = {"S": sub}
+    # Key recorded BEFORE the write, so a put that fails halfway still leaves
+    # teardown something to delete. This is a live stack's own table.
+    ctx["_annotator_scope_keys"] = [
+        {"PK": {"S": f"USER#{uid}"}, "SK": {"S": f"USER#{uid}"}}
+    ]
+    aws(
+        "dynamodb",
+        "put-item",
+        "--table-name",
+        ctx["users_table"],
+        "--item",
+        json.dumps(item),
+        region=ctx["region"],
+    )
+    print(f"  Annotator row USER#{uid} scoped to {ids}")
 
 
 def _cognito_sub(ctx, email):
@@ -308,13 +581,17 @@ def _seed_scoped_user(ctx):
     )
 
 
-def _recover_scoped_user_keys(ctx):
-    """Re-derive the scoped user's item keys from the table itself.
+def _recover_seeded_user_keys(ctx, email, *, with_pointer):
+    """Re-derive a seeded user's item keys from the table itself.
 
     ``--teardown-only`` (and a rerun after a killed process) gets a fresh ctx, so
-    nothing recorded what ``_seed_scoped_user`` wrote. The row is still findable by
-    the one thing that does not change between runs — the scoped user's email — and
-    it records the ``userId`` and the ``cognitoSub`` the two keys are built from.
+    nothing recorded what the seeding wrote. The row is still findable by the one
+    thing that does not change between runs — the seeded user's email — and it
+    records the ``userId`` and the ``cognitoSub`` the keys are built from.
+
+    ``with_pointer`` says whether this seeding also wrote a ``SUB#`` pointer. The
+    scoped user's does and the Annotator's does not, and asking for a pointer that
+    was never written would report a delete that removed nothing.
 
     Best effort: returns [] on any failure, since this runs in a teardown path.
     """
@@ -329,11 +606,11 @@ def _recover_scoped_user_keys(ctx):
             "--key-condition-expression",
             "email = :e",
             "--expression-attribute-values",
-            json.dumps({":e": {"S": test_email(SCOPED)}}),
+            json.dumps({":e": {"S": email}}),
             region=ctx["region"],
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"WARN: could not look up the scoped row to delete it: {exc}")
+        print(f"WARN: could not look up the seeded row for {email} to delete it: {exc}")
         return []
     keys = []
     for row in (resp or {}).get("Items") or []:
@@ -341,39 +618,78 @@ def _recover_scoped_user_keys(ctx):
         if uid:
             keys.append({"PK": {"S": f"USER#{uid}"}, "SK": {"S": f"USER#{uid}"}})
         sub = (row.get("cognitoSub") or {}).get("S")
-        if sub:
+        if sub and with_pointer:
             keys.append({"PK": {"S": f"SUB#{sub}"}, "SK": {"S": f"SUB#{sub}"}})
     return keys
 
 
+#: Every seeded UsersTable row this harness writes, and the ctx key it is recorded
+#: under. Teardown reads these first, because a recorded key works even when
+#: EmailIndex cannot be read; the sweep below is what catches everything else.
+_SEEDED_USER_ROWS = (
+    ("_scoped_user_keys", SCOPED),
+    ("_annotator_scope_keys", ANNOTATOR_ROLE),
+)
+
+#: Every address this harness owns. Teardown has to remove a UsersTable row for
+#: ALL of them, not only for the two it seeds, because **the matrix itself writes
+#: rows for the rest**: ``listUsers[Admin]`` runs ``sync_cognito_users_to_dynamodb``,
+#: which creates a row for every Cognito user then in the pool, and
+#: ``createUser[Admin]`` writes one directly. Deleting the Cognito user does not
+#: remove the row.
+#:
+#: Measured on a live stack rather than reasoned about: a run left rows for
+#: `admin`, `author`, `viewer`, `reviewer`, `userb`, `createusertarget` and the new
+#: groupless principal behind, four of them dated nearly a month earlier — so this
+#: has been accumulating one set per run in a shared account. The sweep is by
+#: ADDRESS rather than by a `test-rbac-` prefix scan, so it can only ever reach
+#: rows for principals named here.
+_OWNED_ADDRESS_ROLES = (*MATRIX_PRINCIPALS, SCOPED, USER_B, CREATED)
+
+
 def teardown_users(ctx):
-    for role in [*ROLES, SCOPED, USER_B, CREATED]:
+    # Every principal the matrix drives — including the groupless one, whose whole
+    # value is that it holds no group, and which is therefore the account a shared
+    # pool least wants left behind — plus the three the suites create.
+    for role in _OWNED_ADDRESS_ROLES:
         delete_cognito_user(ctx, test_email(role))
-    # Both items the seeding wrote: the USER# row and its SUB# pointer. Deleting
-    # only the row would leave a pointer in the live stack's UsersTable naming a row
-    # that no longer exists — harmless to the lookup, which falls through to the
-    # email leg, but still our litter in a shared account.
-    keys = ctx.get("_scoped_user_keys") or []
-    if ctx.get("users_table"):
-        if not keys:
-            keys = _recover_scoped_user_keys(ctx)
-        for key in keys:
-            subprocess.run(
-                [
-                    AWS_BIN,
-                    "dynamodb",
-                    "delete-item",
-                    "--table-name",
-                    ctx["users_table"],
-                    "--key",
-                    json.dumps(key),
-                    "--region",
-                    ctx["region"],
-                ],
-                capture_output=True,
-                text=True,
-            )
-    print(f"Deleted test users and {len(keys)} scoped UsersTable item(s).")
+    if not ctx.get("users_table"):
+        print("Deleted test users (no UsersTable resolved, so no rows swept).")
+        return
+    # Keys are collected before any delete, and de-duplicated, so the printed count
+    # is the number of distinct items aimed at rather than the number of calls.
+    keys = []
+    for ctx_key, _role in _SEEDED_USER_ROWS:
+        keys += ctx.get(ctx_key) or []
+    for role in _OWNED_ADDRESS_ROLES:
+        # `with_pointer=True` for every address: a swept row records a `cognitoSub`
+        # only if something wrote one, and deleting a key that does not exist is a
+        # DynamoDB no-op. Asking for it conditionally would mean knowing which
+        # writer produced each row, which teardown cannot know.
+        keys += _recover_seeded_user_keys(
+            ctx, test_email(role), with_pointer=True
+        )
+    unique = []
+    for key in keys:
+        if key not in unique:
+            unique.append(key)
+    for key in unique:
+        subprocess.run(
+            [
+                AWS_BIN,
+                "dynamodb",
+                "delete-item",
+                "--table-name",
+                ctx["users_table"],
+                "--key",
+                json.dumps(key),
+                "--region",
+                ctx["region"],
+            ],
+            capture_output=True,
+            text=True,
+        )
+    print(f"Deleted test users and {len(unique)} UsersTable item(s).")
 
 
 def get_token(ctx, role):
@@ -868,6 +1184,75 @@ def _refusal_is_a_group_refusal(status, et, in_band, control) -> Verdict:
     return Verdict(True, f"{status}", "PASS")
 
 
+def classify_object_scoped(role, status, et, in_band, control) -> Verdict:
+    """Judge a cell for a role the FIELD admits and a PER-OBJECT control refuses.
+
+    The cell exists because the ordinary remedy is unavailable. Everywhere else, an
+    allowed role refused by a per-object control is scored ``ERROR`` and the fix is
+    to give the operation an argument that control admits (#1308). The three review
+    operations cannot be given one: ``_assert_annotator_scope`` reads the named
+    document's ``TestSetId`` out of the tracking table, so the only admitting
+    argument is a document that exists and belongs to a set the caller is assigned —
+    which the matrix would then have Admin and Reviewer perform a real review
+    mutation against. Declining the cell instead would leave the role's own
+    enforcement with no live assertion, which is the defect #1065 is about.
+
+    So the polarity is declared, per operation, in ``object_scoped_roles:``, and the
+    assertion is **two-sided**. Both sides have to hold for a PASS:
+
+    * the call was **refused** — if it was not, a caller assigned to no document's
+      test set reached a review operation on an unassigned document, which is a
+      privilege escalation and the thing this cell is worth having for;
+    * the refusal was **not** ``api-group-floor`` — if it was, the field-level floor
+      refused a role the policy admits, i.e. the manifest no longer carries the role,
+      and the cell says so instead of reading a correct-looking 403 as a pass.
+
+    ⚠️ An **unlabelled** refusal is ``ERROR`` — a check that could not be run.
+    Without a label the two cases above are indistinguishable, so passing would mean
+    passing on a run that established neither. ``ERROR`` rather than ``FAIL``
+    because that is what is true, and it is no weaker: `hard_failures` counts both,
+    so the gate still goes red, and the report puts it under "Could not be run"
+    naming the remedy instead of reporting a deployment whose authorization is fine
+    as broken. A stack deployed before `authzControl` existed (#1308) labels nothing,
+    so every 403 on it arrives this way — which is a fact about the deployment, not
+    about its authorization.
+    """
+    why = inconclusive(status, et)
+    if why:
+        return Verdict(
+            False, f"INCONCLUSIVE: {why}", "ERROR", _inconclusive_gap(status)
+        )
+    if not _denied(status, et, in_band):
+        return Verdict(
+            False,
+            f"NOT REFUSED ({status}/{et}/{in_band}): the per-object control admitted "
+            f"a {role} the object is out of scope for",
+            "FAIL",
+            cell=f"OBJLEAK({status})",
+        )
+    if control == CONTROL_GROUP_FLOOR:
+        return Verdict(
+            False,
+            f"REFUSED BY THE GROUP FLOOR ({status}/{et}): the field-level floor "
+            f"refused {role}, a role this operation's policy admits — check the "
+            f"operation's entry in the dispatcher's required-groups manifest",
+            "FAIL",
+            cell=f"FLOOR({status})",
+        )
+    if control == CONTROL_UNLABELLED:
+        return Verdict(
+            False,
+            f"INCONCLUSIVE: unattributed refusal ({status}/{et}) — this cell needs "
+            f"the refusing control named to tell a correct per-object refusal from "
+            f"the group floor refusing an admitted role, and the response carried "
+            f"no {CONTROL_FIELD}. A deployment predating that field labels nothing; "
+            f"redeploy to evaluate this cell",
+            "ERROR",
+            cell=f"NOCTL({status})",
+        )
+    return Verdict(True, f"{status} ({control})", "PASS")
+
+
 def classify(role, allowed, status, et, in_band, control=CONTROL_UNLABELLED) -> Verdict:
     """Judge one cell of the group matrix. `allowed` is ANY | IAM | set.
 
@@ -1069,7 +1454,13 @@ def apply_dynamic_args(ops, ctx, tokens):
 
 
 def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
-    print("\n=== GROUP MATRIX (unauth + 4 roles) ===")
+    # Derived from MATRIX_PRINCIPALS rather than written out: the header said
+    # "4 roles" while the deployment had five groups, which is the shape of the
+    # defect this list is here to stop (#1065).
+    print(
+        f"\n=== GROUP MATRIX (unauth + {len(MATRIX_PRINCIPALS)} principals: "
+        f"{', '.join(MATRIX_PRINCIPALS)}) ==="
+    )
     for field, o in ops.items():
         groups = o["groups"]
         allowed = (
@@ -1157,8 +1548,12 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
             control=unauth.authz_control,
             message=unauth.message,
         )
-        # roles
-        for role in ROLES:
+        # The five group roles plus the caller in no group. Driven from
+        # MATRIX_PRINCIPALS so a group added to the deployment is driven by adding
+        # it in one place, rather than reported over a role set that is not the
+        # deployment's.
+        object_scoped = set(o.get("object_scoped_roles") or [])
+        for role in MATRIX_PRINCIPALS:
             role_allowed = allowed not in (ANY, IAM) and role in allowed
             if skip_allowed and role_allowed:
                 cells.append(f"{role[:2]}=skip")
@@ -1174,7 +1569,10 @@ def run_group_matrix(ops, ctx, tokens, results, skip_fields=frozenset()):
                 continue
             res = call(ctx["api_base"], field, o["args"], tokens[role])
             st, et, ib, rid = res
-            verdict = classify(role, allowed, st, et, ib, res.authz_control)
+            if role in object_scoped:
+                verdict = classify_object_scoped(role, st, et, ib, res.authz_control)
+            else:
+                verdict = classify(role, allowed, st, et, ib, res.authz_control)
             cells.append(f"{role[:2]}={verdict.cell or verdict.detail}")
             _record(
                 results,
@@ -1703,19 +2101,23 @@ def main():
         restore_auth_flows(ctx)
         return 0
     if args.setup_only:
-        setup_users(ctx)
+        setup_users(ctx, ops)
         print(f"Setup-only: test-user password is {TEST_PW}")
         return 0
 
     try:
         # setup inside the try so a mid-setup failure still tears down the
         # users already created and reverts the app-client auth flows.
-        setup_users(ctx)
-        tokens = {r: get_token(ctx, r) for r in ROLES}
+        setup_users(ctx, ops)
+        # Every matrix principal, including the groupless one. A missing token is
+        # fatal rather than a skipped row: a principal the matrix declares and does
+        # not drive is the defect #1065 is about, so it must not be reachable by a
+        # token that failed to mint.
+        tokens = {r: get_token(ctx, r) for r in MATRIX_PRINCIPALS}
         st = get_token(ctx, SCOPED)
         if st and len(st) > 100:
             tokens["scoped"] = st
-        for r in ROLES:
+        for r in MATRIX_PRINCIPALS:
             if not tokens[r] or len(tokens[r]) < 100:
                 print(f"ERROR: failed to mint token for {r}")
                 return 2

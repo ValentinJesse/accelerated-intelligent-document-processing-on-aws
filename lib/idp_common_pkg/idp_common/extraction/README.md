@@ -2316,6 +2316,72 @@ signals make both loud without changing what is extracted:
   attributed to it; and because the recorded corpus cannot bound the false-failure rate —
   it holds no legitimately-empty-list document that also carries a same-width table, so
   the case needs its own measurement. Tracked with the narrowing in GitHub issue #1046.
+- `extraction_partial_row_shortfall` (warning, **always**) — the band the half ratio left
+  silent, and the reason it was there to leave: ⚠️ **`_OCR_ROW_SHORTFALL_RATIO` goes quiet
+  well before half the document is gone.** Sweeping every extracted count from 1 to 800
+  against one 800-row / 17-page rendering, `extraction_rows_below_ocr_estimate` fires from
+  1 through 408 and stops at 409. The matched evidence is 817 rows — 800 data rows plus the
+  column heading reprinted once per page — and half of 817 is 408.5, so a section returning
+  **409 of 800 rows, having lost 48.9% of the document, carried no processing issue at all**
+  and `_generate_processing_report` wrote `Status: SUCCESS` over it (#1361, measured
+  2026-10-14). That is worse than the invisible loss #843 was built for: a reader who knows
+  about #843 reads the silence as a clean run.
+
+  The cause is a units mismatch rather than a badly chosen constant. The ratio is a
+  **multiplicative** slack standing in for an **additive** imprecision — one reprinted
+  heading row per page — so the tolerance scales with the document while the thing it
+  absorbs does not: at 17 pages the slack is ~24x the inflation, and the factor is
+  proportional to the page count. The inflation is computable exactly, because `_ocr_tables`
+  emits one entry per page-repeat and counts the row before each `|---|` separator as one of
+  that entry's rows: `_heading_rows_for_width` is the **number** of matched tables, and
+  `summed − that` is the OCR's data-row count (817 − 17 = 800, asserted against renderings
+  of known size in `TestTheDeductionIsExact` rather than assumed). A run whose separator is
+  its first line has no heading to deduct, so subtracting one under-states the body by one —
+  which lowers the bar and can only suppress a firing.
+
+  So this code compares `extracted` against the data-row count, with everything else
+  inherited unchanged: the same `_ocr_tables` evidence, the same exact-width matching and
+  section-wide sum, the same group-by-width, the same `maxItems` ceiling, the same
+  `_OCR_ROW_ESTIMATE_MIN` evidence floor, and the same skip for empty groups and lists of
+  scalars. The two codes are **mutually exclusive** on a group (the material one wins and
+  the branch `continue`s), which `test_the_two_codes_are_mutually_exclusive_across_the_whole_sweep`
+  holds over all 800 counts.
+
+  ⚠️ **The residual tolerance is a row GAP, not a ratio, and that is the point.**
+  `_OCR_ROW_GAP_MIN` is defined **as** `_OCR_ROW_ESTIMATE_MIN` rather than given its own
+  value: the smallest gap the check will speak about is the smallest table it will speak
+  about at all. What that buys is a silent band bounded in **absolute** rows — at most **29
+  rows missing, whatever the document's size** — where before it was a fraction, so the worst
+  undetected loss was 48.9% at 800 rows, at 1,600 and at 3,200 alike.
+  `TestTheSilentBandIsBoundedInAbsoluteRows` asserts that across five sizes, because a test at
+  one size passes on a mutation that restores a ratio with a different constant. Two
+  consequences worth knowing: the band only exists once half the evidence exceeds the gap
+  floor, so on a section whose matched evidence is under ~60 rows the two bars meet and this
+  code never fires; and the 29-row residual is real, so a silent section is not a complete
+  one.
+
+  Severity is `warning` **unconditionally** and `extraction.row_shortfall_action` does
+  **not** govern it — the same reasoning as `extraction_output_truncated`. A deployment that
+  set `fail` chose it against the half-ratio bar, and widening the knob to this band would
+  start failing documents that complete today; whether a materially short extraction ought to
+  fail at some other bar is a product question, and what this changes is only whether the
+  loss is reported. `_fail_on_row_shortfall` reads `ROW_SHORTFALL_CODE` at `error` severity
+  and nothing else, so the section completes — and the issue is still durable, which
+  `test_the_section_completes_and_the_issue_is_persisted` drives through the real
+  `_save_results` tail. The reader-facing effect is the report status line moving from
+  `SUCCESS` to `COMPLETED WITH WARNINGS`, which is also the fingerprint for "observable": a
+  variant that emitted this at a severity nothing reads would leave that line alone.
+
+  ⚠️ **It inherits the width-only attribution, so a firing is a shortfall to confirm.**
+  `_expected_rows_for_width` sums every same-width table in the section, which can only ever
+  **inflate** the evidence — nothing subtracts — so the bar is upward-biased and the message
+  says so in as many words. `details` carries `ocr_matched_table_rows` (the raw sum),
+  `ocr_heading_rows` (the deduction), `ocr_estimated_rows` (the bar the ratio is taken
+  against) and `missing_rows`, so `extracted + missing == estimated` and
+  `extracted / estimated == ratio` both hold and the denominator is auditable from the issue
+  alone. That matters here specifically: taken against `ocr_matched_table_rows` instead, the
+  #1361 case reads 0.501 rather than 0.511 and nothing else in the issue looks wrong.
+  `tests/unit/extraction/test_partial_row_shortfall.py` is the whole surface.
 - `extraction_list_truncated` (warning) — a non-empty list came back under its schema
   `minItems`. The one completeness signal with no false positives by construction, because
   the config author declared the floor rather than a heuristic inferring it. ⚠️ **What
@@ -2435,28 +2501,45 @@ signals make both loud without changing what is extracted:
   this code would start failing runs that complete today on a deployment that opted into
   `fail` for a different check.
 
-  ⚠️ **Reachability: treat this as a Simple-mode signal.** `_build_extraction_issues` runs
-  for both modes and reports whatever `metadata["output_truncated"]` says, so the
-  *reporting* half is mode-blind — but the *setting* half is not. Both branches of
-  `_invoke_extraction_model` return through one `ExtractionResult`, and the flag is
-  assigned only inside the Simple branch (the Advanced branch leaves it at its
-  initialiser), so there is **no reachable Advanced-mode path** to this issue today. The
-  Advanced-mode wording is exercised by handing `_save_results` a result with the flag
-  set, which is a direct call rather than a flow, and
-  `test_output_truncation_warning.py::TestReachability` fails if an Advanced-mode setter is
-  ever added — so this note has to be rewritten rather than quietly becoming false.
+  **Advanced mode reaches this** too, by a different route, and the two halves are worth
+  separating. `_build_extraction_issues` runs for both modes and reports whatever
+  `metadata["output_truncated"]` says, so the *reporting* half is mode-blind. The *setting*
+  half has one path per mode: on the Simple path the flag is assigned inside
+  `_invoke_extraction_model`'s Simple branch (the Advanced branch leaves it at its
+  initialiser, and `test_output_truncation_warning.py::TestReachability` pins that), and on
+  the Advanced path it arrives as a `_output_truncated` marker in the shard's **metering**,
+  which `_save_results` pops into the same metadata key. Metering is the carrier because it
+  is the one part of a shard's result that is persisted to S3 and merged, so the marker
+  survives the in-process runtime and the Step Functions Distributed Map alike — the same
+  reason `_integrated_field_assessment` and `_shard_scalar_conflicts` ride there.
 
-  What covers that path instead is **a hard failure, not a check**. On a `max_tokens` stop
-  the strands event loop raises `MaxTokensReachedException`; nothing in the ladder retries
-  or swallows it (`MaxTokensReachedException` is in no retry list and matches no message
-  needle, so `async_exponential_backoff_retry` makes one attempt and re-raises), both of
-  `_invoke_agent_for_extraction`'s translators decline it, and `runtime.py`'s
-  `asyncio.gather` over the shards passes no `return_exceptions` — so one truncated shard
-  fails the section rather than merging the survivors into a short list. Note this is **not**
-  the agent's tool boundary, which is a different control for a different cause (`minItems`
-  enforcement on `extraction_tool`'s input). And `minItems` is an opt-in that **no shipped
-  preset declares** — `grep -rn minItems config_library/` finds nothing — so it guards a
-  deployment only once a config author has set it.
+  What writes that marker is **the salvage** (GitHub issue #1363). On a `max_tokens` stop
+  the strands event loop raises `MaxTokensReachedException` rather than returning an
+  `AgentResult`; nothing in the ladder retries or swallows it
+  (`MaxTokensReachedException` is in no retry list and matches no message needle, so
+  `async_exponential_backoff_retry` makes one attempt and re-raises), and `runtime.py`'s
+  `asyncio.gather` over the shards passes no `return_exceptions`. So the exception used to
+  fail the section — including when the tool calls that had already succeeded left a
+  **validated** extraction in `agent.state`, which is the ordinary shape under
+  `extraction.confidence.mode: integrated`, because there the turn that overruns is the
+  `provide_field_assessment` one AFTER the data is safe. `_invoke_agent_for_extraction` now
+  recognises the error through `utils.bedrock_utils.is_max_tokens_agent_error` (one matcher,
+  shared with rules discovery) and, when `agent.state["current_extraction"]` validates
+  against the class model, keeps that extraction and returns an `agentic_idp.TruncatedAgentRun`
+  in place of the `AgentResult` Strands never produced — carrying `Agent.event_loop_metrics`
+  so the tokens the run really spent are still metered. The section completes with its rows
+  and this warning instead of failing.
+
+  Two bounds on that, both tested: it salvages **only** an output-ceiling stop (any other
+  exception still fails the section), and **only** an extraction the class model accepts. It
+  never synthesises an empty result — every leaf of the shard transport model is nullable
+  (#782/#1078), so `{}` validates, and a document that completed with no fields would be
+  worse than a failed one.
+
+  Note this is **not** the agent's tool boundary, which is a different control for a
+  different cause (`minItems` enforcement on `extraction_tool`'s input). And `minItems` is an
+  opt-in that **no shipped preset declares** — `grep -rn minItems config_library/` finds
+  nothing — so it guards a deployment only once a config author has set it.
 - `ExtractionOutputIncomplete` — the section's list came back under half the rows its own
   OCR text evidences, and `extraction.row_shortfall_action` is `fail` (opt-in; see the trade
   above). Raised by `_fail_on_row_shortfall`, which is the **last statement of

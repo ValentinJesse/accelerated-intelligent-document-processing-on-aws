@@ -368,6 +368,26 @@ def is_output_token_truncation(response: object) -> bool:
     return raw.get("stopReason") in OUTPUT_TRUNCATION_STOP_REASONS
 
 
+def is_max_tokens_agent_error(error: BaseException) -> bool:
+    """True if ``error`` is Strands' hard failure on an output-truncated turn.
+
+    The *exception* counterpart of :func:`is_output_token_truncation`, which reads a
+    response. Strands raises ``MaxTokensReachedException`` when a model stops with
+    ``stopReason == "max_tokens"`` mid-agent-loop, and deliberately lets it bubble
+    up rather than wrapping it — so every caller that runs an agent loop has to
+    recognise it, and a copied predicate is how one of them gets missed.
+
+    Matched on type name and message text rather than by importing the Strands
+    exception type, mirroring ``extraction.agentic_idp._is_context_overflow_error``:
+    this module is imported by Lambda functions whose extras do not include the
+    agentic stack, so an ``import strands`` here would make it unimportable there.
+    """
+    if "maxtokensreached" in type(error).__name__.lower():
+        return True
+    msg = str(error).lower()
+    return "max_tokens limit" in msg or "due to max_tokens" in msg
+
+
 # Default retryable error codes (matched against ClientError codes and exception
 # messages).
 #

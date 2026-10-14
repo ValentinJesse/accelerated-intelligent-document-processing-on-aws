@@ -64,7 +64,10 @@ h = _load_harness()
 
 API = "https://abc.execute-api.us-west-2.amazonaws.com/api"
 CTX = {"api_base": API, "circuit_breaker": False}
-TOKENS = {r: f"tok-{r}" for r in h.ROLES}
+# Every principal the matrix drives, not just the group roles: the groupless
+# caller is one of them (#1065), and a token map built from ROLES alone would
+# make the matrix raise rather than drive it.
+TOKENS = {r: f"tok-{r}" for r in h.MATRIX_PRINCIPALS}
 
 
 # ---------------------------------------------------------------------------
