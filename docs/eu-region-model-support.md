@@ -23,7 +23,7 @@ The following table shows all US to EU model mappings currently configured in th
 | `us.anthropic.claude-haiku-5-5` | `eu.anthropic.claude-haiku-5-5` | Direct mapping. No `:1m` pair, because 1M is this model's default context window rather than an opt-in |
 | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | `eu.anthropic.claude-sonnet-4-6` | **Fallback mapping.** Claude 3.5 Sonnet is end-of-life; the EU twin was no better than the US original |
 | `us.anthropic.claude-3-7-sonnet-20250219-v1:0` | `eu.anthropic.claude-sonnet-4-6` | **Fallback mapping.** Claude 3.7 Sonnet is end-of-life; same reason |
-| `us.anthropic.claude-sonnet-4-20250514-v1:0` | `eu.anthropic.claude-sonnet-4-6` | **Fallback mapping.** Claude Sonnet 4 reaches end of life on 2026-10-14 in both regions, so its EU twin is no better than the US original |
+| `us.anthropic.claude-sonnet-4-20250514-v1:0` | `eu.anthropic.claude-sonnet-4-6` | **Fallback mapping.** Claude Sonnet 4 reached end of life on 2026-10-14 in both regions, so its EU twin is no better than the US original; the row remains so that a configuration stored before its removal is rewritten onto a working model |
 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` | Direct mapping. An AWS Health notice puts this model in legacy from 2026-10-08 with end of life on 2027-04-08; it is still invocable, so the row stays |
 | `us.anthropic.claude-sonnet-4-6` | `eu.anthropic.claude-sonnet-4-6` | Direct mapping |
 | `us.anthropic.claude-sonnet-4-6:1m` | `eu.anthropic.claude-sonnet-4-6:1m` | Direct mapping |
