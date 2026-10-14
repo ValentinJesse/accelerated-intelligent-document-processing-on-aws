@@ -6178,6 +6178,18 @@ def _live_idp_run_prefixes():
     return prefixes
 
 
+#: Marker opening every finding `cleanup_stale_idp_buckets` can return, so the
+#: outcome is readable by something other than the reader noticing an emoji.
+#: A sweep that did not complete is not a sweep that found nothing, and for
+#: months those two were the same green run: the reaper logged one AccessDenied
+#: and carried on, so the only visible symptom was `idp-` buckets accumulating.
+#:
+#: Deliberately NOT spelled with a word from exemption_discovery.NAME_VOCABULARY
+#: -- it is the opposite of a carve-out, and a registry entry could say nothing
+#: useful about it.
+STALE_BUCKET_SWEEP_FINDING = "SWEEP NOT COMPLETED:"
+
+
 def cleanup_stale_idp_buckets():
     """Reap OLD leftover idp- test S3 buckets whose run is fully torn down.
 
@@ -6191,17 +6203,58 @@ def cleanup_stale_idp_buckets():
         (so no in-flight/partly-deployed run owns it), AND
       * it is older than IDP_BUCKET_STALE_AGE_SECONDS (backstop for a brand-new
         bucket whose stack hasn't registered yet).
-    Best effort — never raises.
+
+    Returns a list of finding strings; an EMPTY list means the sweep demonstrably
+    ran — it enumerated the account and considered every `idp-` bucket in it.
+    "Nothing to reap" is an empty list; "could not look" is not. The caller folds
+    a non-empty list into the run verdict (see main), because the harm here is
+    cumulative and invisible: a sweep that cannot enumerate its targets reaps
+    nothing every night, and a warning on an otherwise-green run is what let it
+    go unnoticed for months (#1391).
+
+    Best effort — **never raises**, and that contract is deliberate rather than
+    inherited. This is Step 0: raising here would abandon the deploy, the test
+    suite and the teardown before any of them ran, trading a leak that converges
+    on the next run for a lost night's signal on the first S3 throttle. The
+    failure is made visible in the verdict instead of in control flow.
+
+    Two kinds of failure, which used to share one `except` and must not:
+      * **Enumeration** — `_live_idp_run_prefixes` or `list_buckets`. Zero
+        targets were considered, so nothing about the account was established.
+        A finding.
+      * **One bucket's delete** — legitimately best effort. One stuck bucket
+        (BucketNotEmpty, a replication hold) must not fail a deploy, the loop
+        names it, and the next run tries again. NOT a finding.
     """
     print("🧹 Cleaning up stale idp- test buckets (S3 leak guard)...")
+
+    def _finding(detail):
+        finding = f"{STALE_BUCKET_SWEEP_FINDING} {detail}"
+        print(f"❌ {finding}")
+        return [finding]
+
+    # Enumeration, in its own block: everything below is about buckets this
+    # listing returned, so a failure here means there is no sweep to report on.
+    # _THROTTLE_RETRY_CONFIG (adaptive, 10 attempts) rides out the transient
+    # SlowDown/Throttling class before it can reach the handler, so what lands
+    # here is a durable condition — a denied call, expired credentials, a region
+    # or account the role cannot read — not a momentary one.
     try:
-        s3 = boto3.client("s3")
-        s3r = boto3.resource("s3")
+        s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
+        s3r = boto3.resource("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         protected = _live_idp_run_prefixes()
+        listed = s3.list_buckets().get("Buckets", [])
+    except Exception as e:  # noqa: BLE001
+        return _finding(
+            "could not enumerate the account's buckets, so 0 of an unknown "
+            "number of stale idp- buckets were considered and none was "
+            f"reaped: {e}"
+        )
 
+    try:
         stale, skipped_protected, skipped_young = [], 0, 0
-        for b in s3.list_buckets().get("Buckets", []):
+        for b in listed:
             name = b.get("Name", "")
             if not name.startswith("idp-"):
                 continue
@@ -6223,21 +6276,32 @@ def cleanup_stale_idp_buckets():
             )
         if not stale:
             print("✅ No stale idp- test buckets to reap")
-            return
+            return []
 
         deleted = 0
         for name in stale:
             try:
                 # Empty first — versions, delete markers, and objects — then
-                # delete the (now empty) bucket.
+                # delete the (now empty) bucket. Per-bucket on purpose: this is
+                # the best-effort half, so one failure costs one bucket and the
+                # next run takes it.
                 s3r.Bucket(name).object_versions.delete()
                 s3.delete_bucket(Bucket=name)
                 deleted += 1
             except Exception as e:  # noqa: BLE001
                 print(f"[{name}] ⚠️ bucket delete failed: {e}")
         print(f"✅ Reaped {deleted}/{len(stale)} stale idp- test bucket(s)")
+        return []
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ Stale idp- bucket cleanup failed: {e}")
+        # Not a per-bucket delete failure — those are caught in the loop above
+        # and never arrive here. This is the selection or iteration itself
+        # giving out part-way (an undateable CreationDate is the live shape),
+        # which leaves the buckets after it unconsidered. Partial is not clean,
+        # so it is a finding for the same reason enumeration is.
+        return _finding(
+            "the sweep gave out part-way through the buckets it listed, so an "
+            f"unknown number were never considered: {e}"
+        )
 
 
 # Reap orphaned idp- run-scoped IAM managed policies older than this. Same
@@ -7705,15 +7769,30 @@ def publish_summary_to_s3(summary_text):
 
 
 def build_consolidated_summary(
-    stack_name, primary_result, probe_results, publish_success
+    stack_name,
+    primary_result,
+    probe_results,
+    publish_success,
+    startup_cleanup_findings=None,
 ):
     """Build the deterministic end-of-run status table for EVERY test.
 
     Independent of Bedrock — this ALWAYS renders (the GitLab log needs a
     reliable "here is every test and its status" view even when Bedrock is
-    unavailable). Covers the publish step, the primary suite's per-step results
-    (from result["step_results"]), and each deployment-variant probe. The
-    Bedrock pass/fail narrative is layered on top of this, not instead of it.
+    unavailable). Covers the Step 0 startup sweeps, the publish step, the primary
+    suite's per-step results (from result["step_results"]), and each
+    deployment-variant probe. The Bedrock pass/fail narrative is layered on top
+    of this, not instead of it.
+
+    `startup_cleanup_findings` is cleanup_stale_idp_buckets' return value. An
+    empty list renders a passed row and a non-empty one a failed row that fails
+    the whole table; `None` means the caller does not have the result and renders
+    as neither, because "nobody reported" and "reported clean" being one row is
+    the defect this section exists to remove, one level up. It is in the table
+    rather than left as a log line because this table is the artifact a reader
+    actually opens — printed, uploaded to S3 and mailed on failure — and a
+    cleanup that could not enumerate its targets reaped nothing on every run
+    behind a `⚠️` in the log.
 
     Returns the summary text; the caller prints and uploads it.
     """
@@ -7733,7 +7812,24 @@ def build_consolidated_summary(
             text += f" — {detail[:120]}"
         return text
 
+    # Step 0 startup sweeps. Only the stale-bucket sweep reports a verifiable
+    # outcome today, so only it gets a row — the other reapers are still
+    # announce-only, and a row covering them would claim more than is measured.
+    lines.append("🧹 Startup sweeps (resources leaked by PRIOR runs)")
+    if startup_cleanup_findings:
+        for finding in startup_cleanup_findings:
+            lines.append(row("failed", "Stale idp- bucket sweep", finding))
+        overall_ok = False
+    elif startup_cleanup_findings is None:
+        # The caller does not have the sweep's result. NOT rendered as a pass:
+        # "nobody reported" and "reported clean" being the same row is the
+        # defect this section exists to remove, one level up.
+        lines.append(row("cancelled", "Stale idp- bucket sweep", "not reported"))
+    else:
+        lines.append(row("passed", "Stale idp- bucket sweep (enumerated, swept)"))
+
     # Publish / build
+    lines.append("")
     lines.append("📦 Build & Publish")
     if publish_success:
         lines.append(row("passed", "Publish templates to S3"))
@@ -7887,7 +7983,10 @@ def main():
     # Buckets last: a stack the reaper above just deleted frees its buckets for
     # reaping here (CloudFormation can't delete a non-empty bucket, so they'd
     # otherwise leak — thousands accumulated this way).
-    cleanup_stale_idp_buckets()
+    # Its findings are carried to the verdict below rather than printed and
+    # forgotten: an enumeration failure means the sweep considered nothing, and
+    # a `⚠️` on an otherwise-green run is how that stayed unnoticed (#1391).
+    stale_bucket_findings = cleanup_stale_idp_buckets()
     # Managed policies after the stacks, for the same reason and with the same
     # protection: a policy is only reaped once its run has no stacks left, so
     # this converges the ones a retained failure deliberately left behind (and
@@ -7973,7 +8072,7 @@ def main():
                 "step_results": step_results,
             }
             snapshot = build_consolidated_summary(
-                stack_name, partial, [], publish_success
+                stack_name, partial, [], publish_success, stale_bucket_findings
             )
             snapshot = (
                 "⏳ IN-PROGRESS SUMMARY (primary suite still running; "
@@ -8046,7 +8145,7 @@ def main():
         # finish. Marked INTERIM so a reader knows probe rows may still be
         # pending.
         interim = build_consolidated_summary(
-            stack_name, result, probe_results, publish_success
+            stack_name, result, probe_results, publish_success, stale_bucket_findings
         )
         interim = (
             "⏳ INTERIM SUMMARY (primary suite done; deployment-variant probes "
@@ -8135,12 +8234,31 @@ def main():
         if not failure_reason:
             failure_reason = f"IAM teardown not verified: {detail}"
 
+    # Fold the Step 0 stale-bucket sweep into the verdict, for the same reason
+    # and on the same terms as the teardown above: the sweep is the only thing
+    # that removes buckets CloudFormation cannot, so one that could not
+    # enumerate reaps nothing on *every* run and the cost accrues silently
+    # against an account nobody is watching (#1391).
+    #
+    # Applied here rather than at the sweep itself, which is Step 0: raising
+    # there would cost the whole night's deploy, suite and teardown, which on a
+    # durable denial buys nothing and on a transient would be a bad trade. This
+    # keeps every other signal the run produces and ends it red with a named
+    # reason instead. An already-set `failure_reason` wins, so a real deploy
+    # failure is never masked by this.
+    if stale_bucket_findings:
+        stack_success = False
+        detail = "; ".join(stale_bucket_findings)
+        print(f"❌ Stale idp- bucket sweep did not complete: {detail}")
+        if not failure_reason:
+            failure_reason = f"stale idp- bucket sweep did not complete: {detail}"
+
     # Step 5: Print the deterministic consolidated status table FIRST (always
     # renders, Bedrock or not — the GitLab log needs a reliable "every test +
     # status" view), then the Bedrock pass/fail narrative(s). Both are uploaded
     # to S3 so the GitLab job can fetch the full report.
     consolidated = build_consolidated_summary(
-        stack_name, result, probe_results, publish_success
+        stack_name, result, probe_results, publish_success, stale_bucket_findings
     )
     print(f"\n{consolidated}\n")
 
