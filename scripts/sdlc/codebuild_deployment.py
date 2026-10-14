@@ -370,12 +370,19 @@ def generate_stack_name():
 # so `SlowDown`/`Throttling`/5xx is retried and what reaches a handler is a
 # durable condition — a denied call, expired credentials, a region or account the
 # role cannot read. That is the premise every fail-closed handler below decides
-# on, so it is derived rather than asserted in prose: the per-client check in
+# on, and it is derived rather than asserted in prose: the per-client check in
 # `tests/test_startup_sweep_outcomes.py` walks the call graph out from
-# STARTUP_SWEEPS and names any client in the closure built without the config, so
-# a new one added under a sweep fails there instead of making this paragraph
-# false again (#1445). Six of them were, including the retention-marker read and
-# the ownership probe both the bucket and policy sweeps enumerate through.
+# STARTUP_SWEEPS, asserts one case per client construction in that closure, and
+# names any built without the config — so a new one added under a sweep fails
+# there instead of making this paragraph false again (#1445). Read the count off
+# that walk rather than from here: several clients were missing it when the check
+# was written, including the retention-marker read and the ownership probe both
+# the bucket and policy sweeps enumerate through, and a number in this comment
+# would start going stale on the next client added.
+#
+# The retention-marker WRITE (`retain_failed_stack`) is covered by the same check
+# through a stated root rather than a call edge, because the sweeps read what it
+# writes: a throttle there tears down the stack a failed run asked to keep.
 # ---------------------------------------------------------------------------
 
 #: Opens every Step 0 sweep finding, so the outcome is readable by something

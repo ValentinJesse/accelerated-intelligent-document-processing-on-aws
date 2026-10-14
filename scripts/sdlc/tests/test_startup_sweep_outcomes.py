@@ -1367,10 +1367,10 @@ def test_a_name_with_no_run_prefix_is_never_reaped(cbd, monkeypatch):
 # The module header's claim about `_THROTTLE_RETRY_CONFIG` is load-bearing
 # rather than decorative: "what reaches a handler is a durable condition" is
 # the premise under which every fail-closed handler above may treat an error as
-# meaningful. Six client constructions on the sweep path were built without it,
-# so a single `Rate exceeded` arrived at those handlers indistinguishable from a
-# denial. Two had named consequences — the retention-marker read, whose failure
-# narrows the protection a path that DELETES is applied with, and
+# meaningful. Several client constructions on the sweep path were built without
+# it, so a single `Rate exceeded` arrived at those handlers indistinguishable
+# from a denial. Two had named consequences — the retention-marker read, whose
+# failure narrows the protection a path that DELETES is applied with, and
 # `_live_idp_run_prefixes`, whose failure is the enumeration finding for the
 # bucket AND the policy sweep, both registered `fails_run=True`, so one
 # transient CloudFormation throttle ended a night's run red with nothing else
@@ -1383,12 +1383,15 @@ def test_a_name_with_no_run_prefix_is_never_reaped(cbd, monkeypatch):
 # and that is precisely the state the header described wrongly for as long as it
 # stood. Each construction site is its own case and names its own helper.
 #
-# Derived, because the first four were found by reading the file, and a seventh
-# client added under a sweep later is the same defect again. `_client_sites()`
-# walks the call graph from the registered sweeps, so a construction anywhere in
-# that closure is covered without being listed here — and `CLIENT_SITES_FLOOR`
-# pins the sites the derivation found when it was written, so a derivation that
-# silently stops reaching one fails rather than parametrising fewer cases.
+# Derived, because the ones #1445 reported were found by reading the file — it
+# reported fewer than there are — and the next client added under a sweep is the
+# same defect again. `_client_sites()` walks the call graph from the registered
+# sweeps, so a construction anywhere in that closure is covered without being
+# listed here, and `CLIENT_SITES_FLOOR` pins the sites the derivation found when
+# it was written, so a derivation that silently stops reaching one fails rather
+# than parametrising fewer cases. The retention WRITE is the one member of the
+# floor with no call edge from a sweep — the sweeps read what it writes — so it
+# is reached through `RETENTION_WRITE_ROOTS` and asserted like the rest.
 # ---------------------------------------------------------------------------
 
 #: The harness's one shared retry Config, by name. A site must NAME it rather
@@ -1499,11 +1502,13 @@ def _client_sites():
 SWEEP_CLIENT_SITES = _client_sites()
 
 #: (helper, kind, service) for every site the derivation found when this was
-#: written: the 14 reachable from a registered sweep plus the retention writer.
+#: written: those reachable from a registered sweep, plus the retention writer.
 #: A floor, not a ceiling — a new site is covered by the parametrisation above
 #: without being added here — and it is what stops the derivation going quietly
-#: vacuous. Six of these carried no config at all before #1445 and the other nine
-#: already did, which is the shape that let the header's claim read as true.
+#: vacuous. Some of these carried no config at all before #1445 while the rest
+#: already did, which is the mixture that let the header's claim read as true;
+#: which ones is `git log -p` on the module, not a tally here that would be
+#: stale the next time a client is added.
 #:
 #: Named for what this holds rather than for what it would turn off. It widens
 #: what the gate demands instead of narrowing it, so the scanner that collects
