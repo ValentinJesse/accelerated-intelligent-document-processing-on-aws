@@ -1286,8 +1286,17 @@ pricing:
         price: "2.56E-7"
       - name: cacheReadInputTokens
         price: "1.6E-8"
+      # "0.0" for the same reason every other Nova row carries it — see the ⚠️
+      # note on the Nova section above. This row shipped at the input rate
+      # (6.4E-8), which is the one value that is never right: not zero (the Nova
+      # rule) and not 1.25x input (the Claude rule), and `cacheWriteInputTokens`
+      # is DISJOINT from `inputTokens`, so it billed the whole cached prefix at
+      # full input price for a dimension AWS publishes at $0.0000000000. Canada
+      # matters more than most: this model is the confidence-assessment default
+      # for a ca-* stack and prompt caching is enabled on it, so the over-report
+      # was on the hottest path in the deployment.
       - name: cacheWriteInputTokens
-        price: "6.4E-8"
+        price: "0.0"
 
   # ---------------------------------------------------------------------------
   # Amazon Bedrock Models - Global/Cross-Region
