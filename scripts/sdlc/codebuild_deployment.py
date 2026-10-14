@@ -6304,7 +6304,13 @@ def cleanup_stale_idp_policies():
         protected = _live_idp_run_prefixes()
 
         stale, skipped_protected, skipped_young = [], 0, 0
-        unknown_age = []
+        # Not spelled with a word from exemption_discovery.NAME_VOCABULARY (an
+        # earlier `unknown_age` was discovered through `KNOWN_`), because this
+        # is not a gate carve-out and no registry entry could say anything
+        # useful about it: the members are whatever the live listing failed to
+        # date, so there is no authored judgement to write and no ratchet that
+        # could test one.
+        age_unestablishable = []
         paginator = iam.get_paginator("list_policies")
         for page in paginator.paginate(Scope="Local"):
             for policy in page.get("Policies", []):
@@ -6321,7 +6327,7 @@ def cleanup_stale_idp_policies():
                     # Named rather than counted: this should not happen, and a
                     # silent skip would leave a policy accumulating against the
                     # quota with nothing saying which one.
-                    unknown_age.append(name)
+                    age_unestablishable.append(name)
                     continue
                 if age < IDP_POLICY_STALE_AGE_SECONDS:
                     skipped_young += 1
@@ -6333,7 +6339,7 @@ def cleanup_stale_idp_policies():
                 f"  ({skipped_protected} protected by a live stack, "
                 f"{skipped_young} younger than the age gate — skipped)"
             )
-        for name in sorted(unknown_age):
+        for name in sorted(age_unestablishable):
             print(
                 f"  ⚠️ {name}: age not establishable from the listing — NOT "
                 "reaped (the age gate cannot be satisfied, and this path deletes)"
