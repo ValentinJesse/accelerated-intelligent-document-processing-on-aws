@@ -13254,17 +13254,28 @@ Resources:
         # `page.ImageUri` (Output), `FileViewer` defaults to `presignVia: 'client'`
         # against `settings.InputBucket`, and `presignForExport` signs client-side
         # for exactly those two and routes every other bucket to the resolver.
-        # Narrowing those is the document-bucket half of this, which needs the read
-        # path redesigned rather than the grant trimmed
+        # Removing the buckets themselves is the document-bucket half of this, which
+        # needs the read path redesigned rather than the grant trimmed
         # ([#1033](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1033)).
+        #
+        # What it grants on them is object read and nothing else: `s3:GetObject` and
+        # `s3:GetObjectVersion` authorize on a key the caller already holds.
+        # `s3:ListBucket` was granted here too and is not any more — it produces keys
+        # rather than needing one, so it widens "read a document you hold a key for"
+        # into "read every document", and on this role that reach belongs to every
+        # signed-in user with no resolver in the path to bound either half. It had no
+        # consumer: the browser issues no list request, since its only S3 dependency
+        # is `@aws-sdk/s3-request-presigner` and a presigned GET does not list. The
+        # Resource list is object ARNs only for the same reason — see the note on it
+        # below. `scripts/tests/test_browser_s3_grants.py` keeps the verb off.
         #
         # It does NOT name the Configuration bucket, and must not. That bucket holds
         # `config_revisions/<profile>/<nnnnnn>.json.gz` — every configuration
         # profile's full revision history, prompts and few-shot examples included —
         # and which profiles a user may see is their `allowedConfigVersions`, a
-        # per-user boundary no IAM grant on this shared role can express. Granted
-        # here it was also `s3:ListBucket`, so the profile names did not have to be
-        # known in advance.
+        # per-user boundary no IAM grant on this shared role can express. While it was
+        # named here the grant still carried `s3:ListBucket`, so the profile names did
+        # not have to be known in advance either.
         #
         # No UI code path reads it. What that rests on is the **call sites**, not on
         # the bucket name being unavailable: the browser holds no S3 API client at all
@@ -13294,11 +13305,12 @@ Resources:
                   # page images. Without it, versioned image loads get
                   # AccessDenied and render blank.
                   - "s3:GetObjectVersion"
-                  - "s3:ListBucket"
+                # Object ARNs only. Both actions above act on an object, so a bare
+                # bucket ARN authorizes nothing — it was here for s3:ListBucket, a
+                # bucket-level action, and is removed with it rather than left to read
+                # as a grant that does something.
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}"
                   - !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}/*"
-                  - !Sub "arn:${AWS::Partition}:s3:::${InputBucket}"
                   - !Sub "arn:${AWS::Partition}:s3:::${InputBucket}/*"
               - Effect: Allow
                 Action:
