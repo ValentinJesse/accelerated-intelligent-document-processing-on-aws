@@ -7230,6 +7230,16 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
         merged_assessment = None
         merged_assessment_alerts = None
         assessment_split_stats = None
+        # One of this section's agent runs was cut off at the model's output ceiling
+        # and its already-validated extraction was salvaged from agent state rather
+        # than failing the section (#1363). ORed with ``result.output_truncated``
+        # below, which is the Simple path's own ``stopReason``-derived flag, so the
+        # two modes reach one issue. Popped regardless of mode: only the agentic path
+        # writes it, and popping it only there would leave a non-token-counter key in
+        # the metering report if that ever stopped being true.
+        agent_output_truncated = bool(
+            (result.metering or {}).pop("_output_truncated", False)
+        )
         if extraction_method == "agentic" and result.metering:
             table_stats = result.metering.pop("_table_parsing_stats", None)
             tool_used = table_stats is not None
@@ -7444,7 +7454,7 @@ Benefits: Faster, more accurate, handles OCR artifacts automatically.
                 metadata["shard_trace"] = shard_meta
 
         # Add truncation/repair metadata when relevant
-        if result.output_truncated:
+        if result.output_truncated or agent_output_truncated:
             metadata["output_truncated"] = True
         if result.output_repaired:
             metadata["output_repaired"] = True

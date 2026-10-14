@@ -97,17 +97,16 @@ def to_policy_class(rule_class: Dict[str, Any], unique_type: str) -> Dict[str, A
 def _is_max_tokens_error(exc: Exception) -> bool:
     """Detect Strands' hard failure on a response truncated at max output tokens.
 
-    Strands raises ``MaxTokensReachedException`` when the model stops with
-    ``stopReason == "max_tokens"``, and deliberately lets it bubble up rather
-    than wrapping it. Match on type name and message text rather than importing
-    the Strands exception type, mirroring ``_is_context_overflow_error`` in
-    ``extraction.agentic_idp`` — this module must stay importable when the
-    agentic extras are not installed.
+    Thin delegate to :func:`idp_common.utils.bedrock_utils.is_max_tokens_agent_error`,
+    which is the single implementation: the agentic extraction loop asks the same
+    question for a different reason (salvaging an already-validated extraction, see
+    ``extraction.agentic_idp._invoke_agent_for_extraction``) and two copies of a
+    matcher drift. Kept as a module-local name because this module's tests and the
+    two call sites below already reach for it.
     """
-    if "maxtokensreached" in type(exc).__name__.lower():
-        return True
-    msg = str(exc).lower()
-    return "max_tokens limit" in msg or "due to max_tokens" in msg
+    from idp_common.utils.bedrock_utils import is_max_tokens_agent_error
+
+    return is_max_tokens_agent_error(exc)
 
 
 class RulesTruncatedError(Exception):
