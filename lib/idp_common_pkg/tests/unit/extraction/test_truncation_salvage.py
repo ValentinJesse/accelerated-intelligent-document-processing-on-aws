@@ -236,6 +236,69 @@ class TestWhatIsNotSalvaged:
             )
 
 
+class TestTheWholeAgenticCallReportsIt:
+    """End to end through ``structured_output_async``, with the Bedrock seam faked.
+
+    The flow the #1363 shard took: integrated confidence on, the agent loop dies
+    on a ``max_tokens`` stop, and what comes back out of the public entry point is
+    the extraction plus the ``_output_truncated`` marker the section tail turns
+    into a processing issue. Driving the real function is what covers the line
+    that writes the marker — asserting on a hand-built metering dict does not,
+    and a mutation sample proved it: setting the marker to ``False`` survived
+    until these three tests existed.
+    """
+
+    def _invoke(self, *, emit_field_assessment: bool):
+        from idp_common.config.models import IDPConfig
+
+        rows = [{"Date": "2024-01-01", "Description": "P", "Amount": 1.0}]
+
+        class _FakeAgent:
+            def __init__(self, **_kwargs: Any) -> None:
+                self.state = _State({"current_extraction": {"Transactions": rows}})
+                self.event_loop_metrics = _Metrics(
+                    {"inputTokens": 5, "outputTokens": 9}
+                )
+
+        async def _boom(agent, input):  # noqa: ARG001 - signature parity
+            raise MaxTokensReachedException(_MESSAGE)
+
+        with (
+            patch.object(_agentic, "Agent", _FakeAgent),
+            patch.object(_agentic, "BedrockModel", MagicMock()),
+            patch.object(_agentic, "invoke_agent_with_retry", _boom),
+        ):
+            return _run(
+                _agentic.structured_output_async(
+                    model_id="us.anthropic.claude-sonnet-4-6",
+                    data_format=_Statement,
+                    prompt="extract this",
+                    config=IDPConfig(),
+                    emit_field_assessment=emit_field_assessment,
+                )
+            )
+
+    def test_the_extraction_comes_back_with_the_truncation_marker(self):
+        result, response = self._invoke(emit_field_assessment=True)
+        assert len(result.Transactions) == 1
+        assert response["metering"]["_output_truncated"] is True, (
+            "without this marker the salvage is silent: the section completes "
+            "carrying no evidence that an agent turn was cut off"
+        )
+
+    def test_the_tokens_the_run_spent_are_still_reported(self):
+        _result, response = self._invoke(emit_field_assessment=True)
+        usage = next(v for k, v in response["metering"].items() if "bedrock" in k)
+        assert usage["outputTokens"] == 9
+
+    def test_it_is_not_specific_to_integrated_confidence(self):
+        """Integrated confidence is what makes this reachable routinely, not what
+        the salvage is conditioned on — any truncated agent turn qualifies."""
+        result, response = self._invoke(emit_field_assessment=False)
+        assert len(result.Transactions) == 1
+        assert response["metering"]["_output_truncated"] is True
+
+
 class TestThePredicate:
     """One matcher for Strands' truncation exception, shared with rules discovery."""
 
