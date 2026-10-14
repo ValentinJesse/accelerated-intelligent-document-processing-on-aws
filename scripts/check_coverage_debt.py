@@ -623,7 +623,13 @@ def _conditions_diagnosis(
             f"[{tree.name}] its baseline records no measurement conditions, so whether "
             f"the run above executed the same tests cannot be checked. This report "
             f"collected {trust.collected} test(s) and skipped {trust.skipped} of them. "
-            f"Re-record with --write to capture them."
+            f"Only --write can capture them, and it is the wider command: a conditions "
+            f"record is written as part of recording a whole tree, so --write replaces "
+            f"every floor in every measured tree with this run's figure. "
+            f"--write-missing cannot do it — it preserves the recorded entry as it "
+            f"stands, and the conditions are part of that entry. So capturing them "
+            f"means accepting this machine's measurement for this tree; do it from a "
+            f"run you would be willing to make the baseline."
         )
     was_skipped = recorded_conditions.get("skipped")
     was_collected = recorded_conditions.get("collected")
@@ -662,8 +668,10 @@ def check_tree(
             looks_worse = True
             problems.append(
                 f"[{tree.name}] {path} is recorded at {was:.2f}% but the report does not "
-                f"mention it. If it moved or was deleted, re-record with --write; if it "
-                f"stopped being imported by any test, that is the regression."
+                f"mention it. If it moved or was deleted, re-record with --write — only "
+                f"that drops a stale entry, and it re-records every measured tree's "
+                f"floors wholesale while doing so; if it stopped being imported by any "
+                f"test, that is the regression."
             )
             continue
         if now < was - TOLERANCE_PCT:
@@ -671,7 +679,9 @@ def check_tree(
             problems.append(
                 f"[{tree.name}] {path} fell from {was:.2f}% to {now:.2f}% "
                 f"(-{was - now:.2f} points, tolerance {TOLERANCE_PCT}). Add tests for the "
-                f"lines it lost, or re-record deliberately with --write."
+                f"lines it lost, or re-record deliberately with --write — only that "
+                f"lowers a recorded floor, and it re-records every measured tree's "
+                f"floors wholesale while doing so."
             )
 
     if looks_worse:
@@ -692,7 +702,11 @@ def check_tree(
             f"baseline, so their coverage is unratcheted: "
             + ", ".join(unaccounted[:6])
             + ("..." if len(unaccounted) > 6 else "")
-            + ". Re-record with --write."
+            + ". Record them with --write-missing, which adds only the entries the "
+            "baseline lacks and by construction cannot raise or lower an existing "
+            "floor. Do not reach for the wider re-record here: it would accept this "
+            "machine's figure for every other file in every measured tree, which on a "
+            "host-sensitive gate is how an unexamined floor becomes permanent."
         )
     return problems, report_total(report)
 
@@ -770,7 +784,10 @@ def check(required: tuple[str, ...] = ()) -> CheckResult:
         if not recorded:
             problems.append(
                 f"[{tree.name}] a report exists but this tree has no recorded baseline, "
-                f"so nothing about it is ratcheted. Re-record with --write."
+                f"so nothing about it is ratcheted. Record it with --write-missing: a "
+                f"tree with no entry has nothing to preserve, so it is recorded in full "
+                f"— total, conditions and every file — while no other tree's recorded "
+                f"floors move."
             )
         problems.extend(tree_problems)
 
@@ -808,17 +825,32 @@ def write_baseline(missing_only: bool = False) -> int:
     recording the rest would still leave the operator believing the baseline was
     refreshed; the remedy for an unfinished run is to run it again.
 
-    ⚠️ **``missing_only`` exists because the remedy this gate prints is otherwise wider
-    than the finding it reports.** Of the problems `check_tree` raises, one — a tracked
-    file the report measures and the baseline does not record — is fixed by adding a
-    single entry. The remedy printed for it is `--write`, which re-records the file set
-    of **every** measured tree wholesale, so the narrowest available response to one new
-    module is to accept this machine's figure for every other file in its tree. That is
-    the wrong direction on a gate whose figures are host-sensitive: a baseline recorded
-    on a more capable machine is a floor the gate's own environment cannot reach, which
-    is what `conditions` was added for. Measured on the `scripts` tree while closing
-    #1256: one file needed recording, and `--write` would have raised ten existing floors
-    with it, six past the tolerance and the largest by 18.75 points.
+    ⚠️ **``missing_only`` exists because a single remedy for every finding is wider than
+    most of them.** Of the problems `check_tree` raises, two — a tracked file the report
+    measures and the baseline does not record, and a whole tree with no baseline entry —
+    are fixed by adding entries, and need nothing existing to move. `--write` re-records
+    the file set of **every** measured tree wholesale, so with it as the only remedy the
+    narrowest available response to one new module is to accept this machine's figure for
+    every other file in its tree. That is the wrong direction on a gate whose figures are
+    host-sensitive: a baseline recorded on a more capable machine is a floor the gate's
+    own environment cannot reach, which is what `conditions` was added for. Measured on
+    the `scripts` tree while closing #1256: one file needed recording, and `--write`
+    would have raised ten existing floors with it, six past the tolerance and the largest
+    by 18.75 points. #1421 reports the same count taken independently on the same tree —
+    ten floors again, two of them on files whose host-versus-CI discrepancy is pinned on
+    purpose — after the printed remedy was followed a second time and caught by hand.
+    That is why those two findings now name this mode, and the ones that genuinely need
+    the wider command say that it is wider.
+
+    **Which findings keep `--write`, and why, since the distinction is the whole point.**
+    Lowering a recorded floor and dropping a stale entry are both things ``missing_only``
+    cannot do by construction, so a file that fell and a recorded path the report no
+    longer mentions keep `--write`. So does a baseline with no `conditions` record: a
+    tree whose entry already exists is preserved verbatim here, and the conditions are
+    part of that entry, so the only way to capture them is to re-record the tree. Those
+    messages say that the command is the wider one rather than leaving the reader to
+    discover it, because following a printed remedy without knowing what it moves is the
+    defect, not the flag.
 
     So ``missing_only`` adds only entries the baseline **lacks**, and by construction
     cannot raise or lower an existing floor — asserted below rather than left to the
@@ -983,8 +1015,10 @@ def main() -> int:
         action="store_true",
         help=(
             "Like --write, but ONLY adds entries the baseline lacks: it cannot raise or "
-            "lower an existing floor. The bounded remedy for the one finding that needs "
-            "one new entry, where --write would re-record the whole tree"
+            "lower an existing floor. The bounded remedy for the two findings that need "
+            "nothing but new entries — a measured file the baseline does not record, "
+            "and a tree with no baseline at all — where --write would re-record every "
+            "measured tree wholesale"
         ),
     )
     parser.add_argument(
