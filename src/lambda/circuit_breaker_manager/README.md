@@ -64,7 +64,7 @@ Protects the system from cascading failures when Bedrock services are degraded o
 |-------|----------|
 | **CLOSED** | Normal operation. All requests processed. |
 | **OPEN** | Bedrock unavailable. Messages return to SQS for retry. |
-| **HALF_OPEN** | Testing recovery. Limited traffic allowed through. |
+| **HALF_OPEN** | Testing recovery. The Queue Processor admits a bounded number of probes (5 per 60 s, claimed with a conditional write on this record) and returns everything else to SQS. See [docs/circuit-breaker.md](../../../docs/circuit-breaker.md). |
 
 ## Triggers
 
