@@ -1187,10 +1187,15 @@ def classify_object_scoped(role, status, et, in_band, control) -> Verdict:
       refused a role the policy admits, i.e. the manifest no longer carries the role,
       and the cell says so instead of reading a correct-looking 403 as a pass.
 
-    ⚠️ An **unlabelled** refusal fails, for the reason the rest of this module goes
-    strict on one: without a label the two cases above are indistinguishable, so
-    passing would mean passing on a run that established neither. The message says
-    which deployment states produce that.
+    ⚠️ An **unlabelled** refusal is ``ERROR`` — a check that could not be run.
+    Without a label the two cases above are indistinguishable, so passing would mean
+    passing on a run that established neither. ``ERROR`` rather than ``FAIL``
+    because that is what is true, and it is no weaker: `hard_failures` counts both,
+    so the gate still goes red, and the report puts it under "Could not be run"
+    naming the remedy instead of reporting a deployment whose authorization is fine
+    as broken. A stack deployed before `authzControl` existed (#1308) labels nothing,
+    so every 403 on it arrives this way — which is a fact about the deployment, not
+    about its authorization.
     """
     why = inconclusive(status, et)
     if why:
@@ -1217,11 +1222,12 @@ def classify_object_scoped(role, status, et, in_band, control) -> Verdict:
     if control == CONTROL_UNLABELLED:
         return Verdict(
             False,
-            f"UNATTRIBUTED REFUSAL ({status}/{et}): this cell needs the refusing "
-            f"control named to tell a correct per-object refusal from the group "
-            f"floor refusing an admitted role, and the response carried no "
-            f"{CONTROL_FIELD}",
-            "FAIL",
+            f"INCONCLUSIVE: unattributed refusal ({status}/{et}) — this cell needs "
+            f"the refusing control named to tell a correct per-object refusal from "
+            f"the group floor refusing an admitted role, and the response carried "
+            f"no {CONTROL_FIELD}. A deployment predating that field labels nothing; "
+            f"redeploy to evaluate this cell",
+            "ERROR",
             cell=f"NOCTL({status})",
         )
     return Verdict(True, f"{status} ({control})", "PASS")

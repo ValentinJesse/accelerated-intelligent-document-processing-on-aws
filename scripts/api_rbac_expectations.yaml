@@ -82,7 +82,12 @@
 #                  attributed to the group floor (authzControl != api-group-floor),
 #                  which is two assertions in one cell: the floor still admits the
 #                  role, AND the per-object control still refuses an object outside
-#                  the caller's scope. Every role named here must appear in
+#                  the caller's scope.
+#                  ⚠️ The cell needs the authzControl label (#1308), so against a
+#                  stack deployed before that field existed it records "could not be
+#                  run" — blocking, and not a pass — rather than a verdict it has no
+#                  way to reach. Redeploy to evaluate it.
+#                  Every role named here must appear in
 #                  `groups:` — scripts/test_api_rbac.py exits non-zero otherwise,
 #                  because on a role the policy EXCLUDES the cell would assert the
 #                  opposite of the floor's job.

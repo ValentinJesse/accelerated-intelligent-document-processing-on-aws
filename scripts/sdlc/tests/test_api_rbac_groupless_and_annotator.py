@@ -343,6 +343,7 @@ class _Recorder:
         self.deleted = []
         self.put_items = []
         self.deleted_keys = []
+        self.delete_tables = []
         self.queries = []
         self._groups = groups_by_email or {}
 
@@ -363,7 +364,18 @@ class _Recorder:
             self.put_items.append(args)
         elif args[:2] == ("dynamodb", "query"):
             self.queries.append(args)
-            return {"Items": []}
+            # A row shaped as the recovery path reads it, so the KEYS it builds can
+            # be asserted. Answering with no items would leave the key construction
+            # unmeasured, and a wrong key deletes nothing while teardown reports a
+            # delete — which is how the row stays in a live stack's table.
+            return {
+                "Items": [
+                    {
+                        "userId": {"S": "recovered-uid"},
+                        "cognitoSub": {"S": "recovered-sub"},
+                    }
+                ]
+            }
         elif args[:2] == ("cognito-idp", "admin-get-user"):
             return {"UserAttributes": [{"Name": "sub", "Value": "sub-xyz"}]}
         return {}
@@ -390,6 +402,7 @@ class _NoSubprocess:
     def run(self, cmd, **kwargs):
         if "delete-item" in cmd:
             self._rec.deleted_keys.append(cmd[cmd.index("--key") + 1])
+            self._rec.delete_tables.append(cmd[cmd.index("--table-name") + 1])
 
         class _Done:
             returncode = 0
@@ -503,13 +516,45 @@ def test_teardown_only_recovers_the_annotator_row_from_the_table(seeded, capsys)
     """`--teardown-only`, and a rerun after a killed process, gets a fresh ctx that
     recorded nothing. The row is still findable by the one thing that does not change
     between runs — the Annotator user's address — so the recovery query has to be
-    issued for it, not only for the scoped user's."""
+    issued for it, not only for the scoped user's.
+
+    The recovered KEY is asserted too, not just the query. A query that found the row
+    and then built the wrong key deletes nothing, while teardown prints a count and
+    reports success — the same end state as never looking.
+    """
+    import json as _json
+
     h.teardown_users(_stack_ctx())
     capsys.readouterr()
     queried = [arg for call in seeded.queries for arg in call if isinstance(arg, str)]
     assert any(h.test_email(h.ANNOTATOR_ROLE) in arg for arg in queried), (
         "teardown never looked for the Annotator's seeded row, so a run that died "
         "before teardown leaves it in the table forever"
+    )
+    deleted = [_json.loads(k) for k in seeded.deleted_keys]
+    row_key = {
+        "PK": {"S": "USER#recovered-uid"},
+        "SK": {"S": "USER#recovered-uid"},
+    }
+    assert row_key in deleted, (
+        f"the recovered row key was not the one deleted: {deleted}"
+    )
+
+
+def test_the_recovery_asks_for_a_sub_pointer_only_where_one_was_written(seeded, capsys):
+    """The scoped user's seeding writes a `SUB#` pointer and the Annotator's does
+    not, so asking for one in both places would report a delete that removed
+    nothing — and asking for one in neither would leave the scoped user's pointer
+    behind, naming a row that no longer exists."""
+    import json as _json
+
+    h.teardown_users(_stack_ctx())
+    capsys.readouterr()
+    deleted = [_json.loads(k) for k in seeded.deleted_keys]
+    pointer = {"PK": {"S": "SUB#recovered-sub"}, "SK": {"S": "SUB#recovered-sub"}}
+    assert deleted.count(pointer) == 1, (
+        "the SUB# pointer should be deleted exactly once — for the scoped user, who "
+        f"is the only seeding that writes one: {deleted}"
     )
 
 
@@ -543,6 +588,21 @@ def test_the_seeded_scope_covers_every_test_set_id_the_matrix_sends(expectations
     )
 
 
+def test_the_id_walk_reaches_a_nested_input_map():
+    """Four of the seven Annotator operations carry their id inside `input:`.
+
+    On today's arguments a walk that read only the top level would derive the same
+    *set*, because both ids the file uses also appear at the top level of some other
+    operation — so the comparison above cannot see the difference and would pass with
+    the nested leg removed. A synthetic entry whose id appears **only** nested is
+    what makes the leg's absence visible, rather than waiting for the first
+    operation that needs it.
+    """
+    assert h.test_set_ids_in_play(
+        {"someOp": {"args": {"input": {"testSetId": "nested-only"}}}}
+    ) == ["nested-only"]
+
+
 def test_the_seeded_scope_is_what_gets_written(seeded, expectations, capsys):
     import json as _json
 
@@ -558,6 +618,104 @@ def test_the_seeded_scope_is_what_gets_written(seeded, expectations, capsys):
     assert len(annotator) == 1, f"expected one Annotator row, wrote {len(annotator)}"
     written = [v["S"] for v in annotator[0]["allowedTestSets"]["L"]]
     assert written == h.test_set_ids_in_play(expectations)
+
+
+def test_the_recorded_teardown_key_is_the_key_of_the_row_that_was_written(
+    seeded, expectations, capsys
+):
+    """The key teardown deletes and the item the seeding wrote must be the same item.
+
+    Teardown compares the two only through its own recorded value, so a seeding that
+    recorded one key and wrote a row under another would delete nothing and report a
+    delete — the row stays in a live stack's UsersTable with a scope on it, and the
+    count teardown prints says it was removed. Read off the `put-item` payload rather
+    than off the recorded key, so the two literals are compared to each other.
+    """
+    import json as _json
+
+    ctx = _stack_ctx()
+    h.setup_users(ctx, expectations)
+    capsys.readouterr()
+    rows = [_json.loads(call[call.index("--item") + 1]) for call in seeded.put_items]
+    annotator = [
+        row
+        for row in rows
+        if (row.get("email") or {}).get("S") == h.test_email(h.ANNOTATOR_ROLE)
+    ]
+    assert len(annotator) == 1
+    written = annotator[0]
+    recorded = ctx["_annotator_scope_keys"]
+    assert recorded == [{"PK": written["PK"], "SK": written["SK"]}], (
+        f"the key recorded for teardown is not the written row's key: {recorded} vs "
+        f"{ {'PK': written['PK'], 'SK': written['SK']} }"
+    )
+
+
+def test_the_object_scoped_validator_passes_on_the_committed_file(expectations):
+    """Non-vacuity in the passing direction, which the refusal tests cannot give.
+
+    A validator that rejected every declaration — including a correct one — would
+    satisfy both refusal tests below by exiting on anything, and would make the live
+    harness unrunnable. Driven over the real `operations:` map, post-resolution not
+    needed: the three declarations here name a role their own `groups:` list
+    carries literally.
+    """
+    h._check_object_scoped_roles(expectations)
+
+
+def test_a_non_list_object_scoped_roles_is_refused():
+    """A scalar is the shape a hand edit produces (`object_scoped_roles: Annotator`),
+    and iterating a string would name one principal per CHARACTER — none of which is
+    a principal, so the key would be silently inert."""
+    with pytest.raises(SystemExit) as exited:
+        h._check_object_scoped_roles(
+            {
+                "claimReview": {
+                    "groups": ["Admin", h.ANNOTATOR_ROLE],
+                    "object_scoped_roles": h.ANNOTATOR_ROLE,
+                }
+            }
+        )
+    assert exited.value.code == 2
+
+
+def test_the_seeded_row_is_written_to_the_users_table_and_records_the_sub(
+    seeded, expectations, capsys
+):
+    """Two details of the write that no verdict depends on and the stack does.
+
+    The row has to land in the table the stack resolved — a put at a different
+    table, or with the flag mis-spelled, is an error the harness would report as a
+    WARN-free success and the Annotator's cells would then all measure the
+    per-object control. And it records `cognitoSub` the way `user_management`
+    writes one, so `resolve_allowed_config_versions` reading this row by address
+    finds the sub it expects rather than an absent one.
+    """
+    import json as _json
+
+    h.setup_users(_stack_ctx(), expectations)
+    capsys.readouterr()
+    for call in seeded.put_items:
+        assert "--table-name" in call
+        assert call[call.index("--table-name") + 1] == "UsersTable"
+    rows = [_json.loads(call[call.index("--item") + 1]) for call in seeded.put_items]
+    annotator = [
+        row
+        for row in rows
+        if (row.get("email") or {}).get("S") == h.test_email(h.ANNOTATOR_ROLE)
+    ]
+    assert annotator and annotator[0].get("cognitoSub") == {"S": "sub-xyz"}, (
+        f"the seeded Annotator row does not record the pool's own sub: {annotator}"
+    )
+
+
+def test_teardown_deletes_from_the_users_table(seeded, capsys):
+    """Same point on the way out: a delete aimed elsewhere removes nothing while
+    teardown prints a count saying it did."""
+    h.teardown_users(_stack_ctx())
+    capsys.readouterr()
+    assert seeded.delete_tables, "teardown issued no delete-item at all"
+    assert set(seeded.delete_tables) == {"UsersTable"}
 
 
 def test_the_seeded_annotator_row_carries_no_config_version_scope(
@@ -739,6 +897,34 @@ def test_an_object_scoped_cell_fails_when_nothing_refused(
     assert "NOT REFUSED" in row["detail"]
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        h.ApiResult(404, "ResourceNotFound", None, "rid"),
+        h.ApiResult(400, "BadRequest", None, "rid"),
+    ],
+)
+def test_an_object_scoped_cell_fails_on_a_four_xx_that_is_not_a_refusal(
+    monkeypatch, capsys, object_scoped_ops, answer
+):
+    """⭐ "Any 4xx is a refusal" is the wrong reading, and it is the LIVE shape of
+    the regression this cell exists to catch.
+
+    The matrix names a document that does not exist. If the per-object control
+    stopped firing — the scope call deleted from the branch, the role added to the
+    set the check exempts — the operation would go on to look the document up and
+    answer a plain not-found. That is `404`/`ResourceNotFound`, a 4xx, and a cell
+    scoring any 4xx as "refused" would report the control as working while it had
+    been removed. Only `_denied` — 401/403, an `Unauthorized` errorType, or the
+    in-band 200 denial — counts.
+    """
+    row = _object_scoped_row(monkeypatch, capsys, object_scoped_ops, answer)
+    assert row["outcome"] == "FAIL", (
+        f"a {answer[0]} that is not a refusal was accepted as one: {row['detail']}"
+    )
+    assert "NOT REFUSED" in row["detail"]
+
+
 def test_an_object_scoped_cell_fails_when_the_group_floor_refuses(
     monkeypatch, capsys, object_scoped_ops
 ):
@@ -755,20 +941,30 @@ def test_an_object_scoped_cell_fails_when_the_group_floor_refuses(
     assert "GROUP FLOOR" in row["detail"]
 
 
-def test_an_object_scoped_cell_fails_on_an_unattributed_refusal(
+def test_an_object_scoped_cell_cannot_be_run_on_an_unattributed_refusal(
     monkeypatch, capsys, object_scoped_ops
 ):
-    """An absent label cannot tell the two cases above apart, so it cannot pass.
-    A report whose Control column is empty throughout is one where this whole
-    distinction was inert, and reading it as a pass would restore exactly that."""
+    """An absent label cannot tell the two cases apart, so it cannot pass.
+
+    Recorded as a check that could not be run rather than as a failure, which is
+    what is true and is no weaker: `hard_failures` counts ERROR with FAIL, so the
+    gate still goes red. The distinction matters against a stack deployed before
+    `authzControl` existed, where EVERY 403 arrives unlabelled — a report whose
+    Control column is empty throughout is one where this whole distinction was
+    inert, and calling that a broken group check would be as wrong as calling it a
+    pass.
+    """
     row = _object_scoped_row(
         monkeypatch,
         capsys,
         object_scoped_ops,
         h.ApiResult(403, "Unauthorized", None, "rid", control=h.CONTROL_UNLABELLED),
     )
-    assert row["outcome"] == "FAIL"
+    assert row["outcome"] == "ERROR"
+    assert row["inconclusive"] is True
+    assert row["outcome"] != "PASS"
     assert h.CONTROL_FIELD in row["detail"]
+    assert h.hard_failures([row]), "an unevaluable cell left the gate green"
 
 
 @pytest.mark.parametrize(
@@ -840,3 +1036,97 @@ def test_the_declared_premise_matches_the_resolver_source():
         "on three routes, so the refusal the object_scoped_roles cells expect may "
         f"not happen: {calls}"
     )
+
+
+# ===========================================================================
+# the Cognito helper itself, which the stubs above never execute
+# ===========================================================================
+def _rbac_common():
+    """`scripts/rbac_common.py`, loaded by path like the harness loads it."""
+    return _load("_rbac_common_groupless", _REPO / "scripts" / "rbac_common.py")
+
+
+class _CliRecorder:
+    def __init__(self, groups=()):
+        self.calls = []
+        self._groups = list(groups)
+
+    def aws(self, *args, region=None):
+        self.calls.append(args)
+        if args[:2] == ("cognito-idp", "admin-list-groups-for-user"):
+            return {"Groups": [{"GroupName": g} for g in self._groups]}
+        return {}
+
+    def run(self, cmd, **kwargs):
+        self.calls.append(tuple(cmd))
+
+        class _Done:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Done()
+
+
+def _cli_ctx():
+    return {"user_pool": "pool", "region": "us-west-2"}
+
+
+@pytest.mark.parametrize("group", [None, ""])
+def test_create_cognito_user_adds_no_group_when_none_is_asked_for(monkeypatch, group):
+    """The one line that makes a groupless principal possible.
+
+    Asserted on the call NOT being made, because `admin-add-user-to-group` is what
+    would make this user a role user — and the harness's own tests stub this helper
+    out entirely, so without this the branch has no offline coverage at all. Both
+    falsy spellings, since a caller reading the group from a mapping gets `""`.
+    """
+    common = _rbac_common()
+    rec = _CliRecorder()
+    monkeypatch.setattr(common, "aws", rec.aws)
+    monkeypatch.setattr(common.subprocess, "run", rec.run)
+    common.create_cognito_user(_cli_ctx(), "nobody@example.invalid", group, "pw")
+    assert not [c for c in rec.calls if "admin-add-user-to-group" in c], (
+        f"a group was added for a groupless user: {rec.calls}"
+    )
+    # Non-vacuity: it still created the user and set the password, so "no calls at
+    # all" cannot satisfy the assertion above.
+    assert [c for c in rec.calls if "admin-create-user" in c]
+    assert [c for c in rec.calls if "admin-set-user-password" in c]
+
+
+def test_create_cognito_user_still_adds_a_named_group(monkeypatch):
+    """The control for the test above: skipping the add for EVERY caller would turn
+    all five role users groupless, which is the same defect wearing the opposite
+    sign."""
+    common = _rbac_common()
+    rec = _CliRecorder()
+    monkeypatch.setattr(common, "aws", rec.aws)
+    monkeypatch.setattr(common.subprocess, "run", rec.run)
+    common.create_cognito_user(_cli_ctx(), "someone@example.invalid", "Viewer", "pw")
+    added = [c for c in rec.calls if "admin-add-user-to-group" in c]
+    assert added and "Viewer" in added[0]
+
+
+def test_the_group_read_back_returns_the_names_the_pool_reports(monkeypatch):
+    common = _rbac_common()
+    rec = _CliRecorder(groups=["Viewer", "Admin"])
+    monkeypatch.setattr(common, "aws", rec.aws)
+    assert common.cognito_groups_for_user(_cli_ctx(), "x@example.invalid") == [
+        "Admin",
+        "Viewer",
+    ]
+
+
+def test_the_group_read_back_raises_rather_than_answering_no_groups(monkeypatch):
+    """⭐ "No groups" is the exact answer the groupless check wants to see, so a
+    failed lookup must not be able to produce it. Returning `[]` on an error would
+    make every membership verification pass for a pool nobody could read."""
+    common = _rbac_common()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(common, "aws", _boom)
+    with pytest.raises(RuntimeError):
+        common.cognito_groups_for_user(_cli_ctx(), "x@example.invalid")
