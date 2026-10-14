@@ -368,6 +368,7 @@ Parameters:
       - "eu.amazon.nova-2-lite-v1:0:priority"
       - "eu.amazon.nova-2-lite-v1:0:flex"
       - "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "ca.amazon.nova-lite-v1:0"
       - "qwen.qwen3-vl-235b-a22b"
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -383,7 +384,7 @@ Parameters:
       - "amazon.nova-lite-v1:0"
       - "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-    Description: Model to use for optional Document Knowledge Base. Model access MUST be enabled in Amazon Bedrock. Note - not every listed model is available in all EU regions. GovCloud deployments must use one of the GovCloud-verified entries above (amazon.nova-pro-v1:0, amazon.nova-lite-v1:0, or us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0) — the commercial default is overridden automatically by the --govcloud template transform.
+    Description: Model to use for optional Document Knowledge Base. Model access MUST be enabled in Amazon Bedrock. Note - not every listed model is available in all EU regions. Canada deployments left at the default use ca.amazon.nova-lite-v1:0 automatically, because the default has no inference profile there; an explicit choice is passed through unchanged and must be callable from the stack's region. GovCloud deployments must use one of the GovCloud-verified entries above (amazon.nova-pro-v1:0, amazon.nova-lite-v1:0, or us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0) — the commercial default is overridden automatically by the --govcloud template transform.
 
   # Optional - Post processing Lambda hook
   PostProcessingLambdaHookFunctionArn:
@@ -1326,6 +1327,15 @@ Conditions:
   ShouldCreateDocumentKnowledgeBase:
     !Equals [ !Ref DocumentKnowledgeBase, "BEDROCK_KNOWLEDGE_BASE (Create)" ]
   ShouldUseDocumentKnowledgeBase: !Condition ShouldCreateDocumentKnowledgeBase
+  # Canada stacks left at the KnowledgeBaseModelId default pass the Canada geo
+  # profile of Nova Lite to the API stack: the default, us.amazon.nova-pro-v1:0,
+  # has no inference profile in Canada, so RetrieveAndGenerate fails there. An
+  # explicit choice is passed through unchanged.
+  UseCanadaKnowledgeBaseModel: !And
+    - !Or
+      - !Equals [ !Ref "AWS::Region", "ca-central-1" ]
+      - !Equals [ !Ref "AWS::Region", "ca-west-1" ]
+    - !Equals [ !Ref KnowledgeBaseModelId, "us.amazon.nova-pro-v1:0" ]
   DocumentSectionsCrawlerScheduleEnabled:
     !Not [ !Equals [ !Ref DocumentSectionsCrawlerFrequency, "Manual" ] ]
   HasPermissionsBoundary: !Not [ !Equals [ !Ref PermissionsBoundaryArn, "" ] ]
@@ -3056,7 +3066,10 @@ Resources:
         HasGuardrailConfig: !If [HasGuardrailConfig, "true", "false"]
         BedrockGuardrailId: !Ref BedrockGuardrailId
         BedrockGuardrailVersion: !Ref BedrockGuardrailVersion
-        KnowledgeBaseModelId: !Ref KnowledgeBaseModelId
+        KnowledgeBaseModelId: !If
+          - UseCanadaKnowledgeBaseModel
+          - "ca.amazon.nova-lite-v1:0"
+          - !Ref KnowledgeBaseModelId
         ShouldCreateEvaluationBaselineBucket: !If [ShouldCreateEvaluationBaselineBucket, "true", "false"]
         ShouldCreateReportingBucket: !If [ShouldCreateReportingBucket, "true", "false"]
                 
