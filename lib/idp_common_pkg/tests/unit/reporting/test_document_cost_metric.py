@@ -258,6 +258,43 @@ class TestDocumentEstimatedCostMetric:
             reporter.save_metering_data(doc)
         assert fake_cw.put_metric_data.call_args.kwargs["Namespace"] == "my-stack-name"
 
+    def test_the_namespace_falls_back_the_same_way_put_metric_does(self):
+        """With ``METRIC_NAMESPACE`` unset the namespace is ``GENAIDP``.
+
+        A mutation run found this unasserted, and it is worth having: the
+        fallback is what a non-Lambda caller and a function whose environment
+        variable went missing both land on, and the failure it prevents is quiet.
+        An empty namespace is rejected by CloudWatch, and this module swallows
+        that rejection as a logged warning — so the metric would simply never
+        appear. The value also has to stay equal to :func:`put_metric`'s default,
+        or two emitters in the same process would write to two namespaces.
+        """
+        import os
+
+        from idp_common.metrics import put_metric
+
+        doc = Document(id="doc-default-ns", input_key="k")
+        doc.metering = {"ocr/textract/detect_document_text": {"pages": 1.0}}
+        reporter = _reporter()
+        fake_cw = MagicMock()
+        env = {k: v for k, v in os.environ.items() if k != "METRIC_NAMESPACE"}
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("idp_common.metrics.get_cloudwatch_client", return_value=fake_cw),
+            patch.object(reporter, "_save_records_as_parquet"),
+        ):
+            reporter.save_metering_data(doc)
+            ours = fake_cw.put_metric_data.call_args.kwargs["Namespace"]
+            fake_cw.put_metric_data.reset_mock()
+            put_metric("Probe", 1.0)
+            theirs = fake_cw.put_metric_data.call_args.kwargs["Namespace"]
+
+        assert ours == "GENAIDP", f"fallback namespace is {ours!r}"
+        assert ours == theirs, (
+            f"this helper falls back to {ours!r} while put_metric falls back to "
+            f"{theirs!r}; two emitters in one process would split the namespace"
+        )
+
     def test_a_cloudwatch_failure_does_not_fail_the_reporting_write(self):
         """Cost visibility is best-effort. A PutMetricData error that propagated
         would turn a CloudWatch problem into a failed document."""

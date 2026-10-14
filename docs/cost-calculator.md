@@ -151,134 +151,11 @@ agentic extraction path, where the agent framework reports only usage already
 accumulated across the agent loop. Until then, only the per-request numbers in
 your AWS bill, or a Cost and Usage Report, settle a large-request bill exactly.
 
-### AWS Cost Management Tools
-
-In addition to the built-in cost tracking, consider using these AWS tools:
-
-- **AWS Cost Explorer**: Analyze and visualize your costs and usage over time
-- **AWS Budgets**: Set custom budgets and receive alerts when costs exceed thresholds
-- **AWS Cost and Usage Reports**: Generate detailed reports on your AWS costs and usage
-
-## Bounding spend: the monthly budget and the `DocumentEstimatedCost` metric
-
-The cost estimate above is a **ledger**: it tells you afterwards what a document
-cost. Two optional controls turn that into something you can be told about while
-it is happening. Read the next sentence before relying on either.
-
-> ⚠️ **Both of these notify. Neither enforces.** No document is refused, no queue
-> is paused and `MaxConcurrentWorkflows` is not reduced when a threshold is
-> crossed. If you need a hard ceiling on spend, the mechanism is an AWS Budgets
-> **action** or a service-control policy that you configure yourself, outside
-> this stack.
-
-### `MonthlyBudgetUSD` — an AWS Budgets monthly cost budget
-
-Set the `MonthlyBudgetUSD` stack parameter to an amount in dollars (`500`,
-`500.00`) and the stack creates an AWS Budgets monthly cost budget that notifies
-the stack's alerts topic once **actual** spend passes 80% of that amount, and
-again past 100%. Leave it empty — the default — and no budget, no SNS topic
-policy and no KMS grant is created, so an existing deployment is unchanged.
-
-Notifications go to `AlertsTopic`, the same topic every CloudWatch alarm in this
-stack publishes to, so they reach whoever is already subscribed to it. Three
-things to check before trusting that:
-
-- A standard deployment subscribes the `AdminEmail` address, and **that
-  subscription delivers nothing until the address confirms it**. See
-  [Who receives the alerts](monitoring.md#who-receives-the-alerts).
-- Budget alerts arrive hours after the spend, not minutes. AWS Budgets refreshes
-  up to three times a day, and AWS billing data itself lags usage. This is a
-  monthly guardrail, not a real-time one — which is what the CloudWatch metric
-  below is for.
-
-#### ⚠️ What the budget measures: the whole account, not this stack
-
-The budget carries **no cost filter**. It tracks every dollar the AWS account
-spends, including workloads that have nothing to do with this solution. That is
-deliberate, and it is worth understanding why, because the obvious alternative —
-filtering the budget to the stack's own resource tags — produces a budget that
-reports a number close to zero and therefore never alarms at all:
-
-1. **This solution's dominant cost carries no taggable resource.** Per-document
-   Bedrock inference is on-demand model invocation, and AWS is explicit that
-   [you cannot assign tags to on-demand models](https://repost.aws/knowledge-center/bedrock-add-cost-allocation-tags).
-   There is no tagged resource in the request, so no resource-tag cost filter
-   can see that spend. Amazon Textract API calls are the same. A stack-tag
-   filter would capture the Lambda, DynamoDB and S3 line items — the small
-   ones — and miss the inference bill entirely.
-2. **A tag reaches a cost filter only after it is activated.** Cost-allocation
-   tags, including the `aws:cloudformation:stack-name` tag CloudFormation applies
-   for you, do nothing until someone **activates** them in the payer account's
-   Billing console. That is a manual, account-level step no CloudFormation
-   template can perform. A budget filtered on an unactivated tag matches no cost
-   records, reports **$0.00 spend forever**, and is indistinguishable in the
-   console from a budget that is working.
-
-Either one of those alone makes a tag-filtered budget read far below real spend;
-together they make it read approximately nothing. An account-scoped budget
-over-reports when the account holds other workloads, which is the safe direction
-— it alarms early rather than never.
-
-**So: if you need the number to be this stack's, deploy the stack into its own
-AWS account.** That is the only configuration in which "the account's cost" and
-"this deployment's cost" are the same number. If you must share an account and
-need per-stack attribution, the route is
-[Bedrock application inference profiles](#cost-attribution-with-bedrock-application-inference-profiles)
-below plus activated cost-allocation tags — and then a budget you create
-yourself with the matching filter, once you have confirmed in Cost Explorer that
-the filter actually returns your spend.
-
-#### ⚠️ Not available in GovCloud, and not in `--headless` either
-
-AWS Budgets does not exist in the AWS GovCloud (US) partition. GovCloud usage is
-billed through the associated standard AWS account, so a budget covering a
-GovCloud deployment is created in **that** account, by hand, and not by this
-template. The `--govcloud` template therefore does not carry the
-`MonthlyBudgetUSD` parameter at all, rather than carrying one that accepts a
-value and creates nothing. See [GovCloud deployment](govcloud-deployment.md).
-
-The **`--headless`** template does not carry it either, for two reasons that
-point the same way. The headless variant is the API-only template used for
-GovCloud batch deployments, so it has to be free of resource types that partition
-lacks; and the headless transform removes the `AdminEmail` parameter, so a
-headless deployment subscribes nothing to the alerts topic a budget would publish
-to. Create the budget in the account instead — the amount and the thresholds
-below apply unchanged. See [Headless deployment](headless-deployment.md).
-
-#### Recommended starting budget
-
-There is no single number, because per-document cost across the configurations
-this solution supports spans roughly two orders of magnitude. Measured figures
-from the benchmark suite bracket it:
-the OCR benchmark corpus costs **$0.02–0.05 per document** in simple mode, while
-large multi-page documents through advanced (agentic) mode measured
-**$1.22–$2.65 per document** across Sonnet 4.6, Sonnet 5, Opus 5 and GPT-6 Astra
-on the v0.6.11 grid. See
-[the configuration guidance](benchmarking/config-guidance.md) for the full
-matrix. Pick from your own arm of that range rather than averaging it.
-
-The method, in order:
-
-1. **Measure before you guess.** Process 20–50 representative documents and read
-   the per-document cost from the web UI's cost panel, or query
-   `SUM(estimated_cost)` grouped by `document_id` in the metering table. That is
-   your real per-document figure, for your documents, with your configuration.
-2. **Budget = (monthly document volume × measured cost per document) + the
-   always-on floor, then add 50% headroom.** The headroom is not padding: it is
-   what stops a normal month of growth, or a retry-heavy day, from alarming at
-   100% and training you to ignore the alert.
-3. **If you have no measurement yet, start at `500` for a pilot.** It is well
-   above a thousand-document month at the cheap end of the range above and well
-   below a runaway, so the first notification tells you which regime you are in.
-   Then replace it with the figure from step 2 after the first full month.
-
-Set the threshold where you want to *find out*, not where you want to stop. The
-80% notification is the useful one; by 100% the month is already spent.
-
 ### `DocumentEstimatedCost` — a CloudWatch metric you can alarm on
 
-Every document emits its estimated cost to CloudWatch when its reporting data is
-written, in the namespace named after your stack, alongside a companion metric:
+The per-document cost above is also emitted to CloudWatch when a document's
+reporting data is written, in the namespace named after your stack, alongside a
+companion metric:
 
 | Metric | Unit | Meaning |
 |---|---|---|
@@ -301,12 +178,88 @@ per-model, per-class breakdown already exists in the metering table, the Athena
 rollups and the UI's cost panel. What those cannot do is drive an alarm, which is
 the only thing this metric adds.
 
+> **The metric reports; it does not enforce.** Nothing in the stack throttles,
+> queues or stops processing when spend rises. `MaxConcurrentWorkflows` is the
+> only ex-ante lever the stack has, it is set at deploy time, and nothing moves it
+> at runtime.
+
 To alarm on a spend rate, create an alarm on `Sum` of `DocumentEstimatedCost`
 over a period that matches how fast you want to know — a 1-hour period with a
-threshold at a few percent of the monthly budget catches a runaway within the
-hour, long before AWS Budgets has the billing data. That alarm is yours to
+threshold at a few percent of your monthly expectation catches a runaway within
+the hour, long before AWS billing data exists for it. That alarm is yours to
 create: the stack does not create one, because the right threshold depends
 entirely on your volume.
+
+### AWS Cost Management Tools
+
+The stack creates no budget. In addition to the built-in cost tracking, set these
+up yourself:
+
+- **AWS Cost Explorer**: Analyze and visualize your costs and usage over time
+- **AWS Budgets**: Set a monthly cost budget and receive alerts when spend crosses
+  a threshold — see the recommended starting amount below
+- **AWS Cost and Usage Reports**: Generate detailed reports on your AWS costs and usage
+
+#### Recommended starting budget
+
+⚠️ **Scope the budget before you choose an amount, because the obvious scoping
+does not work.** An account-wide budget is the only one this solution can be sure
+is measuring something, and it measures *everything* in the account — so it is
+the right answer only where the stack has the account to itself. Filtering a
+budget to this stack's resource tags is the natural alternative and it would
+report a figure far below real spend, for two reasons that compound:
+
+1. **This solution's dominant cost carries no taggable resource.** Per-document
+   Bedrock inference is on-demand model invocation, and AWS is explicit that
+   [you cannot assign tags to on-demand models](https://repost.aws/knowledge-center/bedrock-add-cost-allocation-tags).
+   There is no tagged resource in the request, so no resource-tag cost filter can
+   see that spend. Amazon Textract API calls are the same. A stack-tag filter
+   captures the Lambda, DynamoDB and S3 line items — the small ones — and misses
+   the inference bill entirely.
+2. **A tag reaches a cost filter only after it is activated.** Cost-allocation
+   tags, including the `aws:cloudformation:stack-name` tag CloudFormation applies
+   for you, do nothing until someone **activates** them in the payer account's
+   Billing console. That is an account-level manual step, it can take up to 24
+   hours to take effect, and it is forward-looking only — it does not
+   retroactively tag spend already recorded.
+
+So: **deploy the stack into its own AWS account if you need the number to be this
+stack's**, and budget the account. If you must share an account, the route to
+per-stack attribution is
+[Bedrock application inference profiles](#cost-attribution-with-bedrock-application-inference-profiles)
+below plus activated cost-allocation tags — and confirm in Cost Explorer that
+your filter actually returns your spend before you trust a budget built on it.
+
+There is no single recommended amount, because per-document cost across the
+configurations this solution supports spans roughly two orders of magnitude.
+Measured figures from the benchmark suite bracket it: the OCR benchmark corpus
+costs **$0.02–0.05 per document** in simple mode, while large multi-page
+documents through advanced (agentic) mode measured **$1.22–$2.65 per document**
+across Sonnet 4.6, Sonnet 5, Opus 5 and GPT-6 Astra on the v0.6.11 grid. See
+[the configuration guidance](benchmarking/config-guidance.md) for the full
+matrix. Pick from your own arm of that range rather than averaging it.
+
+The method, in order:
+
+1. **Measure before you guess.** Process 20–50 representative documents and read
+   the per-document cost from the web UI's cost panel, from
+   `DocumentEstimatedCost`, or by querying `SUM(estimated_cost)` grouped by
+   `document_id` in the metering table. That is your real per-document figure,
+   for your documents, with your configuration.
+2. **Budget = (monthly document volume × measured cost per document) + the
+   always-on floor, then add 50% headroom.** The headroom is not padding: it is
+   what stops a normal month of growth, or a retry-heavy day, from alarming at
+   100% and training you to ignore the alert.
+3. **If you have no measurement yet, start at $500 for a pilot.** It is well
+   above a thousand-document month at the cheap end of the range above and well
+   below a runaway, so the first notification tells you which regime you are in.
+   Then replace it with the figure from step 2 after the first full month.
+
+Set the threshold where you want to *find out*, not where you want to stop. An
+80% notification is the useful one; by 100% the month is already spent. And note
+that AWS Budgets refreshes up to three times a day and billing data itself lags
+usage, so a budget is a monthly guardrail — the CloudWatch metric above is what
+tells you within the hour.
 
 ## Cost Attribution with Bedrock Application Inference Profiles
 

@@ -493,29 +493,6 @@ Parameters:
     MinValue: 1
     MaxValue: 10000
 
-  # Spend visibility (GitHub issue #934, items 1 and 2). NOTIFICATION ONLY --
-  # neither the budget nor the DocumentEstimatedCost metric throttles or stops
-  # anything. See docs/cost-calculator.md.
-  MonthlyBudgetUSD:
-    Type: String
-    Default: ""
-    AllowedPattern: "^$|^(0|[1-9][0-9]{0,8})(\\.[0-9]{1,2})?$"
-    Description: >-
-      (Optional) Monthly cost budget in USD, e.g. "500" or "500.00". Leave EMPTY
-      (the default) and no budget is created. When set, an AWS Budgets monthly
-      COST budget notifies this stack's alerts topic once actual spend passes 80%
-      and again past 100% of the amount. It NOTIFIES ONLY -- nothing is
-      throttled, queued or stopped, and documents keep processing. NOTE: the
-      budget measures the WHOLE ACCOUNT's AWS cost, not this stack's share of it,
-      because this solution's dominant cost is on-demand Bedrock inference, which
-      carries no taggable resource and so is invisible to a stack-tag cost
-      filter. Deploy into a dedicated account if you need the figure to be this
-      stack alone. AWS Budgets does not exist in the GovCloud partition, so the
-      --govcloud template drops this parameter and the budget with it -- and so
-      does --headless, whose output is the variant used for GovCloud batch
-      deployments and which also removes the AdminEmail subscription this would
-      notify. Create the budget in the account directly for either variant.
-
   DataRetentionInDays:
     Type: Number
     Default: 365
@@ -1362,25 +1339,6 @@ Conditions:
   # wedge in UPDATE_ROLLBACK_FAILED — the rollback needs the same action, so it
   # cannot self-recover. See issue #632.
   IsGovCloudPartition: !Equals [ !Ref "AWS::Partition", "aws-us-gov" ]
-  # The optional monthly cost budget (issue #934 item 1). Two legs, and both are
-  # load-bearing:
-  #
-  #   * MonthlyBudgetUSD unset -> no budget, no topic policy, no KMS grant. This
-  #     is the default, so an existing deployment gains nothing it did not ask
-  #     for and the stack's SNS access policy is left exactly as SNS created it.
-  #   * NOT GovCloud. `AWS::Budgets::Budget` does not exist in the aws-us-gov
-  #     partition at all -- GovCloud billing is managed from the linked standard
-  #     account -- so there is nothing for CloudFormation to create there. This
-  #     leg is belt-and-braces rather than the mechanism: a resource TYPE that
-  #     does not exist in the region is rejected even behind a false Condition
-  #     (the reason GovCloudTemplateTransformer physically deletes the
-  #     CloudFront resources rather than conditioning them), so the --govcloud
-  #     transform removes the budget, this condition and the parameter. What the
-  #     leg buys is that a hand-edited or partially transformed template still
-  #     cannot try to create a budget in a partition that has no AWS Budgets.
-  ShouldCreateMonthlyBudget: !And
-    - !Not [ !Equals [ !Ref MonthlyBudgetUSD, "" ] ]
-    - !Not [ !Condition IsGovCloudPartition ]
   HasCustomConfigPath: !Not [ !Equals [ !Ref CustomConfigPath, "" ] ]
   # When the LWA layer ARN is left blank, construct the region/partition default.
   HasLambdaWebAdapterLayerArn:
@@ -1658,7 +1616,6 @@ Metadata:
           default: "General Configuration"
         Parameters:
           - MaxConcurrentWorkflows
-          - MonthlyBudgetUSD
           - DataRetentionInDays
           - ErrorThreshold
           - ExecutionTimeThresholdMs
@@ -3407,32 +3364,6 @@ Resources:
               - kms:Decrypt
               - kms:GenerateDataKey*
             Resource: "*"
-          # AWS Budgets publishes its threshold notifications to AlertsTopic as
-          # the `budgets` service principal, and AlertsTopic is encrypted with
-          # this key -- so without this grant the budget is created, shows the
-          # right spend in the console, and the 80%/100% notification is dropped
-          # with nothing anywhere saying so. Exactly the failure the CloudWatch
-          # Alarms grant above was added for.
-          #
-          # Deliberately carries NO `aws:SourceAccount` condition, unlike the SNS
-          # topic policy below where AWS documents that condition verbatim. The
-          # KMS call here is made by the budgets service itself; whether it
-          # populates that context key is not documented, and a condition key
-          # that is absent evaluates to DENY -- which would reinstate the silent
-          # drop this statement exists to prevent. The grant is only usable to
-          # encrypt a message for a topic in this account, which is also why the
-          # CloudWatch statement above carries no condition either.
-          - !If
-            - ShouldCreateMonthlyBudget
-            - Sid: Allow AWS Budgets to use the key for SNS
-              Effect: Allow
-              Principal:
-                Service: !Sub "budgets.${AWS::URLSuffix}"
-              Action:
-                - kms:Decrypt
-                - kms:GenerateDataKey*
-              Resource: "*"
-            - !Ref AWS::NoValue
           - !If
             - IsS3VectorsVectorStore
             - Sid: Allow S3 Vectors indexing service to use the key
@@ -9217,147 +9148,6 @@ Resources:
       TopicArn: !Ref AlertsTopic
       Protocol: email
       Endpoint: !Ref AdminEmail
-
-  ##########################################################################
-  # Optional monthly cost budget (GitHub issue #934, item 1)
-  #
-  # NOTIFICATION ONLY. The budget publishes to AlertsTopic at 80% and 100% of
-  # MonthlyBudgetUSD and does nothing else: no document is refused, no queue is
-  # paused, MaxConcurrentWorkflows is untouched. Enforcement is a separate,
-  # undecided question (issue #934 item 3) and nothing here anticipates it.
-  #
-  # WHAT IT MEASURES, which is the part to read before trusting it: the WHOLE
-  # ACCOUNT's cost, with no cost filter. That is a deliberate choice over the
-  # tag-filtered budget the issue proposed, because a stack-tag filter cannot
-  # see this solution's dominant cost:
-  #
-  #   * On-demand Bedrock inference has no taggable resource -- "you can't assign
-  #     tags to on-demand models" -- so Bedrock InvokeModel/Converse spend
-  #     carries no resource tag to filter on. Attributing it needs an
-  #     application inference profile, an IAM-principal tag or a Bedrock
-  #     Project, all configured outside this template (see the "Cost Attribution
-  #     with Bedrock Application Inference Profiles" section of
-  #     docs/cost-calculator.md). Textract has no taggable resource either.
-  #   * A tag only reaches a cost filter after it is ACTIVATED as a
-  #     cost-allocation tag in the payer account -- a manual, account-level step
-  #     no template can perform.
-  #
-  # Each of those alone makes a tag-filtered budget report a number far below
-  # real spend; together they make it report approximately nothing. A budget that
-  # measures zero never alarms, and is indistinguishable from a budget that is
-  # working. An account-scoped budget over-reports when the account holds other
-  # workloads -- documented, and the safe direction, since it alarms early
-  # instead of never.
-  ##########################################################################
-
-  # AWS Budgets cannot publish to AlertsTopic under the topic's DEFAULT access
-  # policy, which admits only this account's own IAM principals -- CreateBudget
-  # fails with "Invalid SNS topic". Creating an AWS::SNS::TopicPolicy REPLACES
-  # that default policy outright, so the owner-account statement SNS writes
-  # implicitly is restated here verbatim; omitting it would silently revoke
-  # Subscribe/Publish/SetTopicAttributes from this account, taking the admin
-  # email subscription and the Lambda publishers with it. Conditioned on the same
-  # condition as the budget, so a deployment that sets no budget keeps the
-  # untouched SNS default rather than a hand-written copy of it.
-  AlertsTopicBudgetsPolicy:
-    Type: AWS::SNS::TopicPolicy
-    Condition: ShouldCreateMonthlyBudget
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: F18
-            reason: "Restates the SNS default policy statement, whose owner-account form is Principal AWS * bounded by AWS:SourceOwner = this account. Narrowing it would revoke access SNS grants by default."
-    Properties:
-      Topics:
-        - !Ref AlertsTopic
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowOwnerAccountDefaultTopicAccess
-            Effect: Allow
-            Principal:
-              AWS: "*"
-            Action:
-              - SNS:GetTopicAttributes
-              - SNS:SetTopicAttributes
-              - SNS:AddPermission
-              - SNS:RemovePermission
-              - SNS:DeleteTopic
-              - SNS:Subscribe
-              - SNS:ListSubscriptionsByTopic
-              - SNS:Publish
-            Resource: !Ref AlertsTopic
-            Condition:
-              StringEquals:
-                AWS:SourceOwner: !Ref AWS::AccountId
-          # Conditions as AWS documents them for budget notifications: bounded to
-          # budgets owned by this account, so the grant cannot be used by another
-          # account's budget naming this topic.
-          - Sid: AllowAWSBudgetsToPublishAlerts
-            Effect: Allow
-            Principal:
-              Service: !Sub "budgets.${AWS::URLSuffix}"
-            Action: SNS:Publish
-            Resource: !Ref AlertsTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub "arn:${AWS::Partition}:budgets::${AWS::AccountId}:*"
-          # The transport control every other resource policy in this template
-          # carries. scripts/tests/test_secure_transport_deny.py deliberately
-          # left AWS::SNS::TopicPolicy unjudged with a note naming the alerts
-          # work as "the likely occasion" on which somebody would add the first
-          # one and have to decide -- this is that occasion, and the decision is
-          # that the deny applies. Nothing here publishes over plain HTTP: the
-          # budgets and cloudwatch service principals call SNS over TLS, as does
-          # every SDK publisher in the stack.
-          - Sid: EnforceSSLOnly
-            Effect: Deny
-            Principal: "*"
-            Action: "SNS:*"
-            Resource: !Ref AlertsTopic
-            Condition:
-              Bool:
-                "aws:SecureTransport": false
-
-  # DependsOn, not an implicit ordering: CreateBudget validates that it can reach
-  # the SNS subscriber at creation time, so the topic policy has to be in place
-  # first. Without it the budget's creation is a coin toss on resource ordering.
-  MonthlyCostBudget:
-    Type: AWS::Budgets::Budget
-    Condition: ShouldCreateMonthlyBudget
-    DependsOn: AlertsTopicBudgetsPolicy
-    Properties:
-      Budget:
-        BudgetName: !Sub "${AWS::StackName}-monthly-cost"
-        BudgetType: COST
-        TimeUnit: MONTHLY
-        BudgetLimit:
-          Amount: !Ref MonthlyBudgetUSD
-          Unit: USD
-      NotificationsWithSubscribers:
-        # ACTUAL, not FORECASTED, at both thresholds: a forecast on a workload
-        # whose volume is driven by uploads swings wildly in the first days of a
-        # month, and the first thing this has to be is believable.
-        # GREATER_THAN is the operator used because AWS Budgets offers only
-        # GREATER_THAN / LESS_THAN / EQUAL_TO -- there is no >=.
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            ThresholdType: PERCENTAGE
-            Threshold: 80
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref AlertsTopic
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            ThresholdType: PERCENTAGE
-            Threshold: 100
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref AlertsTopic
 
   # The metric name is `ExecutionsFailed`, NOT `ExecutionsFailedCount` -- the
   # latter does not exist in AWS/States, so an alarm pointed at it can never
