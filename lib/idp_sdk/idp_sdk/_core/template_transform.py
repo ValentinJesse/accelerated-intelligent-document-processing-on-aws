@@ -117,6 +117,132 @@ class _PolicyStatementRemovalReporter:
             f"document(s){suffix} — {detail}"
         )
 
+    # The optional monthly cost budget (GitHub issue #934 item 1). AWS Budgets is
+    # a billing-level service and does not exist in the aws-us-gov partition —
+    # GovCloud usage is billed through the linked standard account, and
+    # `AWS::Budgets::Budget` is reported `isNotAvailableIn` for both GovCloud
+    # regions. The main template already gates the budget on
+    # `ShouldCreateMonthlyBudget`, which has a `!Not [!Condition
+    # IsGovCloudPartition]` leg, but a Condition is not enough: a resource type
+    # absent from the region is rejected even when its condition is false (the
+    # same reason the CloudFront resources are deleted rather than conditioned),
+    # so the resource is removed here and the now-dead parameter and condition go
+    # with it. Dropping the parameter is the point as much as dropping the
+    # resource — a surviving `MonthlyBudgetUSD` in the GovCloud template would
+    # accept a value and create nothing, which looks like a configured budget and
+    # is not one. The operator's route is a budget in the linked standard
+    # account; see docs/cost-calculator.md.
+    BUDGET_RESOURCE_TYPES = frozenset({"AWS::Budgets::Budget"})
+    BUDGET_PARAMETERS = {"MonthlyBudgetUSD"}
+    BUDGET_CONDITIONS = {"ShouldCreateMonthlyBudget"}
+
+    def _collapse_condition_ifs(
+        self, node: Any, condition: str, counter: List[int]
+    ) -> Any:
+        """Collapse every ``Fn::If`` on ``condition`` to its else-branch.
+
+        The general form of :meth:`_collapse_hosting_ifs`. Used wherever a
+        condition is about to be deleted from the template: an ``Fn::If`` naming
+        a condition that no longer exists is a template-validation failure, so
+        the reference has to go at the same time as the condition. ``Fn::If``
+        nodes on every other condition are left intact, and their subtrees are
+        still walked.
+        """
+        if isinstance(node, dict):
+            if (
+                "Fn::If" in node
+                and isinstance(node["Fn::If"], list)
+                and len(node["Fn::If"]) == 3
+                and node["Fn::If"][0] == condition
+            ):
+                counter[0] += 1
+                # Recurse into the chosen (else) branch in case of nesting.
+                return self._collapse_condition_ifs(
+                    node["Fn::If"][2], condition, counter
+                )
+            return {
+                k: self._collapse_condition_ifs(v, condition, counter)
+                for k, v in node.items()
+            }
+        if isinstance(node, list):
+            return [self._collapse_condition_ifs(v, condition, counter) for v in node]
+        return node
+
+    def _remove_budget_resources(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove the optional monthly cost budget (no AWS Budgets in GovCloud).
+
+        Removes, in the order that keeps the template valid at every step:
+
+        1. every resource of a type in :attr:`BUDGET_RESOURCE_TYPES`, and every
+           resource carrying one of :attr:`BUDGET_CONDITIONS` — the latter is
+           what takes the SNS topic policy that exists only to let the budgets
+           service principal publish. ``AWS::SNS::TopicPolicy`` is perfectly
+           available in GovCloud, so this is a dead-weight removal rather than a
+           compatibility one, and it matters: left behind, the transform would
+           replace the alerts topic's default access policy with a copy of it
+           plus a grant to a service that is not in the partition;
+        2. every ``Fn::If`` naming one of those conditions, collapsed to its
+           else-branch, because a reference to a condition the template no longer
+           declares fails validation. The only one today is the budgets grant in
+           the customer-managed KMS key policy, whose else-branch is
+           ``AWS::NoValue``;
+        3. the conditions themselves and the now-dead ``MonthlyBudgetUSD``
+           parameter.
+
+        Deleting the parameter is as much the point as deleting the resource. A
+        surviving ``MonthlyBudgetUSD`` would be accepted by a deploy and create
+        nothing — a budget that reads as configured and does not exist.
+
+        Shared by BOTH transforms. ``--headless`` needs it as much as
+        ``--govcloud`` does, and for a reason that is not obvious from the flag's
+        name: the headless template is the API-only variant used for GovCloud
+        batch deployments, so it is linted against a GovCloud region too
+        (``test_real_template_headless_passes_govcloud_region_cfn_lint``), and a
+        resource type that partition lacks fails there whatever its condition
+        says. It is also the right answer on the merits — the headless transform
+        removes ``AdminEmail``, so nothing is subscribed to the alerts topic the
+        budget would publish to.
+        """
+        resources = template.get("Resources", {})
+        # Recorded where the transform keeps a removal log, so its own
+        # dangling-reference post-condition covers these too. Read lazily: the
+        # base class deliberately needs no __init__ cooperation from either
+        # transformer, and only one of them keeps this set.
+        removed_ids = getattr(self, "_removed_logical_ids", None)
+        for name in list(resources.keys()):
+            res = resources[name]
+            if not isinstance(res, dict):
+                continue
+            if (
+                res.get("Type") in self.BUDGET_RESOURCE_TYPES
+                or res.get("Condition") in self.BUDGET_CONDITIONS
+            ):
+                del resources[name]
+                if removed_ids is not None:
+                    removed_ids.add(name)
+                logger.debug(f"Removed budget resource: {name}")
+
+        collapsed = [0]
+        for condition in sorted(self.BUDGET_CONDITIONS):
+            template = self._collapse_condition_ifs(template, condition, collapsed)
+        if collapsed[0]:
+            logger.debug(
+                f"Collapsed {collapsed[0]} Fn::If on a removed budget condition"
+            )
+
+        conditions = template.get("Conditions", {})
+        for name in self.BUDGET_CONDITIONS:
+            if name in conditions:
+                del conditions[name]
+                logger.debug(f"Removed budget condition: {name}")
+
+        params = template.get("Parameters", {})
+        for name in self.BUDGET_PARAMETERS:
+            if name in params:
+                del params[name]
+                logger.debug(f"Removed budget parameter: {name}")
+        return template
+
 
 class HeadlessTemplateTransformer(_PolicyStatementRemovalReporter):
     """Transform IDP CloudFormation templates for headless (no-UI) deployment.
@@ -567,6 +693,12 @@ class HeadlessTemplateTransformer(_PolicyStatementRemovalReporter):
         """
         self._reset_policy_statement_removals()
         template = self._remove_resources(template)
+        # The optional monthly cost budget. Not a UI resource, so it is not in
+        # any of the removal sets above — but the headless template is the
+        # variant used for GovCloud batch deployments and is linted against a
+        # GovCloud region, where AWS Budgets does not exist. See
+        # _remove_budget_resources.
+        template = self._remove_budget_resources(template)
         template = self._remove_parameters(template)
         template = self._remove_outputs(template)
         template = self._remove_conditions(template)
@@ -1237,6 +1369,12 @@ class HeadlessTemplateTransformer(_PolicyStatementRemovalReporter):
         interface = metadata.get("AWS::CloudFormation::Interface", {})
         parameter_groups = interface.get("ParameterGroups", [])
 
+        # `_remove_budget_resources` deletes MonthlyBudgetUSD without going
+        # through `parameters_to_remove`, so the interface cleanup has to know
+        # about both sets or the console shows a group entry naming a parameter
+        # the template no longer declares.
+        removed_params = self.parameters_to_remove | self.BUDGET_PARAMETERS
+
         if not parameter_groups:
             return template
 
@@ -1248,9 +1386,7 @@ class HeadlessTemplateTransformer(_PolicyStatementRemovalReporter):
                 continue
 
             original_params = group.get("Parameters", [])
-            cleaned_params = [
-                p for p in original_params if p not in self.parameters_to_remove
-            ]
+            cleaned_params = [p for p in original_params if p not in removed_params]
             if cleaned_params:
                 group["Parameters"] = cleaned_params
                 cleaned_groups.append(group)
@@ -1260,7 +1396,7 @@ class HeadlessTemplateTransformer(_PolicyStatementRemovalReporter):
         # Clean parameter labels
         parameter_labels = interface.get("ParameterLabels", {})
         for param_name in list(parameter_labels.keys()):
-            if param_name in self.parameters_to_remove:
+            if param_name in removed_params:
                 del parameter_labels[param_name]
 
         return template
@@ -1444,6 +1580,9 @@ class GovCloudTemplateTransformer(_PolicyStatementRemovalReporter):
         template = self._remove_cloudfront_conditions(template)
         template = self._remove_cloudfront_outputs(template)
         template = self._remove_cloudfront_policy_statements(template)
+        # 2b. Remove the optional monthly cost budget — AWS Budgets does not
+        #     exist in this partition (see BUDGET_RESOURCE_TYPES).
+        template = self._remove_budget_resources(template)
         template = self._clean_parameter_groups(template)
         # 3. Remove AWS::Lambda::Url resources — Lambda Function URLs are NOT
         #    available in GovCloud (per the AWS GovCloud Lambda docs), so they
@@ -1522,20 +1661,7 @@ class GovCloudTemplateTransformer(_PolicyStatementRemovalReporter):
         is the API-Gateway path in this template. All other Fn::If nodes are left
         intact (their subtrees are still recursed into).
         """
-        if isinstance(node, dict):
-            if (
-                "Fn::If" in node
-                and isinstance(node["Fn::If"], list)
-                and len(node["Fn::If"]) == 3
-                and node["Fn::If"][0] == self.HOSTING_CONDITION
-            ):
-                counter[0] += 1
-                # Recurse into the chosen (else) branch in case of nesting.
-                return self._collapse_hosting_ifs(node["Fn::If"][2], counter)
-            return {k: self._collapse_hosting_ifs(v, counter) for k, v in node.items()}
-        if isinstance(node, list):
-            return [self._collapse_hosting_ifs(v, counter) for v in node]
-        return node
+        return self._collapse_condition_ifs(node, self.HOSTING_CONDITION, counter)
 
     # ---- Removal helpers ----
 
@@ -2182,7 +2308,7 @@ class GovCloudTemplateTransformer(_PolicyStatementRemovalReporter):
         metadata = template.get("Metadata", {})
         interface = metadata.get("AWS::CloudFormation::Interface", {})
         groups = interface.get("ParameterGroups", [])
-        removed = self.CLOUDFRONT_PARAMETERS
+        removed = self.CLOUDFRONT_PARAMETERS | self.BUDGET_PARAMETERS
         for group in groups:
             plist = group.get("Parameters", [])
             group["Parameters"] = [p for p in plist if p not in removed]
@@ -2261,7 +2387,10 @@ class GovCloudTemplateTransformer(_PolicyStatementRemovalReporter):
     # Resource types that do not exist in GovCloud regions and would raise
     # cfn-lint E3006 (and fail deployment) if left in the template.
     GOVCLOUD_UNSUPPORTED_TYPE_PREFIXES = ("AWS::CloudFront::",)
-    GOVCLOUD_UNSUPPORTED_TYPES = frozenset({"AWS::Lambda::Url"})
+    GOVCLOUD_UNSUPPORTED_TYPES = frozenset(
+        {"AWS::Lambda::Url"}
+        | set(_PolicyStatementRemovalReporter.BUDGET_RESOURCE_TYPES)
+    )
 
     def validate_no_cloudfront(self, template: Dict[str, Any]) -> bool:
         """Assert no GovCloud-unsupported resource types or dangling refs remain.

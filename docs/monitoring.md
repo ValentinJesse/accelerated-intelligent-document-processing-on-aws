@@ -1356,6 +1356,29 @@ Monitor resource usage and costs:
 - **S3 Storage**: Track storage growth over time
 - **Data Transfer**: Monitor network costs between services
 
+### `DocumentEstimatedCost` and the optional monthly budget
+
+Two cost signals are emitted by the stack itself rather than inferred from the
+metrics above, and **both notify rather than enforce** — nothing is throttled or
+stopped when a threshold is crossed:
+
+- **`DocumentEstimatedCost`** (and its companion `UnpricedMeteringRows`), in the
+  stack's own metric namespace: one datapoint per completed document, carrying
+  the cost already written to that document's metering rows. `Sum` over a period
+  is spend in that period, which is the shape a spend alarm wants. Neither metric
+  carries dimensions, for a reason worth reading before adding one.
+- **`MonthlyBudgetUSD`**, an optional stack parameter that creates an AWS Budgets
+  monthly cost budget publishing to `AlertsTopic` at 80% and 100%. Empty by
+  default. It measures the **whole account**, not this stack, and the parameter
+  is absent from the `--govcloud` and `--headless` templates.
+
+The dimension reasoning, what the budget can and cannot see, and a method for
+choosing the amount are in
+[Cost Considerations](cost-calculator.md#bounding-spend-the-monthly-budget-and-the-documentestimatedcost-metric).
+Note that a budget notification reaches nobody unless something is subscribed to
+`AlertsTopic` — see [Who receives the alerts](#who-receives-the-alerts), which
+applies to budget notifications exactly as it does to alarms.
+
 ## Custom Dashboard Creation
 
 You can create custom dashboards focused on specific aspects:

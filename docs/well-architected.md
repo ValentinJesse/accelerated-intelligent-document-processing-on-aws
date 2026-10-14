@@ -57,8 +57,8 @@ created when you enable the Bedrock circuit breaker); two CloudWatch dashboards;
 X-Ray tracing on the document-processing Lambda functions and both state machines, which
 `EnableXRayTracing` turns off in one place if you do not want it; Step Functions retry and catch
 blocks with dead-letter queues behind every SQS consumer; a customer-managed KMS key
-encrypting the DynamoDB tables, S3 buckets, SNS topics and log groups; 33 TLS-only
-resource policies on buckets and queues; S3 versioning and DynamoDB point-in-time recovery;
+encrypting the DynamoDB tables, S3 buckets, SNS topics and log groups; 34 TLS-only
+resource policies on buckets, queues and the alerts topic; S3 versioning and DynamoDB point-in-time recovery;
 Cognito authentication with a REST API authorizer; concurrency admission control; and
 per-invocation token and cost metering written to a queryable ledger.
 
@@ -216,15 +216,17 @@ Protection verdict, before any execution starts; it is `DISABLED` by default, an
 its detection is signature, YARA and ML based with no behavioural analysis. See
 [malware-scanning.md](./malware-scanning.md).
 
-**Data protection in transit.** 33 resource policies deny requests where
+**Data protection in transit.** 34 resource policies deny requests where
 `aws:SecureTransport` is false, and there is no exception: in `template.yaml`, all
-thirteen S3 bucket policies and all seventeen SQS queue policies carry the deny, plus one
-further queue policy in `patterns/unified/template.yaml` and two in the optional
-`feature-platform/idp-data-generator/` extension. Those are *declared* policies; three of
-the seventeen are conditional, so the number a given stack actually has is lower — a
-default deployment without the data-generator extension has 28, gaining the malware
-verdict DLQ's policy when `MalwareScanning` is enabled, and the job-tracker and
-post-processing DLQ policies with their own features. All thirteen buckets also set
+thirteen S3 bucket policies, all seventeen SQS queue policies and the alerts topic's
+policy carry the deny, plus one further queue policy in
+`patterns/unified/template.yaml` and two in the optional
+`feature-platform/idp-data-generator/` extension. Those are *declared* policies; four of
+the eighteen in `template.yaml` are conditional, so the number a given stack actually has
+is lower — a default deployment without the data-generator extension has 28, gaining the
+alerts topic's policy when `MonthlyBudgetUSD` is set, the malware verdict DLQ's policy
+when `MalwareScanning` is enabled, and the job-tracker and post-processing DLQ policies
+with their own features. All thirteen buckets also set
 `PublicAccessBlockConfiguration`, and twelve send server access logs to the logging
 bucket.
 
@@ -342,12 +344,12 @@ runtime role surface against privilege-escalation regressions.
 
 Resource scoping is a separate question from boundaries, and it is the weaker of the two
 here. Counting across the eleven templates that make up the solution and its optional
-extensions, 128 IAM policy statements are written against `Resource: "*"` — 53 in
+extensions, 129 IAM policy statements are written against `Resource: "*"` — 54 in
 `template.yaml`, 40 in `patterns/unified/template.yaml`, 8 in
 `nested/multi-doc-discovery/template.yaml`, and the remainder in the other nested stacks,
 `iam-roles/` and `feature-platform/`. A large share of them are unavoidable, because the
 API being called accepts no resource ARN: `cloudwatch:PutMetricData` alone accounts for 29
-of the 128, and the X-Ray read actions, `textract:DetectDocumentText` and
+of the 129, and the X-Ray read actions, `textract:DetectDocumentText` and
 `textract:AnalyzeDocument` are account-scoped in the same way. The rest have not been
 audited statement by statement, so treat the number as a surface to review rather than as a
 count of findings. A permissions boundary is the practical lever for narrowing whatever you
@@ -452,7 +454,7 @@ clears on its own — expected behavior, not a second fault. See
 **Decoupling and fault isolation.** SQS queues buffer ingestion from processing, so a
 downstream failure or a Bedrock throttle backs up in a queue rather than dropping work.
 The nested-stack split keeps a pipeline change from touching the ingestion, tracking and
-UI resources. It is also what buys room to grow: `template.yaml` declares 342 top-level
+UI resources. It is also what buys room to grow: `template.yaml` declares 344 top-level
 resources against CloudFormation's hard limit of 500 per stack, so if you plan to extend
 the solution through the `feature-platform/` mechanism, that remaining budget is the number
 to watch, and a new extension is better added as its own nested stack than as more
