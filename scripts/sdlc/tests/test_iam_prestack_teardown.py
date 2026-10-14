@@ -296,7 +296,9 @@ def test_an_unreadable_prestack_is_reported_as_unverified(cbd, monkeypatch):
         def describe_stacks(self, StackName):  # noqa: N803
             raise _AwsError("Throttling", "Rate exceeded")
 
-    _install(cbd, monkeypatch, _FakeIam({}), _Blind({f"{STACK}-iam": "CREATE_COMPLETE"}))
+    _install(
+        cbd, monkeypatch, _FakeIam({}), _Blind({f"{STACK}-iam": "CREATE_COMPLETE"})
+    )
 
     findings = cbd.verify_iam_resources_gone(STACK)
 
@@ -361,7 +363,9 @@ def test_the_success_message_is_withheld_when_the_account_is_not_clean(
     )
     _install(cbd, monkeypatch, iam, _FakeCfn({}))
 
-    assert cbd.verify_iam_resources_gone(STACK), "a leftover policy must produce a finding"
+    assert cbd.verify_iam_resources_gone(STACK), (
+        "a leftover policy must produce a finding"
+    )
     assert "✅ Verified gone" not in capsys.readouterr().out
 
 
@@ -567,6 +571,52 @@ def test_policy_reaper_spares_a_young_policy(cbd, monkeypatch):
     cbd.cleanup_stale_idp_policies()
 
     assert BOUNDARY_ARN in iam.policies
+
+
+@pytest.mark.parametrize(
+    "create_date",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("2026-07-10T12:00:00Z", id="a-string-not-a-datetime"),
+        pytest.param(datetime(2020, 1, 1), id="naive-no-tzinfo"),  # noqa: DTZ001
+    ],
+    indirect=False,
+)
+def test_policy_reaper_spares_a_policy_whose_age_it_cannot_establish(
+    cbd, monkeypatch, capsys, create_date
+):
+    # Every other guard in the reaper fails CLOSED. This one must too: an age
+    # that cannot be established is not the same claim as "old enough", and
+    # this is the one path here that issues delete_policy against a shared CI
+    # account. A naive datetime is included because subtracting it from an
+    # aware `now` raises, which the reaper's blanket except would turn into an
+    # abandoned sweep rather than one skipped policy.
+    entry = _policy(BOUNDARY, BOUNDARY_ARN)
+    entry["CreateDate"] = create_date
+    iam = _FakeIam({BOUNDARY_ARN: entry})
+    _install_reaper(cbd, monkeypatch, iam, [])
+
+    cbd.cleanup_stale_idp_policies()
+
+    assert BOUNDARY_ARN in iam.policies
+    assert iam.delete_calls == []
+    out = capsys.readouterr().out
+    # Named, not merely counted -- and not misreported as "younger than the
+    # gate", which is a different fact and needs no attention.
+    assert BOUNDARY in out
+    assert "age not establishable" in out
+    assert "younger than the age gate" not in out
+    # The sweep still completed rather than being abandoned by an exception.
+    assert "No orphaned idp- IAM managed policies to reap" in out
+
+
+def test_policy_age_helper_answers_none_only_when_unestablishable(cbd):
+    now = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+    assert cbd._policy_age_seconds({}, now) is None
+    assert cbd._policy_age_seconds({"CreateDate": "2026-07-10"}, now) is None
+    assert cbd._policy_age_seconds({"CreateDate": datetime(2026, 7, 10)}, now) is None  # noqa: DTZ001
+    aware = datetime(2026, 7, 10, 6, 0, tzinfo=timezone.utc)
+    assert cbd._policy_age_seconds({"CreateDate": aware}, now) == 6 * 3600
 
 
 def test_policy_reaper_spares_the_shared_probe_boundary(cbd, monkeypatch):

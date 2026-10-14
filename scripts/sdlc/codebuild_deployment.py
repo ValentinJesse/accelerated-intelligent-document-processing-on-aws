@@ -6248,6 +6248,21 @@ def cleanup_stale_idp_buckets():
 IDP_POLICY_STALE_AGE_SECONDS = 6 * 3600  # 6h
 
 
+def _policy_age_seconds(policy, now):
+    """Age of a `list_policies` entry in seconds, or None if not establishable.
+
+    None is returned for an absent `CreateDate`, one that is not a datetime, and
+    one that is naive (no tzinfo) — subtracting a naive datetime from an
+    aware `now` raises, which inside the reaper's blanket `except` would abandon
+    the whole sweep rather than one policy. The caller must treat None as "the
+    age gate cannot be satisfied", never as old enough.
+    """
+    created = policy.get("CreateDate")
+    if not isinstance(created, datetime) or created.tzinfo is None:
+        return None
+    return (now - created).total_seconds()
+
+
 def cleanup_stale_idp_policies():
     """Reap orphaned `idp-MMDD-HHMMSS*` IAM managed policies whose run is gone.
 
@@ -6263,8 +6278,20 @@ def cleanup_stale_idp_policies():
         for no run, so it can never match and concurrent probes keep sharing it,
       * that run has NO surviving CloudFormation stack — so an in-flight run, and
         a stack deliberately retained for inspection, are both untouchable, and
-      * it is older than IDP_POLICY_STALE_AGE_SECONDS, a backstop for the window
-        between creating the boundary and the stack that will protect it.
+      * its age is KNOWN and exceeds IDP_POLICY_STALE_AGE_SECONDS, a backstop for
+        the window between creating the boundary and the stack that will protect
+        it.
+
+    Every one of those three fails CLOSED, the age one included: a policy whose
+    `CreateDate` the listing did not carry has an age that cannot be
+    established, which is not the same claim as being old enough to delete, and
+    this is the one path here that issues `delete_policy` against a shared CI
+    account. It is reported in its own counter rather than folded into the
+    too-young one, because "younger than the gate" and "age unknown" are
+    different facts and only the second needs looking at. The distinction is the
+    same one verify_iam_resources_gone draws between a finding and an
+    `UNVERIFIED:` — an API answer that cannot establish something is not
+    evidence for it.
 
     Convergent rather than immediate: the stack reaper above only *issues* its
     deletes, so a run reaped this minute still has stacks and is skipped here
@@ -6277,6 +6304,7 @@ def cleanup_stale_idp_policies():
         protected = _live_idp_run_prefixes()
 
         stale, skipped_protected, skipped_young = [], 0, 0
+        unknown_age = []
         paginator = iam.get_paginator("list_policies")
         for page in paginator.paginate(Scope="Local"):
             for policy in page.get("Policies", []):
@@ -6287,9 +6315,15 @@ def cleanup_stale_idp_policies():
                 if match.group(1) in protected:
                     skipped_protected += 1
                     continue
-                created = policy.get("CreateDate")
-                age = (now - created).total_seconds() if created else None
-                if age is not None and age < IDP_POLICY_STALE_AGE_SECONDS:
+                age = _policy_age_seconds(policy, now)
+                if age is None:
+                    # Age not establishable, so the age gate cannot be satisfied.
+                    # Named rather than counted: this should not happen, and a
+                    # silent skip would leave a policy accumulating against the
+                    # quota with nothing saying which one.
+                    unknown_age.append(name)
+                    continue
+                if age < IDP_POLICY_STALE_AGE_SECONDS:
                     skipped_young += 1
                     continue
                 stale.append((name, policy.get("Arn", "")))
@@ -6298,6 +6332,11 @@ def cleanup_stale_idp_policies():
             print(
                 f"  ({skipped_protected} protected by a live stack, "
                 f"{skipped_young} younger than the age gate — skipped)"
+            )
+        for name in sorted(unknown_age):
+            print(
+                f"  ⚠️ {name}: age not establishable from the listing — NOT "
+                "reaped (the age gate cannot be satisfied, and this path deletes)"
             )
         if not stale:
             print("✅ No orphaned idp- IAM managed policies to reap")
