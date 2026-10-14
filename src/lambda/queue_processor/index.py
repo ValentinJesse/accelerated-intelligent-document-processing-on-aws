@@ -921,17 +921,26 @@ def _claim_half_open_probe() -> bool:
     """Try to claim one of HALF_OPEN's bounded probe slots.
 
     **The budget is per rolling window, not per half-open episode**, and that
-    is the load-bearing design choice rather than an approximation of one. A
-    per-episode budget deadlocks this breaker: nothing moves HALF_OPEN back to
-    OPEN (the manager's health check only promotes OPEN -> HALF_OPEN, and the
-    alarm's ALARM handler needs a *new* ALARM transition, which cannot happen
-    while the alarm is already in ALARM), and HALF_OPEN -> CLOSED needs a
-    workflow to *succeed*. So once an episode's budget were spent with no
-    successful probe, the breaker would refuse every document forever — the
-    service could recover and nothing would notice. A window budget degrades a
-    sustained outage to a trickle instead, and the trickle is what detects
-    recovery: the first probe that completes successfully closes the breaker
-    (``workflow_tracker.notify_circuit_breaker``).
+    is the load-bearing design choice rather than an approximation of one. The
+    trickle a window budget allows is what detects recovery: the first probe
+    that completes successfully closes the breaker
+    (``workflow_tracker.notify_circuit_breaker``), and nothing in this state
+    reports a probe *failure*, so the only way to find out that the service is
+    back is to keep trying. A per-episode budget stops the trying — once spent
+    with no success, nothing further is admitted for the rest of the episode —
+    and a window budget keeps it going at a fixed, bounded rate for as long as
+    the breaker is half-open.
+
+    How bad "the rest of the episode" is depends on what ends an episode, and
+    that is why this reads as a trade rather than a deadlock: the manager's
+    ``handle_half_open_timeout`` returns an episode that no probe closed to
+    OPEN (issue #1437), so an episode is bounded in time. Without that bound a
+    spent per-episode budget would have refused every document indefinitely,
+    with the service free to recover and nothing left to notice. A per-episode
+    budget is therefore a viable alternative now, and switching to one is a
+    separate decision: this one needs no coordination with the episode length,
+    and the two numbers below replenish without anything cleaning up after an
+    episode.
 
     Three writes at most, and only in HALF_OPEN:
 
@@ -1025,11 +1034,13 @@ def check_circuit_breaker() -> tuple[bool, str]:
 
     **HALF_OPEN admits a bounded number of probes** (issue #934, item 4b), not
     everything. It used to return ``True`` unconditionally with a log line
-    calling the traffic "probe traffic", which made the state a no-op gate: a
-    sustained outage settles in HALF_OPEN — nothing moves it back to OPEN, and
-    leaving for CLOSED needs a workflow to succeed — so the breaker spent the
-    outage admitting 100% of documents into the failing dependency, which is
-    the opposite of what it exists for.
+    calling the traffic "probe traffic", which made the state a no-op gate: the
+    breaker spent a whole outage admitting 100% of documents into the failing
+    dependency, which is the opposite of what it exists for. HALF_OPEN is also
+    bounded in *time* by the manager's ``handle_half_open_timeout``, which
+    returns an episode that no probe closed to OPEN (issue #1437), so it is a
+    window the breaker passes through rather than a state it rests in — which
+    is what makes a bounded trickle the right admission rate for it.
 
     ``HALF_OPEN_PROBE_BUDGET`` workflows per ``HALF_OPEN_PROBE_WINDOW_SECONDS``
     are admitted and the rest are refused, claimed atomically — see

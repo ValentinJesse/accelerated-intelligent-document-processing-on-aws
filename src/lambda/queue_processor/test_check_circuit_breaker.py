@@ -828,6 +828,35 @@ class TestCallerHonoursTheRefusal:
             "a refused message must not have consumed a probe slot"
         )
 
+    def test_an_open_refusal_extends_visibility_to_the_recovery_timeout(
+        self, ddb_module
+    ):
+        """The other side of the test above, and what reopening buys (#1437).
+
+        The two refusals are deliberately priced differently: a refused probe
+        keeps the queue's 60 s visibility because the next probe window is
+        seconds away, while a refused document in OPEN is pushed out to
+        ``RECOVERY_TIMEOUT_SECONDS`` because the pause is expected to last that
+        long. Against ``maxReceiveCount`` 500 that is the difference between
+        spending the redrive budget in roughly 8 hours and roughly 41, so the
+        state a sustained outage settles in decides how soon documents reach
+        the dead-letter queue. The circuit-breaker manager's
+        ``handle_half_open_timeout`` is what puts a failed half-open episode
+        back into this branch.
+        """
+        ddb_module.sfn = MagicMock()
+        _put_breaker(ddb_module, state="OPEN")
+        with patch("boto3.client"):
+            success, message_id = ddb_module.process_message(self._record())
+
+        assert success is False, "the message must be reported as a batch failure"
+        assert message_id == "msg-1"
+        ddb_module.sfn.start_execution.assert_not_called()
+        ddb_module.sqs.delete_message.assert_not_called()
+        ddb_module.sqs.change_message_visibility.assert_called_once()
+        kwargs = ddb_module.sqs.change_message_visibility.call_args.kwargs
+        assert kwargs["VisibilityTimeout"] == ddb_module.RECOVERY_TIMEOUT_SECONDS
+
 
 class TestExtendVisibilityForOutage:
     """OPEN-state messages should have their SQS visibility pushed out so
