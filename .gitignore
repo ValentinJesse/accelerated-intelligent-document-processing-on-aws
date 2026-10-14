@@ -6,6 +6,11 @@ model.tar.gz
 .checksums/
 .build_checksum
 .lib_checksum
+# Zero-byte flock target for the UI make targets that share src/ui/node_modules
+# (scripts/ui_deps_lock.sh). It holds no state and is never read; the kernel drops
+# the lock when the holder exits, so a leftover file needs no cleanup. Kept OUT of
+# src/ui deliberately — `ui-lint` caches on a checksum of that directory.
+.ui-deps.lock
 
 # Build artifacts - backup files from publish.py
 *.pre-build-backup
