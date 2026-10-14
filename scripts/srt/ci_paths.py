@@ -25,6 +25,7 @@ lets fix.py keep them out of the committed baseline in the first place.
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 # SRT dispositions that still need attention, i.e. that gate the build.
@@ -228,20 +229,103 @@ def _resolve_candidates(value, base):
     return candidates
 
 
+class ScanDependencyError(RuntimeError):
+    """A distribution this module's classification cannot run without is absent.
+
+    Deliberately **not** one of this module's "cannot tell" answers, and the
+    distinction is the whole point. Every other unknown here — git unavailable, a
+    buildspec that is not tracked, a document that does not parse — is a fact about
+    the *tree*, and answering it by gating every finding is correct: something in
+    the repository really cannot be established. A missing parser is a fact about
+    the *environment*, and answering it the same way reported ten Bandit
+    identifier-name findings in test files as gating HIGH on every pull request for
+    a day, because the demotion that classifies them was switched off by a
+    `pip install` nobody had run (#1428). Both states are a findings table and a
+    non-zero exit, so a setup fault and a security regression were the same output.
+
+    Raised rather than returned so there is no code path on which the degraded
+    answer can be read as a finding: a caller that has not checked gets a named
+    failure instead of a smaller packaged set.
+    """
+
+
+#: The distribution :func:`_buildspec_commands` needs, and the command that installs
+#: it. Spelled as a distribution name rather than an import name because that is what
+#: the reader has to type, and both CI jobs name it on their own `pip install` line —
+#: `scripts/tests/test_ci_gate_parity.py` reads this constant and asserts they still
+#: do, so dropping it from one platform cannot pass as parity.
+YAML_DISTRIBUTION = "PyYAML"
+
+#: Every distribution the classification requires. A tuple so a caller can report all
+#: of them in one message rather than one per re-run.
+REQUIRED_DISTRIBUTIONS = (YAML_DISTRIBUTION,)
+
+_INSTALL_COMMANDS = {YAML_DISTRIBUTION: "pip install PyYAML"}
+
+
 def _yaml_module():
     """PyYAML, or None if it is not installed.
 
-    Imported lazily so this module still imports on a stdlib-only interpreter:
-    `scripts/srt/run.py` and `scripts/security/curate_results.py` both import it at
-    start-up, and a hard dependency here would turn a missing distribution into a
-    crash in the SRT wrapper instead of into the fail-closed "cannot tell" answer
-    :func:`packaged_source_dirs` already has for every other unknown.
+    Imported lazily, and the reason is no longer that a missing distribution is
+    tolerable: :func:`_buildspec_commands` refuses outright when this answers None.
+    It is that the refusal has to be a sentence rather than a traceback, and that
+    the parts of this module which need no parser must keep working without one.
+    `scripts/srt/fix.py` imports it for :func:`partition_by_ci_visibility` alone, and
+    a module-level `import yaml` would make that import fail too — naming the module
+    `yaml`, which is not the string anybody installs.
     """
     try:
         import yaml
     except ImportError:
         return None
     return yaml
+
+
+def missing_distributions():
+    """The names in :data:`REQUIRED_DISTRIBUTIONS` this interpreter cannot import.
+
+    Measured by attempting the import rather than by reading installed metadata,
+    because the question is whether *this* interpreter can parse a buildspec. `make
+    srt-scan` runs the interpreter on PATH, not SRT's managed venv, so a package
+    installed for the scanners says nothing about the one doing the classification.
+    """
+    missing = []
+    if _yaml_module() is None:
+        missing.append(YAML_DISTRIBUTION)
+    return tuple(missing)
+
+
+def dependency_failure_message(missing):
+    """The refusal to print for `missing`, naming each distribution and its install.
+
+    One message with the command in it, because the alternative measured in #1428 is
+    a warning line in banner output that a reader skims past while ten HIGH findings
+    below it look like the actual result.
+    """
+    names = ", ".join(missing)
+    commands = "\n".join(
+        f"      {_INSTALL_COMMANDS.get(name, f'pip install {name}')}"
+        for name in missing
+    )
+    return (
+        f"{names} is not importable on this interpreter ({sys.executable}), so the "
+        "SRT gate\n"
+        "   cannot establish which directories a deployment artifact is built from, "
+        "and the\n"
+        "   demotion of identifier-name findings in test code is therefore "
+        "unavailable.\n"
+        "\n"
+        "   Install it and re-run:\n"
+        "\n"
+        f"{commands}\n"
+        "\n"
+        "   This is a setup fault, not a scan result. Scanning anyway would report "
+        "every\n"
+        "   B105/B106 finding in test code as a gating HIGH — indistinguishable from "
+        "a real\n"
+        "   security regression, which is what it did on every pull request for a "
+        "day (#1428)."
+    )
 
 
 def _buildspec_commands(text):
@@ -251,10 +335,22 @@ def _buildspec_commands(text):
     right parser and no custom loader is involved — the same reasoning
     `patterns/unified/tests/test_expected_images_match_the_buildspec.py` states for
     reading the same file.
+
+    Reading the loaded document rather than the raw lines is what the parser buys,
+    in both directions. A commented-out `export FUNCTION_` line is not read as live
+    (so a directory nothing ships does not enter the packaged set, where it would
+    keep every test file under it gating), and a buildspec that is malformed is
+    *known* to be malformed — a line-oriented read of a truncated or corrupted file
+    returns a quietly smaller set of exports, which is the direction that demotes a
+    test file the artifact really does carry (#1389) and reports nothing.
+
+    None means the document is unreadable, which keeps every finding gating. A
+    missing parser is not that answer: it raises, because the tree would be fine and
+    the environment is not.
     """
     yaml_module = _yaml_module()
     if yaml_module is None:
-        return None
+        raise ScanDependencyError(dependency_failure_message((YAML_DISTRIBUTION,)))
     try:
         document = yaml_module.safe_load(text)
     except yaml_module.YAMLError:
@@ -302,6 +398,9 @@ def _function_source_dirs(root, buildspec_rel, text):
     packaged set" and never "nothing ships". An empty set is a different answer and a
     legitimate one: a build whose context is the zip root, such as the data
     generator's, names its inputs in a Dockerfile rather than in a variable here.
+
+    Raises :class:`ScanDependencyError` when the parser itself is absent, which is
+    neither of those answers — see :func:`_buildspec_commands`.
     """
     commands = _buildspec_commands(text)
     if commands is None:
@@ -368,9 +467,9 @@ def _image_build_source_dirs(project_root, tracked, template_rel, text):
         dirs = _function_source_dirs(root, buildspec_rel, buildspec_text)
         if dirs is None:
             print(
-                f"⚠️  Warning: could not parse {buildspec_rel} as YAML (or PyYAML is "
-                "missing), so the source trees its images are built from are "
-                "unknown; treating every finding as shipped."
+                f"⚠️  Warning: could not parse {buildspec_rel} as YAML, so the source "
+                "trees its images are built from are unknown; treating every finding "
+                "as shipped."
             )
             return None
         found |= dirs
@@ -402,6 +501,13 @@ def packaged_source_dirs(project_root):
     Returns None when the answer cannot be established — git unavailable, no template
     found, or a build pointing at a buildspec this checkout cannot read. Callers must
     read that as "cannot tell" and keep gating, never as "nothing ships".
+
+    Raises :class:`ScanDependencyError` when a required distribution is not installed.
+    That is a different kind of answer from None and must not be collapsed into it:
+    None says this repository cannot be read, the exception says this machine cannot
+    read any repository. `scripts/srt/run.py` refuses before the scan for exactly
+    that reason; the raise is what makes the refusal unskippable for a caller that
+    does not.
     """
     tracked = tracked_files(project_root)
     if tracked is None:
