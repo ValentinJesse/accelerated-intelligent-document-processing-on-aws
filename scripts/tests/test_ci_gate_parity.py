@@ -1437,7 +1437,7 @@ def _gitlab_job_commands() -> dict[str, list[str]]:
     return jobs
 
 
-def _github_job_steps() -> dict[str, list[str]]:
+def _github_job_steps(workflow: Path = GITHUB_TESTS) -> dict[str, list[str]]:
     """``{job name: one string per step}``, in order.
 
     A step contributes either its shell text or, when it ``uses`` a composite
@@ -1448,7 +1448,7 @@ def _github_job_steps() -> dict[str, list[str]]:
     written about; reading only the inputs would accept one no action honours,
     which is the assertion after this one.
     """
-    loaded = yaml.safe_load(GITHUB_TESTS.read_text(encoding="utf-8"))
+    loaded = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     jobs: dict[str, list[str]] = {}
     for name, body in (loaded.get("jobs") or {}).items():
         rendered: list[str] = []
@@ -1598,6 +1598,135 @@ def test_every_ci_job_running_this_suite_installs_the_ui_deps() -> None:
         "these CI jobs install the UI's npm dependencies only AFTER the step that "
         "runs scripts/tests, which is the same as not installing them as far as the "
         "suite is concerned:\n  " + "\n  ".join(late)
+    )
+
+
+def _ci_paths_module():
+    """``scripts/srt/ci_paths.py``, loaded by path.
+
+    By path rather than by import, because ``scripts/srt`` is not a package. The
+    module is stdlib-only at import time — the parser this test is about is imported
+    lazily inside it — so loading it here costs nothing and cannot depend on the
+    thing being asserted.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_ci_paths_for_parity", REPO_ROOT / "scripts" / "srt" / "ci_paths.py"
+    )
+    assert spec and spec.loader, "scripts/srt/ci_paths.py is not loadable"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _installs_the_distribution(command: str, distribution: str) -> bool:
+    """Does ``command`` ``pip install`` a distribution by that name?
+
+    Per line, because a GitHub step's ``run`` is a whole shell script and a GitLab
+    job's is one entry per line: a file-wide search would accept an install in a
+    different step of a different job. Case-insensitively, because distribution
+    names are compared case-insensitively by pip and ``pyyaml`` and ``PyYAML`` are
+    the same package.
+    """
+    pattern = re.compile(rf"(?<![\w.-]){re.escape(distribution)}(?![\w.-])", re.I)
+    for line in _uncommented(command).splitlines():
+        if "pip install" in line and pattern.search(line):
+            return True
+    return False
+
+
+def _ci_jobs_running_the_srt_gate() -> dict[str, dict[str, list[str]]]:
+    """``{config name: {job name: ordered commands}}`` for jobs running the scan.
+
+    Found by the ``make`` target rather than by job name, for the same reason the
+    suite discovery above is: the job is renameable and a second one is addable.
+    """
+    out: dict[str, dict[str, list[str]]] = {}
+    for label, jobs in (
+        (GITLAB.name, _gitlab_job_commands()),
+        (GITHUB_SECURITY.name, _github_job_steps(GITHUB_SECURITY)),
+    ):
+        out[label] = {
+            name: commands
+            for name, commands in jobs.items()
+            if any(_invokes(_uncommented(c), "srt-scan") for c in commands)
+        }
+    return out
+
+
+@pytest.mark.unit
+def test_every_ci_job_running_the_srt_gate_installs_the_parser_it_needs() -> None:
+    """The SRT gate's job installs the distributions its classification requires.
+
+    ``scripts/srt/ci_paths.py`` reads a CodeBuild buildspec to learn which
+    directories a deployment artifact is built from, and that read needs PyYAML.
+    Neither job installed it. The parser was therefore absent on every CI run, the
+    "cannot establish the packaged set" branch was taken every time, and the
+    demotion that branch switches off is what keeps Bandit's identifier-name
+    findings in test files out of the gate — so the security gate reported ten HIGH
+    findings and exit 1 on every pull request for a day, for a missing
+    ``pip install`` (#1428). The scan refuses outright on that condition now, which
+    makes it legible; this is what keeps it from arising.
+
+    **Both platforms, by name.** A gap between the two CIs is what this module
+    exists for, and this is the shape it takes here: an environment dependency is
+    the easiest thing to add on one side and forget on the other, and the symptom
+    is not a missing step but a passing gate that has stopped classifying.
+
+    The distributions come from ``REQUIRED_DISTRIBUTIONS`` in the module itself, so
+    a second one added there has to reach both configurations rather than being
+    silently required of neither.
+    """
+    required = _ci_paths_module().REQUIRED_DISTRIBUTIONS
+    assert required, (
+        "ci_paths.REQUIRED_DISTRIBUTIONS is empty, so the loop below asserts "
+        "nothing. If the classification genuinely needs no third-party parser any "
+        "more, delete this test rather than leaving it vacuous."
+    )
+
+    discovered = _ci_jobs_running_the_srt_gate()
+    assert set(discovered) == {GITLAB.name, GITHUB_SECURITY.name}, (
+        f"this test read {sorted(discovered)}, not both CI configurations. Parity "
+        "is the claim; one side alone cannot carry it."
+    )
+    for platform, jobs in discovered.items():
+        assert jobs, (
+            f"no job in {platform} was found running `make srt-scan`. Either the "
+            "gate has stopped running there — which test_gate_runs_in_both_cis is "
+            "the gate for — or it is invoked in a form this discovery cannot see, "
+            "in which case fix the discovery: with an empty universe this test "
+            "reports nothing."
+        )
+
+    missing: list[str] = []
+    late: list[str] = []
+    for platform, jobs in discovered.items():
+        for name, commands in jobs.items():
+            scan = _first_index(
+                commands, lambda c: _invokes(_uncommented(c), "srt-scan")
+            )
+            for distribution in required:
+                installs = _first_index(
+                    commands,
+                    lambda c, d=distribution: _installs_the_distribution(c, d),
+                )
+                if installs is None:
+                    missing.append(f"{platform}: job `{name}` needs {distribution}")
+                elif scan is not None and installs > scan:
+                    late.append(
+                        f"{platform}: job `{name}` installs {distribution} at step "
+                        f"{installs} but scans at step {scan}"
+                    )
+
+    assert not missing, (
+        "these CI jobs run the SRT gate without installing a distribution its "
+        "classification requires, so the gate runs degraded:\n  "
+        + "\n  ".join(missing)
+        + "\n\nAdd the package to the job's existing `pip install` line in both "
+        "configurations — one side alone is the defect this module is for."
+    )
+    assert not late, (
+        "these CI jobs install the parser only after running the scan, which is "
+        "the same as not installing it:\n  " + "\n  ".join(late)
     )
 
 

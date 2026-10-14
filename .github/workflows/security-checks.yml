@@ -64,7 +64,7 @@ jobs:
           python --version
           apt-get update -y
           apt-get install make curl -y
-          pip install --upgrade pip
+          pip install --upgrade pip PyYAML
 
       # The expensive part is SRT's managed venv, not the scan. Keyed on
       # setup.py because REQUIRED_SCANNERS lives there, so adding or changing a

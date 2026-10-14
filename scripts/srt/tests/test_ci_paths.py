@@ -496,14 +496,17 @@ class TestPackagedSourceDirsFromAContainerBuild:
         assert packaged_source_dirs(tmp_path) is None
         assert "could not parse" in capsys.readouterr().out
 
-    def test_a_missing_yaml_library_is_unknown_rather_than_empty(
-        self, tmp_path, capsys, monkeypatch
+    def test_a_missing_yaml_library_refuses_rather_than_answering_at_all(
+        self, tmp_path, monkeypatch
     ):
-        """PyYAML is imported lazily, so its absence must not read as "nothing ships".
+        """A missing parser is a setup fault, so it is neither answer this returns.
 
-        The rest of the SRT tooling is stdlib-only and imports this module at
-        start-up, which is why the import is lazy at all; the price is that a missing
-        distribution has to be answered rather than raised.
+        It used to be None, the same "cannot tell" answer an unreadable buildspec
+        gets, which is correct for the tree and wrong for the environment: the gate
+        then reported every identifier-name finding in test code as a gating HIGH
+        and exited 1, which is what a real regression looks like (#1428). The whole
+        failure class is covered in `test_scan_dependencies.py`; this case stays
+        here because the answers of this function belong together.
         """
         self._repo(
             tmp_path,
@@ -514,8 +517,8 @@ class TestPackagedSourceDirsFromAContainerBuild:
             dirs=("src/ocr_function",),
         )
         monkeypatch.setattr(ci_paths, "_yaml_module", lambda: None)
-        assert packaged_source_dirs(tmp_path) is None
-        assert "PyYAML is missing" in capsys.readouterr().out
+        with pytest.raises(ci_paths.ScanDependencyError, match="PyYAML"):
+            packaged_source_dirs(tmp_path)
 
     def test_a_commented_out_export_is_not_read_as_a_live_one(self, tmp_path):
         """What parsing the loaded YAML buys over scanning the raw lines."""
