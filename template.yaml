@@ -479,8 +479,19 @@ Parameters:
   MaxConcurrentWorkflows:
     Type: Number
     Default: 100
-    Description: Maximum number of concurrent workflow executions allowed
+    Description: >-
+      Maximum number of concurrent workflow executions allowed. The queue
+      processor admits a document only while the concurrency counter is below
+      this value, so it is the deployment's throughput ceiling and, because the
+      dominant cost here is per-document inference, its spend-rate ceiling too.
+      The upper bound of 10000 is a typo guard, not a capacity opinion: it is two
+      orders of magnitude above the default and far above what the pipeline can
+      sustain in a default account (each workflow holds several concurrent Lambda
+      invocations, and the account-level Lambda concurrency limit starts at
+      1000), so it rejects a slipped digit at submit time while leaving every
+      realistic value available.
     MinValue: 1
+    MaxValue: 10000
 
   DataRetentionInDays:
     Type: Number
