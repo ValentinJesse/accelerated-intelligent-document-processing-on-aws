@@ -1519,6 +1519,7 @@ export type PresignedUrlResponse = {
 export type PricingResponse = {
   defaultPricing?: Maybe<Scalars['AWSJSON']['output']>;
   error?: Maybe<ConfigurationError>;
+  nonChargeableUnits?: Maybe<Scalars['AWSJSON']['output']>;
   pricing?: Maybe<Scalars['AWSJSON']['output']>;
   success: Scalars['Boolean']['output'];
 };

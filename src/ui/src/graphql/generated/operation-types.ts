@@ -1519,6 +1519,7 @@ export type PresignedUrlResponse = {
 export type PricingResponse = {
   defaultPricing?: Maybe<Scalars['AWSJSON']['output']>;
   error?: Maybe<ConfigurationError>;
+  nonChargeableUnits?: Maybe<Scalars['AWSJSON']['output']>;
   pricing?: Maybe<Scalars['AWSJSON']['output']>;
   success: Scalars['Boolean']['output'];
 };
@@ -3119,7 +3120,7 @@ export type GetMyProfileQuery = { getMyProfile?: { userId: string, email: string
 export type GetPricingQueryVariables = Exact<{ [key: string]: never; }>;
 
 
-export type GetPricingQuery = { getPricing?: { success: boolean, pricing?: string | null, defaultPricing?: string | null, error?: { type?: string | null, message?: string | null } | null } | null };
+export type GetPricingQuery = { getPricing?: { success: boolean, pricing?: string | null, defaultPricing?: string | null, nonChargeableUnits?: string | null, error?: { type?: string | null, message?: string | null } | null } | null };
 
 export type GetSampleDocumentUrlQueryVariables = Exact<{
   s3Key: Scalars['String']['input'];
