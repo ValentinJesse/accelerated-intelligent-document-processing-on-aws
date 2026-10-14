@@ -1587,6 +1587,21 @@
       "ratchetGap": "Not a gate exemption.",
       "memberKind": "path"
     },
+    "scripts/tests/test_curated_srt_matches_the_gate.py::_NOT_IN_CI": {
+      "kind": "fixture",
+      "memberKind": "repo-relative path, keyed by the shape it exercises",
+      "turnsOff": "nothing. It is probe INPUT: two sample paths a clean CI checkout does not hold, fed to tests asserting the curator withholds a HIGH finding against either. The filtering it exercises lives in scripts/srt/ci_paths.py; this constant only supplies the cases.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "predicateConsidered": {
+        "file_absent_or_untracked": "True of both members, and it settles nothing, because what these cases turn on is the DIFFERENCE between them: one is covered by an ignore rule and the other is not. That is the divergence between the curator's old private check ('is this git-ignored') and the gate's ('is this tracked'), and the only reason the second member exists. The predicate collapses exactly that distinction, so _not_in_ci_paths() checks both halves per member against git itself.",
+        "vcs_ignored_build_output": "Holds for the .aws-sam member and is FALSE for the other one by construction -- a path that is neither tracked nor ignored is the case the curator got wrong. One premise over this set would be the defect this registry exists for, which is why it is not claimed for either member."
+      },
+      "reason": "Test data, matched on NOT_IN_. The opposite of a carve-out: each case asserts that a finding is withheld from the published snapshot only where CI could not have seen the file, so a wrong member weakens an assertion rather than excusing one. Discovered when NOT_IN_ was added for #1388; registered rather than renamed, since the name says accurately what it holds.",
+      "ratchet": "staleness",
+      "ratchetEvidence": "scripts/tests/test_curated_srt_matches_the_gate.py"
+    },
     "scripts/tests/test_data_plane_component_labels.py::EXPECTED_COMPONENT": {
       "kind": "enforced-universe",
       "turnsOff": "nothing; the expected component label per resource",
