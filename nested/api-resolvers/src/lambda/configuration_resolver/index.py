@@ -37,6 +37,7 @@ from idp_common.config_scope import (
     resolve_allowed_config_versions,
     scope_allows,
 )
+from idp_common.metering_units import declared_free_units
 from idp_common.utils.log_sanitizer import sanitize_event_for_logging
 
 logger = logging.getLogger()
@@ -875,6 +876,39 @@ def handle_get_config_library_file(args):
         }
 
 
+def _non_chargeable_units(pricing_dict):
+    """Per pricing entry, the units the backend declares non-chargeable.
+
+    The web UI prices the document cost table in the browser and cannot import
+    ``idp_common.metering_units``, so without this it had to decide for itself
+    what a pricing entry omitting a unit means — and it answered $0.00 for every
+    such unit, including the ones the reporting table records as an explicit NULL
+    because nobody has priced them (issue #1406). Carrying the declarations in the
+    response makes the panel a reader of this deployment's own answer rather than
+    a second implementation of the rule.
+
+    The expansion is :func:`idp_common.metering_units.declared_free_units`, which
+    is the single place the two registers and their differing scopes are known.
+    Nothing is decided here: this walks the entries of the pricing payload being
+    returned and asks that function about each one, so a key a user added to their
+    own pricing configuration is covered on the same terms as a shipped one.
+
+    Entries with nothing declared are left out rather than carried as an empty
+    list, so the payload names only the keys that have an answer.
+    """
+    answers = {}
+    for entry in pricing_dict.get("pricing") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        units = declared_free_units(name)
+        if units:
+            answers[name] = list(units)
+    return answers
+
+
 def handle_get_pricing(manager):
     """
     Handle the getPricing GraphQL query
@@ -886,8 +920,13 @@ def handle_get_pricing(manager):
     - Returns:
       - pricing: Merged result (default + custom overrides)
       - defaultPricing: Original defaults for diff highlighting and restore
+      - nonChargeableUnits: Per pricing key, which units a declaration in
+        ``idp_common.metering_units`` makes free — so the UI's cost table renders
+        a unit that is merely unpriced as unpriced, instead of as $0.00. See
+        :func:`_non_chargeable_units`.
 
-    Returns: { success: bool, pricing: {...}, defaultPricing: {...}, error: {...} }
+    Returns: { success: bool, pricing: {...}, defaultPricing: {...},
+               nonChargeableUnits: {...}, error: {...} }
     """
     try:
         # Get merged pricing (DefaultPricing + CustomPricing deltas)
@@ -927,6 +966,10 @@ def handle_get_pricing(manager):
             "success": True,
             "pricing": pricing_dict,
             "defaultPricing": default_pricing_dict,
+            # Derived from the pricing payload above, so a user-added key is
+            # covered too. Keyed by pricing key because the declarations are
+            # scoped two ways and the consumer must not have to know which.
+            "nonChargeableUnits": _non_chargeable_units(pricing_dict),
         }
 
     except Exception as e:

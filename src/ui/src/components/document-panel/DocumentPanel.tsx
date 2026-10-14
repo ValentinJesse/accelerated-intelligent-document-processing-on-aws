@@ -218,7 +218,7 @@ const formatCostCell = (rowItem: MeteringRowItem): React.JSX.Element | string =>
 // Component to display metering information in a table
 const MeteringTable = ({ meteringData, preCalculatedTotals }: MeteringTableProps): React.JSX.Element | null => {
   // Use usePricing hook to get pricing data from the new separate pricing config
-  const { pricing, loading } = usePricing();
+  const { pricing, nonChargeableUnits, loading } = usePricing();
   const [pricingData, setPricingData] = useState<PricingLookup>({});
   // We no longer use a default unit cost, showing "None" instead
 
@@ -251,7 +251,7 @@ const MeteringTable = ({ meteringData, preCalculatedTotals }: MeteringTableProps
   }
 
   // Transform metering data into table rows with context parsing
-  const { rows, contextTotals, totalCost } = priceMetering(meteringData, pricingData);
+  const { rows, contextTotals, totalCost } = priceMetering(meteringData, pricingData, nonChargeableUnits);
   const rawTableItems: MeteringRowItem[] = rows.map(({ context, serviceApi, unit, value, unitPrice, cost }) => ({
     context,
     serviceApi,
