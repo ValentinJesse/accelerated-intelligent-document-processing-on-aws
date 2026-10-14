@@ -1804,6 +1804,10 @@ Resources:
           WORKING_BUCKET: !Ref WorkingBucketName
           INPUT_BUCKET: !Ref InputBucketName
           OUTPUT_BUCKET: !Ref OutputBucketName
+          # RBAC: updateDocumentSections admits Annotator, and the resolver then
+          # confines an Annotator to the test sets in their allowedTestSets, which
+          # `testset_scope` resolves from the UsersTable EmailIndex.
+          USERS_TABLE_NAME: !Ref UsersTableName
       LoggingConfig:
         LogGroup: !Ref ProcessChangesResolverFunctionLogGroup
       Policies:
@@ -1815,6 +1819,20 @@ Resources:
             BucketName: !Ref OutputBucketName
         - S3CrudPolicy:
             BucketName: !Ref WorkingBucketName
+        # Read-only access on UsersTable + EmailIndex so the resolver can look up
+        # the caller's allowedTestSets and enforce per-test-set annotation scope on
+        # updateDocumentSections. Without this the lookup fails with AccessDenied —
+        # which this path turns into a DENIAL, not into an unrestricted caller, so
+        # the failure mode is every scoped read refused rather than a silent scope
+        # bypass.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource:
+                - !Ref UsersTableArn
+                - !Sub "${UsersTableArn}/index/*"
         - Statement:
             - Effect: Allow
               Action:

@@ -863,6 +863,24 @@ operations:
     kind: mutation
     enforced_in: nested/api-resolvers/src/lambda/process_changes_resolver/index.py
     args: { objectKey: "__nonexistent__.pdf", sections: [] }
+    object_scoped_roles: [Annotator]
+    note: >-
+      As completeSectionReview, and for the same reason: the group list admits
+      Annotator, and `_assert_annotator_scope` in the same resolver then confines an
+      Annotator to the test sets in their `allowedTestSets`. The group list was copied
+      from that sibling and the per-object check was not, so the operation admitted
+      the role without confining it; this entry is what makes the omission a failure
+      rather than a silence. `__nonexistent__.pdf` names no document, so it carries no
+      `TestSetId` and a scoped annotator is refused for the object rather than for
+      their group. The refusal is `ResourceAccessDenied`
+      (`authzControl: "resource"`), not this resolver's `PermissionError` group floor,
+      so the two are distinguishable — which they must be here, since a floor-labelled
+      refusal on this operation would mean the manifest stopped admitting Annotator.
+      ⚠️ Resolving `allowedTestSets` reads the users table via `USERS_TABLE_NAME`.
+      ProcessChangesResolverFunction does not yet set it, so until it does the check
+      refuses every Annotator: fail-closed, and the right direction to fail in, but
+      the role's legitimate use is unavailable until that variable and a read grant on
+      the users table reach the function.
 
   processChanges:
     groups: [Admin, Reviewer]
@@ -876,6 +894,14 @@ operations:
     kind: mutation
     enforced_in: src/lambda/complete_section_review/index.py
     args: { objectKey: "__x__", sectionId: "1" }
+    # This operation is the handler's FALL-THROUGH path — claimReview, releaseReview
+    # and skipAllSectionsReview each return from their own `if`, and what is left runs
+    # for this one. So there is no branch named after it for a per-operation entry
+    # point to be found in, and naming the handler is both the accurate answer and a
+    # stronger one than a branch: `_assert_annotator_scope` is called there
+    # unconditionally. Read by the Annotator-scope closure test, which otherwise
+    # cannot determine the entry point and reports that rather than guessing.
+    scope_enforced_in: handler
     object_scoped_roles: [Annotator]
     note: >-
       The Annotator cell asserts a refusal that is NOT the group floor's.
