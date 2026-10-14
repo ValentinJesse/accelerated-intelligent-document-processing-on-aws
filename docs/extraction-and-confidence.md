@@ -2158,7 +2158,10 @@ issues — reaching the document list's **Processing Issues** column, the
 | `extraction_sparse` | info | Fewer than `min_population_ratio` of the schema's leaf fields were populated. |
 | `extraction_rows_below_ocr_estimate` | warning (**error** under `row_shortfall_action: fail`, which is then the only one of these that changes the document's status — see below) | A list of objects returned **fewer than half** the rows found in the section's OCR tables **of the same shape** — tables whose column count equals the list item's property count — and those tables hold at least 30 rows. This is the ground-truth-free signal for the Simple-mode case above (43 rows extracted from an 800-row statement), which passes every other check because the list is non-empty and the scalars are right. Only Markdown tables count (rows starting with a pipe under a `|---|` separator row), segmented where the column count changes as well as at blank gaps and ended by the first prose line, so a table of a *different* width, a form's key/value blocks, a footer or prose line containing a pipe, and lists of scalars do not count against it; lists of the same shape (Deposits and Withdrawals) are judged together as one group, an array of instances is compared through its inner lists, and a multi-instance wrapper whose instances carry no lists is not compared at all. Item schemas defined through `$ref`/`$defs`, as every shipped preset does, are resolved. Reprinted heading rows inflate the estimate slightly, hence the half ratio. ⚠️ Matching is on width **only**, and matched tables are summed over the whole section: a table of the *same* width that has nothing to do with the list — a two-column Daily Balance table beside a two-property account summary — is counted as evidence about it. The check needs OCR that emits Markdown tables: Textract with the `TABLES` feature, or BDA. **That is the shipped default** (`ocr.features: [TABLES, LAYOUT, SIGNATURES]`), so the check is live on every shipped preset except the two `ocr-benchmark` ones, which set LAYOUT only; a config that removes `TABLES` has no pipe tables and the check is inert. In Advanced mode this is a secondary check; the shard runtime's own completeness checks and `minItems` remain the primary guards. |
 
-A fifth issue is raised by [schema validation](#schema-validation-extractionvalidation)
+| `extraction_partial_row_shortfall` | warning, **always** (`row_shortfall_action` does not govern it — see below) | A list of objects returned **fewer rows than the matched OCR tables actually hold** — by more than their reprinted column headings can explain — but **not fewer than half**, so `extraction_rows_below_ocr_estimate` above does not fire. It is the same evidence, the same width matching, the same group sum and the same `maxItems` ceiling as that check, read against the OCR's **data**-row count instead of half the heading-inflated one. ⚠️ **It exists because the half ratio went silent well before half.** On a 17-page 800-row statement the matched evidence is 817 rows, of which 17 are the heading reprinted once per page, and half of 817 is 408.5: an extraction returning **409 of the 800 rows — 48.9% of the document lost** — crossed no bar, carried no processing issue, and its own processing report read `Status: SUCCESS`. The half ratio is a *multiplicative* slack standing in for an *additive* imprecision, so it was about 24x the inflation it was chosen to absorb at 17 pages and the factor grows with the page count. **The residual tolerance is a row gap, not a ratio:** a shortfall smaller than 30 rows is still not reported, so up to **29 rows** can go missing silently — but 29 whatever the document's size, where before the silent band was 408 rows at 800 and 1,600 at 3,200. ⚠️ It inherits the same width-only attribution, and that can only ever *inflate* the evidence, so a firing is a shortfall to **confirm** rather than a certain loss; the issue's `details` carry `ocr_matched_table_rows`, `ocr_heading_rows`, `ocr_estimated_rows` (the bar) and `missing_rows` so the arithmetic is auditable without re-reading the OCR. It needs the same table-emitting OCR, and on a section whose matched evidence is under 60 rows the two bars meet, so no document that small produces it. |
+| `extraction_output_truncated` | warning (both modes — see below) | The model's response **stopped before it finished**, so the result holds only the part that was emitted and every list in it is a prefix. The one certain signal in this table — the others are estimates. It comes from the response's own `stopReason` — Bedrock Converse's `max_tokens`, or the `incomplete` that the OpenAI Responses adapter carries over from that API's `status` — or from the JSON repair reader finding an unterminated structure. It needs neither OCR nor a list, so it is the one completeness signal that is live on a LAYOUT-only OCR configuration. ⚠️ Its absence is **not** evidence that the output is complete: a model that abbreviates a long list on its own stops with `end_turn` and a syntactically complete answer, and that is the shape measured on an 800-row statement, where the short runs spent about 2.3k extraction output tokens against the complete runs' 38.5k on the same model — no ceiling was reached. `extraction_rows_below_ocr_estimate` is what covers that case. Both can fire on one section and neither suppresses the other: this one names the cause, that one counts the rows. Severity is `warning` unconditionally — `row_shortfall_action` governs `extraction_rows_below_ocr_estimate` only. **Advanced mode reaches this** by its own route: a shard whose agent turn is cut off at the output ceiling keeps the extraction its tool calls had already committed and validated, and records the truncation, instead of failing the section — which is what it used to do, discarding rows that were complete. That matters most under `confidence.mode: integrated`, where the turn that overruns is the per-field confidence one AFTER the data is safe. Two bounds: only an output-ceiling stop is kept this way (any other agent failure still fails the section), and only an extraction the class schema accepts — an empty result is never invented. Confidence for such a section is scored by the standalone Assessment step instead, so it is complete rather than partial. |
+
+One further issue is raised by [schema validation](#schema-validation-extractionvalidation)
 rather than the completeness checks:
 
 | Code | Severity | Fires when |
@@ -2188,6 +2191,16 @@ sections that fail under `fail` are exactly the ones that warn under `warn`. And
 it is not Simple-mode-only: the check and the outcome are shared by both modes,
 because a truncated Advanced section tells the same lie. Advanced mode shards, so
 it reaches this far less often.
+
+⚠️ **It governs `extraction_rows_below_ocr_estimate` and nothing else.** The
+sibling `extraction_partial_row_shortfall`, which covers the band between "fewer
+rows than the OCR tables hold" and "fewer than half of them", is `warning`
+severity under **both** values and is not reachable by this knob. That is
+deliberate rather than an omission: a deployment that set `fail` chose it against
+the half-ratio bar, and widening the knob to the new band would start failing
+documents that complete today. Whether a *materially* short extraction ought to
+fail at some bar other than a half is an open product question; what the new code
+changes is only whether the loss is **reported**.
 
 ##### Where a failed section shows up
 
@@ -2449,6 +2462,14 @@ so 43 of 800 is reported with no `minItems` set at all. What neither signal can 
 distinguish a list that returns 10 of 1,200 rows *from a document whose OCR shows only
 10 table rows* from a document that genuinely has 10: with no evidence of the missing
 rows, nothing is detectable.
+
+One case is detectable without any of them, and `extraction_output_truncated` is how:
+when the response itself stopped before it finished — the model reported the output
+ceiling, or the text did not parse and the repair reader found an unterminated
+structure — the result is known to be a prefix regardless of what the OCR shows or
+what the schema declares. That is the only certain completeness signal here; a model
+that abbreviates on its own reports a clean stop, which is why the estimates above
+still carry the rest of the work.
 
 For corpora where large tables are expected — in practice anything beyond ~400 rows
 or ~10 pages per document — use **Advanced** mode, which holds recall 1.000 through

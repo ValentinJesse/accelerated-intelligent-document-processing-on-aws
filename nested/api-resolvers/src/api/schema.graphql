@@ -475,6 +475,13 @@ type PricingResponse @aws_cognito_user_pools @aws_iam {
   success: Boolean!
   pricing: AWSJSON
   defaultPricing: AWSJSON
+  # Per pricing key, the metering units a declaration in
+  # idp_common.metering_units makes free: {"bedrock/<model>": ["requests",
+  # "totalTokens"], ...}. The web UI's cost table cannot import those
+  # declarations, so it reads the verdict from here rather than deciding for
+  # itself what an omitted unit means — it used to answer $0.00 for every one of
+  # them, including those the reporting table records as an explicit NULL.
+  nonChargeableUnits: AWSJSON
   error: ConfigurationError
 }
 

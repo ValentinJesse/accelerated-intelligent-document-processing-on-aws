@@ -41,15 +41,21 @@ default:
 #
 # The cost of the split, stated plainly: the Python environment is now built in
 # four jobs instead of one, so the pipeline burns MORE runner minutes than it did
-# to finish in less wall-clock time. Each job installs only what it needs — only
-# `unit_tests` gets away without Node, and `ui_tests` skips the Python packages —
-# which keeps that bill down, but it is a real trade, not a free win.
+# to finish in less wall-clock time. Each job installs only what it needs —
+# `ui_tests` skips the Python packages entirely — which keeps that bill down, but
+# it is a real trade, not a free win.
 #
 # ⚠️ Trimming a toolchain out of a job is NOT the free saving it looks like, and
-# the way to find out is to read the SUITES rather than the `script:` block.
-# `package_tests` was written without Node on the reasoning that pytest does not
-# need it, and went red: `scripts/tests/test_pyright_config.py` runs basedpyright
-# live, so a suite whose name says nothing about types reaches an npm package.
+# the way to find out is to read the SUITES rather than the `script:` block. Twice
+# over, in opposite directions. `package_tests` was written without Node on the
+# reasoning that pytest does not need it, and went red: `test_pyright_config.py`
+# runs basedpyright live, so a suite whose name says nothing about types reaches an
+# npm package. And the two jobs that run `scripts/tests` were written without the
+# UI's npm dependencies, which did NOT go red — `test_ui_test_discovery.py` skipped
+# the three assertions that need them and the job exited 0, so the calibration of
+# that module's literals ran on developer machines and in neither CI (#1390). A
+# missing toolchain is the cheap failure; a toolchain whose absence is answered
+# with a skip is the expensive one.
 stages:
   - fast_checks
   - deployment_validation
@@ -91,6 +97,12 @@ stages:
   - pip install uv
   - uv venv .venv
   - source .venv/bin/activate
+  # Pinned: ruff gates every Python file via `make lint-cicd`, and an unpinned
+  # linter can red-line develop with no code change when a release promotes a
+  # check to ERROR class or changes `ruff format` output. Keep in step with
+  # RUFF_VERSION in the Makefile, which is the single source of truth — the
+  # Makefile installs this version, the GitHub composite action installs it, and
+  # scripts/tests/test_ci_gate_parity.py fails if any of the three drift.
   - uv pip install 'ruff==0.15.13'
   # Needed by publish.py for test imports
   - uv pip install typer rich boto3
@@ -101,11 +113,15 @@ stages:
   # Fail the build if any first-party package came from an index, not source.
   - python3 scripts/check_first_party_deps.py
 
-# Node 22.14.0, pinned. Only the jobs that need it install it; `unit_tests` does
-# not. `package_tests` does, for two test modules in `scripts/tests` that its script
-# block does not show: test_pyright_config.py runs basedpyright, an npm package, and
-# test_ux_recorder.py runs the recorder's cursor-overlay JavaScript under node, and
-# fails in CI rather than skipping when node is missing.
+# Node 22.14.0, pinned. Only the jobs that need it install it — the four
+# `fast_checks` gate jobs, and the five AWS-facing ones below do not. Only
+# `ui_tests` needs it for a reason its own `script:` block shows. The two that
+# run `scripts/tests` — `unit_tests` and `package_tests` — need it for three
+# modules in there: test_pyright_config.py runs
+# basedpyright, an npm package; test_ux_recorder.py runs the recorder's
+# cursor-overlay JavaScript under node; and test_ui_test_discovery.py consults the
+# installed Vitest. All three fail in CI rather than skipping when their toolchain
+# is missing, which is deliberate — see the npm lines in those jobs.
 #
 # Pick the tarball matching the runner arch: the size:2xlarge pool is arm64, and a
 # hardcoded x64 binary fails with "Syntax error: ')' unexpected".
@@ -266,9 +282,42 @@ unit_tests:
     - size:2xlarge
     - arch:arm64
 
+  # For the UI dependencies the `scripts` suite needs — see the npm line in
+  # before_script. Same key and path as the other three jobs that declare it.
+  cache:
+    key:
+      files:
+        - src/ui/package-lock.json
+    paths:
+      - src/ui/node_modules/
+
   before_script:
-    # No Node: nothing in this job needs it.
     - *python_setup
+    # ⚠️ Node and the pinned cfn-lint are load-bearing here, and neither is visible
+    # from any line in the `script:` block. This job needed neither until the coverage
+    # producer below started re-running the `scripts` and `idp_sdk` suites in order to
+    # measure them, which drags their toolchain requirements into this job wholesale:
+    # `scripts/tests/test_ux_recorder.py` runs the recorder's cursor-overlay
+    # JavaScript under node and FAILS rather than skipping without it, and
+    # `scripts/tests/test_pyright_config.py` runs basedpyright live. `package_tests`
+    # carries the same two for the same two reasons. Read the suites, not the script
+    # block.
+    - *node_setup
+    - npm install -g basedpyright
+    # PINNING, not availability — same reasoning as on `package_tests`: cfn-lint
+    # arrives transitively via moto either way, and what the cfn-lint-gated
+    # assertions in `lib/idp_sdk/tests/unit/` would otherwise run against is whatever
+    # that open range resolves to. Keep in step with CFN_LINT_VERSION.
+    - pip install 'cfn-lint==1.51.0'
+    # The UI's npm dependencies, needed here for the same reason as the two above
+    # and discoverable the same way: `make coverage-all-cicd` below re-runs the
+    # `scripts` suite in order to measure it, and
+    # `scripts/tests/test_ui_test_discovery.py` calibrates its hand-written copies
+    # of Vitest's naming convention against the installed Vitest. Those three
+    # assertions used to skip wherever the UI dependencies were absent, which was
+    # every job but `ui_tests` (#1390); the module now fails instead, so this job
+    # needs them to pass as well as to check anything.
+    - cd src/ui && npm ci --prefer-offline --no-audit && cd ../..
 
   script:
     # SKIP_INSTALL=1: idp_common[test] already installed via uv above (avoids a
@@ -279,11 +328,21 @@ unit_tests:
     # on the command line twice, which pytest answers by collecting NOTHING and
     # exiting 5 -- loud rather than silent, but a broken job either way.
     - make test-cicd -C lib/idp_common_pkg SKIP_INSTALL=1
+    # The line above writes ONE of the ratchet's nine trees. Without the next step the
+    # other eight resolve to no report at all, so the ratchet named them as
+    # "not checked" and exited 0 — advisory-but-passing over exactly the trees where
+    # coverage had actually been lost, including this repository's own hook guards
+    # (issue #1256). Trees are measured concurrently and `idp_common` is skipped
+    # because the line above already produced its report; the ratchet below still
+    # requires it by name.
+    - make coverage-all-cicd
     # Ratchet per-file coverage against scripts/coverage_debt.json. Must follow the
-    # line above: it reads the coverage report that step writes. This ordering is
-    # also why the two steps could not be split into separate JOBS without passing
-    # the report between them as an artifact.
-    - make check-coverage-debt
+    # two lines above: it reads the coverage reports those steps write, which is also
+    # why none of the three could be split into separate JOBS without passing the
+    # reports between them as artifacts. `--require-all-trees` (inside the -cicd
+    # target) is what makes a tree with no report red BY NAME instead of named and
+    # passed.
+    - make check-coverage-debt-cicd
 
   # COVERAGE IS REPORTED, NOT ENFORCED. There is deliberately no `coverage:`
   # minimum here, for the same reason GitHub's report sets fail_below_min: false:
@@ -316,6 +375,22 @@ package_tests:
     - size:2xlarge
     - arch:arm64
 
+  # Same key and same path as `static_checks` and `ui_tests`, so the `npm ci` in
+  # before_script restores from whatever those two last pushed for this lockfile.
+  # The install is kept anyway rather than relying on the cache alone: a cache is
+  # a performance assumption, not a guarantee — the first pipeline after a
+  # lockfile change has no entry for the new key at all, and within one pipeline
+  # these jobs run in parallel so nothing orders this one after a producer. With
+  # `npm ci` the dependencies are there unconditionally and the cache only decides
+  # whether it takes 10 seconds or 60; without it, the suites below would go back
+  # to skipping on a cold key, which is the failure this is fixing.
+  cache:
+    key:
+      files:
+        - src/ui/package-lock.json
+    paths:
+      - src/ui/node_modules/
+
   before_script:
     - *python_setup
     # ⚠️ Node and basedpyright ARE needed here, which is not obvious from the
@@ -341,6 +416,19 @@ package_tests:
     # those assertions measuring the same linter `make cfn-lint` uses rather than
     # coinciding with it by luck. Keep in step with CFN_LINT_VERSION.
     - pip install 'cfn-lint==1.51.0'
+    # ⚠️ A THIRD toolchain this job's `script:` block does not show, and the same
+    # lesson as the two above. `scripts/tests/test_ui_test_discovery.py` checks its
+    # hand-written copies of Vitest's naming convention against the installed
+    # Vitest — `vitest list --filesOnly`, `defaultInclude`, and the expanded
+    # extension set against picomatch — and those three need the UI's npm
+    # dependencies, which were installed only in `ui_tests`. So they SKIPPED here,
+    # on both platforms, and a skip is not a failure: the job exited 0 and the
+    # literals that are the *input* to that module's gate assertions were
+    # calibrated against nothing but a developer's machine (#1390). The module now
+    # fails rather than skips when it finds them missing under CI, so this line is
+    # load-bearing for the job staying green as well as for the check meaning
+    # anything.
+    - cd src/ui && npm ci --prefer-offline --no-audit && cd ../..
 
   script:
     - make test-packages-cicd
@@ -844,7 +932,7 @@ srt_security_review:
     - apt-get update -y
     - apt-get install curl python3-pip -y
     # Install Python dependencies for SRT setup script
-    - pip install --upgrade pip
+    - pip install --upgrade pip PyYAML
 
   script:
     - echo "Running SRT (Sample Security Review Tool) security assessment..."

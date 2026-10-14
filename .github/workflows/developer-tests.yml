@@ -164,16 +164,47 @@ jobs:
       - name: Set up Git safe directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      # No Node: nothing in this job needs it.
+      # ⚠️ Node and the pinned cfn-lint are load-bearing here, and neither is visible
+      # from any `run:` line below. This job used to need neither; the coverage
+      # producer two steps down re-runs the `scripts` and `idp_sdk` suites to measure
+      # them, which drags their toolchain requirements into this job wholesale —
+      # `scripts/tests/test_ux_recorder.py` runs the recorder's cursor-overlay
+      # JavaScript under node and FAILS rather than skipping without it, and
+      # `scripts/tests/test_pyright_config.py` runs basedpyright live. cfn-lint is
+      # about PINNING rather than availability, for the cfn-lint-gated assertions
+      # in `lib/idp_sdk/tests/unit/` — see `package_tests` below, which carries the
+      # same three inputs for the same three reasons. Read the suites, not the steps.
+      # `ui-deps: true` is the third and the least visible: the same coverage step
+      # brings in `test_ui_test_discovery.py`, which checks its hand-written copies
+      # of Vitest's file-naming convention against the installed Vitest. Those three
+      # assertions used to SKIP wherever the UI's npm dependencies were absent,
+      # which was every job but `ui_tests`, and a skip leaves the job exiting 0
+      # (#1390) — so the literals that are the input to that module's gate
+      # assertions were calibrated on developer machines and in neither CI.
       - name: Set up the Python environment
         uses: ./.github/actions/python-env
+        with:
+          node: "true"
+          cfn-lint: "true"
+          ui-deps: "true"
 
       - name: Run tests
         id: run-tests
         run: make test-cicd -C lib/idp_common_pkg
 
-      - name: Coverage ratchet (per-file, reads the report the step above writes)
-        run: make check-coverage-debt
+      # The step above writes ONE of the ratchet's nine trees. Without this step the
+      # other eight resolve to no report at all, so the ratchet named them as
+      # "not checked" and exited 0 — advisory-but-passing over exactly the trees
+      # where coverage had actually been lost, including this repository's own hook
+      # guards (issue #1256). Trees are measured concurrently and `idp_common` is
+      # skipped because the step above already produced its report; the ratchet below
+      # still requires it by name.
+      - name: Coverage reports for every other measurable tree (concurrent)
+        run: make coverage-all-cicd
+        continue-on-error: false
+
+      - name: Coverage ratchet (per-file, every registry tree required by name)
+        run: make check-coverage-debt-cicd
         continue-on-error: false
 
       - name: Upload coverage reports
@@ -276,11 +307,23 @@ jobs:
       # where the single pre-split job installed the pinned version before any
       # suite started. Asking for the pin keeps those assertions measuring the
       # same linter `make cfn-lint` uses, rather than coinciding with it by luck.
+      # ⚠️ `ui-deps: true` is the third of these and was the one that cost most to
+      # find, because omitting it did NOT turn this job red.
+      # `test_ui_test_discovery.py` calibrates its hand-written copies of Vitest's
+      # file-naming convention against the installed Vitest — `vitest list
+      # --filesOnly`, `defaultInclude`, and the expanded extension set against
+      # picomatch — and answered an absent `src/ui/node_modules` with a skip. So
+      # three assertions reported as skipped, the job exited 0, and the literals
+      # that are the *input* to that module's gate assertions were checked nowhere
+      # but on a developer's machine (#1390). The module now fails rather than
+      # skips when it finds them missing under CI, so this input is load-bearing
+      # for the job staying green as well as for the check meaning anything.
       - name: Set up the Python environment
         uses: ./.github/actions/python-env
         with:
           node: "true"
           cfn-lint: "true"
+          ui-deps: "true"
 
       - name: Run package and Lambda test suites
         id: run-package-tests

@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 
 from idp_common.config.models import IDPConfig
 from idp_common.metering_units import (
+    CACHE_UNITS,
     NOT_CHARGEABLE,
     classify_absent_unit,
     pricing_key_service,
@@ -1064,16 +1065,22 @@ class SaveReportingData:
                     f"not chargeable ($0.0)"
                 )
                 return 0.0
+            declaration = (
+                "idp_common.metering_units.EXPECTED_CACHE_UNIT_OMISSIONS, per "
+                "pricing key and per unit"
+                if unit in CACHE_UNITS
+                else "idp_common.metering_units.NON_CHARGEABLE_METERING_UNITS, "
+                f"for the '{pricing_key_service(candidate)}' service"
+            )
             logger.warning(
                 f"UNPRICED UNIT: pricing entry '{candidate}' lists no unit "
-                f"'{unit}' and it is not declared non-chargeable for "
-                f"'{pricing_key_service(candidate)}' in "
-                f"idp_common.metering_units.NON_CHARGEABLE_METERING_UNITS. "
+                f"'{unit}' and nothing declares it non-chargeable in "
+                f"{declaration}. "
                 f"Recording this metering row (value={value}) with a NULL cost "
                 f"rather than $0.00, which would understate spend silently. "
                 f"Either add a '{unit}' rate to the '{candidate}' pricing entry, "
-                f"or declare the unit non-chargeable with the AWS price-list "
-                f"reading that shows it is."
+                f"or declare the unit non-chargeable there with the AWS "
+                f"price-list reading that shows it is."
             )
             return None
 
