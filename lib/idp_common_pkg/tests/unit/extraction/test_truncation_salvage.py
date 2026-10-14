@@ -372,6 +372,21 @@ class TestTheTruncationMarkerSurvivesTheMerge:
         _accumulate_metering(merged, {"m": {"outputTokens": 1}})
         assert "_output_truncated" not in merged
 
+    def test_the_merge_is_a_logical_or_and_not_merely_a_set(self):
+        """``structured_output_async`` only ever writes ``True``, so the ``False``
+        side of the OR is unreachable through the product today — which is exactly
+        why it is pinned here. A later writer recording a per-shard verdict
+        (truncated / not) must not be able to clear another shard's truncation, and
+        nothing else in the tree would notice if it could."""
+        a: dict[str, Any] = {}
+        _accumulate_metering(a, {"_output_truncated": True})
+        _accumulate_metering(a, {"_output_truncated": False})
+        assert a["_output_truncated"] is True
+
+        b: dict[str, Any] = {}
+        _accumulate_metering(b, {"_output_truncated": False})
+        assert b["_output_truncated"] is False
+
 
 class TestAGapIsNotCollated:
     """A shard with no assessment must not shift its neighbours' confidence.
@@ -428,6 +443,10 @@ class TestAGapIsNotCollated:
         with caplog.at_level("WARNING"):
             collate_shard_assessments(results, _Statement)
         assert "standalone Assessment step" in caplog.text
+        # The counts, because this message is the only operator-facing account of
+        # why a configured confidence pass produced nothing: 1 of 2 shards, 3 rows.
+        assert "1 of 2 shard(s)" in caplog.text
+        assert "contributing 3 list row(s)" in caplog.text
 
     def test_a_shard_with_no_rows_and_no_assessment_shifts_nothing(self):
         """So it must not void an otherwise complete collation."""
