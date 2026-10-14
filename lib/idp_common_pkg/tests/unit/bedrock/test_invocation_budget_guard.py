@@ -1512,14 +1512,27 @@ def test_the_gate_fires_inside_a_thread_pool_worker(monkeypatch: pytest.MonkeyPa
     under change. A real clock and a real (tiny) stall are used here instead of the
     shared ``FakeClock``: the fixture's clock is mutated by whichever thread runs,
     and a racing counter would make the assertion depend on the scheduler.
+
+    ⚠️ **The stall has to be held before the backoff is stubbed out, and the two
+    cannot both go through ``time.sleep``.** ``client_mod.time`` is not a per-module
+    alias — it *is* the stdlib ``time`` module — so stubbing ``sleep`` on it replaces
+    the function process-wide, including the one this stall calls. With the stall a
+    no-op, the only real time an attempt spent was the latency of three CloudWatch
+    ``PutMetricData`` round trips that nothing here mocks, and those were what carried
+    the elapsed cost past the deadline. The assertion held, for a reason this
+    docstring denies and no reader would look for; it inverted the moment an autouse
+    refusal made an unmocked AWS call fail in-process instead of over a socket
+    (#1398). ``_stall`` keeps the real function, so the cost the comment claims is the
+    cost the gate measures.
     """
     client = BedrockClient(region="us-east-1")
     client._client = MagicMock()
     seen: list[float | None] = []
+    _stall = time.sleep
 
     def _slow_throttle(**_kwargs):
         seen.append(lambda_deadline.get_lambda_deadline_epoch())
-        time.sleep(0.05)
+        _stall(0.05)
         raise ClientError(
             {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
             "InvokeModel",
