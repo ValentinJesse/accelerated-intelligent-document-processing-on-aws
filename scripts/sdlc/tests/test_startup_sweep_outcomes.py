@@ -1359,3 +1359,288 @@ def test_a_name_with_no_run_prefix_is_never_reaped(cbd, monkeypatch):
     assert aws.described == [], "a prefixless name should ask nothing of CloudFormation"
     assert aws.deleted == [], f"a name with no run prefix was reaped: {aws.deleted}"
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# The retry config the layer's safety premise rests on, per client (#1445)
+#
+# The module header's claim about `_THROTTLE_RETRY_CONFIG` is load-bearing
+# rather than decorative: "what reaches a handler is a durable condition" is
+# the premise under which every fail-closed handler above may treat an error as
+# meaningful. Six client constructions on the sweep path were built without it,
+# so a single `Rate exceeded` arrived at those handlers indistinguishable from a
+# denial. Two had named consequences — the retention-marker read, whose failure
+# narrows the protection a path that DELETES is applied with, and
+# `_live_idp_run_prefixes`, whose failure is the enumeration finding for the
+# bucket AND the policy sweep, both registered `fails_run=True`, so one
+# transient CloudFormation throttle ended a night's run red with nothing else
+# wrong.
+#
+# Asserted PER CLIENT and over a DERIVED set, for two separate reasons.
+#
+# Per client, because any aggregate form of this — "a client carried it", "an
+# adaptive Config was built" — passes while an individual client is unprotected,
+# and that is precisely the state the header described wrongly for as long as it
+# stood. Each construction site is its own case and names its own helper.
+#
+# Derived, because the first four were found by reading the file, and a seventh
+# client added under a sweep later is the same defect again. `_client_sites()`
+# walks the call graph from the registered sweeps, so a construction anywhere in
+# that closure is covered without being listed here — and `EXPECTED_CLIENT_SITES`
+# pins the sites the derivation found when it was written, so a derivation that
+# silently stops reaching one fails rather than parametrising fewer cases.
+# ---------------------------------------------------------------------------
+
+#: The harness's one shared retry Config, by name. A site must NAME it rather
+#: than build its own: a local Config could satisfy a mode-and-count check while
+#: diverging from every other client the next time the shared one is tuned, and
+#: the header's claim is literally about this constant.
+RETRY_CONFIG_NAME = "_THROTTLE_RETRY_CONFIG"
+
+#: The attempt floor, the same one #1444 asserted for the liveness client. A
+#: floor rather than the exact 10 so tuning the constant up is not a test edit.
+MIN_RETRY_ATTEMPTS = 5
+
+#: One root that is NOT a Step 0 sweep, so it is named rather than derived.
+#: `retain_failed_stack` is the WRITE side of the retention markers
+#: `cleanup_stale_idp_stacks` reads: a throttled `put_object` here returns False,
+#: the run tears its own stack down, and the evidence the retention exists to
+#: preserve is gone. There is no call edge from a sweep to find it by — the
+#: sweeps read what this writes — so the root is stated.
+RETENTION_WRITE_ROOTS = ("retain_failed_stack",)
+
+
+def _top_level_functions(tree):
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _called_function_names(node):
+    """The call-graph edges out of `node` that stay inside this module.
+
+    Bare `Name` calls only, which is how every helper here is called. An
+    attribute call (`cf.delete_stack`) is a call into boto3, not an edge.
+    """
+    return {
+        child.func.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+
+
+def _retry_closure():
+    """(functions, {name: path}) for every function reachable from a root.
+
+    The path is kept because it is what a failure has to print: "this helper
+    builds an unprotected client" is not actionable without the sweep that
+    reaches it, and the two can be several calls apart (the VPC reaper reaches
+    its ENI sweep through `delete_apigw_test_vpc`).
+    """
+    functions = _top_level_functions(ast.parse(HARNESS.read_text(encoding="utf-8")))
+    paths = {}
+    queue = [(name, (name,)) for name in (*_sweep_names(), *RETENTION_WRITE_ROOTS)]
+    while queue:
+        name, path = queue.pop(0)
+        if name in paths or name not in functions:
+            continue
+        paths[name] = path
+        for callee in sorted(_called_function_names(functions[name])):
+            if callee in functions and callee not in paths:
+                queue.append((callee, (*path, callee)))
+    return functions, paths
+
+
+def _client_sites():
+    """Every `boto3.client`/`boto3.resource` construction in that closure.
+
+    Returns (helper, kind, service, lineno, config_expr, path) per site, with
+    `config_expr` the source of the `config=` keyword or None where there is
+    none — which is the whole finding.
+    """
+    functions, paths = _retry_closure()
+    sites = []
+    for name in sorted(paths):
+        for node in ast.walk(functions[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr in ("client", "resource")
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "boto3"
+            ):
+                continue
+            service = (
+                node.args[0].value
+                if node.args and isinstance(node.args[0], ast.Constant)
+                else "<dynamic>"
+            )
+            config = next(
+                (ast.unparse(kw.value) for kw in node.keywords if kw.arg == "config"),
+                None,
+            )
+            sites.append(
+                (
+                    name,
+                    func.attr,
+                    service,
+                    node.lineno,
+                    config,
+                    " -> ".join(paths[name]),
+                )
+            )
+    return tuple(sites)
+
+
+SWEEP_CLIENT_SITES = _client_sites()
+
+#: (helper, kind, service) for every site the derivation found when this was
+#: written: the 14 reachable from a registered sweep plus the retention writer.
+#: A floor, not a ceiling — a new site is covered by the parametrisation above
+#: without being added here — and it is what stops the derivation going quietly
+#: vacuous. Six of these carried no config at all before #1445; the other nine
+#: already did, which is why the claim read as true to four readers.
+EXPECTED_CLIENT_SITES = frozenset(
+    {
+        ("_drop_retention_marker", "client", "s3"),
+        ("_expired_retention_markers", "client", "s3"),
+        ("_force_delete_vpc_stack_enis", "client", "cloudformation"),
+        ("_force_delete_vpc_stack_enis", "client", "ec2"),
+        ("_live_idp_run_prefixes", "client", "cloudformation"),
+        ("cleanup_stale_apigw_test_vpcs", "client", "cloudformation"),
+        ("cleanup_stale_bda_blueprints", "client", "bedrock-data-automation"),
+        ("cleanup_stale_bda_blueprints", "client", "cloudformation"),
+        ("cleanup_stale_ci_diagnostics", "client", "s3"),
+        ("cleanup_stale_idp_buckets", "client", "s3"),
+        ("cleanup_stale_idp_buckets", "resource", "s3"),
+        ("cleanup_stale_idp_policies", "client", "iam"),
+        ("cleanup_stale_idp_stacks", "client", "cloudformation"),
+        ("delete_apigw_test_vpc", "client", "cloudformation"),
+        ("retain_failed_stack", "client", "s3"),
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("helper", "kind", "service", "lineno", "config", "path"),
+    SWEEP_CLIENT_SITES,
+    ids=[f"{s[0]}-{s[1]}-{s[2]}" for s in SWEEP_CLIENT_SITES],
+)
+def test_every_client_on_a_sweep_path_carries_the_shared_retry_config(
+    helper, kind, service, lineno, config, path
+):
+    """One case per construction site, so losing one names the helper that lost it.
+
+    The header's inference is what this protects. A handler reached by a
+    throttle on an unprotected client has to decide between "the account refused
+    this" and "ask again in a moment" with nothing to decide on, and every
+    handler in this layer resolves that the way the durable reading implies.
+    """
+    assert config is not None, (
+        f"{helper} builds boto3.{kind}({service!r}) at line {lineno} with no "
+        f"config, and it is reached as {path}. A throttle on that client "
+        f"arrives at a handler that reads an error as a durable condition, "
+        f"which is the premise the module header states and this breaks"
+    )
+    assert config == RETRY_CONFIG_NAME, (
+        f"{helper}'s boto3.{kind}({service!r}) at line {lineno} passes "
+        f"config={config} rather than {RETRY_CONFIG_NAME}. A second Config on "
+        f"this path is a second thing to tune: route it through the shared "
+        f"constant so every client in the layer rides out the same burst"
+    )
+
+
+def test_the_derived_client_set_still_covers_every_site_it_was_written_against():
+    """Non-vacuity, and it is the half that keeps the derivation honest.
+
+    The parametrisation above is only as strong as what the walk reaches. A
+    helper renamed, a call edge removed, or a root dropped would narrow it
+    silently and every remaining case would stay green — the shape of the defect
+    this module exists for, one level up.
+    """
+    found = {(helper, kind, service) for helper, kind, service, *_ in SWEEP_CLIENT_SITES}
+    missing = sorted(EXPECTED_CLIENT_SITES - found)
+
+    assert not missing, (
+        f"the call-graph walk no longer reaches {missing}, so those clients are "
+        f"asserted by nothing. Either the helper moved (re-derive the set) or a "
+        f"root is missing from STARTUP_SWEEPS / RETENTION_WRITE_ROOTS"
+    )
+
+
+def test_the_shared_retry_config_rides_out_a_burst_rather_than_merely_existing(cbd):
+    """What the sites above name has to actually be adaptive and deep.
+
+    Every static assertion in this section compares a NAME. Pointing all fifteen
+    sites at a constant rebuilt as `standard`/3 attempts would satisfy every one
+    of them while putting the whole throttle class back in front of the handlers,
+    so the object itself is read here — the shape #1444 used for the liveness
+    client.
+    """
+    cfg = cbd._THROTTLE_RETRY_CONFIG
+
+    assert cfg.retries["mode"] == "adaptive", (
+        f"the shared retry config is {cfg.retries}. Only adaptive mode backs off "
+        f"on the client-side rate estimate, which is what rides out an "
+        f"account-wide burst rather than retrying into it"
+    )
+    assert cfg.retries["max_attempts"] >= MIN_RETRY_ATTEMPTS, (
+        f"the shared retry config allows {cfg.retries.get('max_attempts')} "
+        f"attempts, below the floor of {MIN_RETRY_ATTEMPTS}; botocore's default "
+        f"of 4 is what a probe already died at"
+    )
+
+
+#: The three helpers whose client the issue names as a live decision path, with
+#: a call that builds it. Driven for real because the static check above reads a
+#: NAME at a call site and this reads the Config OBJECT the call actually passes
+#: — a constant shadowed locally, or a site reaching a stale copy, satisfies one
+#: and not the other.
+_RETRY_DRIVES = {
+    "_live_idp_run_prefixes": lambda cbd: cbd._live_idp_run_prefixes(),
+    "_expired_retention_markers": lambda cbd: cbd._expired_retention_markers(
+        "a-bucket", datetime.now(tz=timezone.utc)
+    ),
+    "_drop_retention_marker": lambda cbd: cbd._drop_retention_marker(
+        "a-bucket", DEAD_RUN
+    ),
+}
+
+
+@pytest.mark.parametrize("helper", sorted(_RETRY_DRIVES))
+def test_the_config_each_live_path_helper_actually_passes_is_adaptive(
+    cbd, monkeypatch, helper
+):
+    """Per helper, on the Config the running code hands to boto3."""
+    seen = []
+    aws = _FakeAws(
+        {
+            "list_stacks": [{"StackSummaries": []}],
+            "list_objects_v2": [{"Contents": []}],
+        }
+    )
+
+    def _client(name, *a, **k):
+        seen.append((name, k.get("config")))
+        return aws
+
+    monkeypatch.setattr(cbd.boto3, "client", _client)
+
+    _RETRY_DRIVES[helper](cbd)
+
+    assert seen, f"{helper} built no client at all, so this asserts nothing"
+    for service, cfg in seen:
+        assert cfg is not None, (
+            f"{helper} built its {service} client without a Config, so a "
+            f"throttle reaches its caller as a durable condition"
+        )
+        assert cfg.retries["mode"] == "adaptive", (helper, service, cfg.retries)
+        assert cfg.retries["max_attempts"] >= MIN_RETRY_ATTEMPTS, (
+            helper,
+            service,
+            cfg.retries,
+        )

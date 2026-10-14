@@ -369,7 +369,13 @@ def generate_stack_name():
 # every sweep's clients carry `_THROTTLE_RETRY_CONFIG` (adaptive, 10 attempts),
 # so `SlowDown`/`Throttling`/5xx is retried and what reaches a handler is a
 # durable condition — a denied call, expired credentials, a region or account the
-# role cannot read.
+# role cannot read. That is the premise every fail-closed handler below decides
+# on, so it is derived rather than asserted in prose: the per-client check in
+# `tests/test_startup_sweep_outcomes.py` walks the call graph out from
+# STARTUP_SWEEPS and names any client in the closure built without the config, so
+# a new one added under a sweep fails there instead of making this paragraph
+# false again (#1445). Six of them were, including the retention-marker read and
+# the ownership probe both the bucket and policy sweeps enumerate through.
 # ---------------------------------------------------------------------------
 
 #: Opens every Step 0 sweep finding, so the outcome is readable by something
@@ -5750,7 +5756,7 @@ def _force_delete_vpc_stack_enis(vpc_stack_name):
     deleted = 0
     denied = False
     try:
-        cf = boto3.client("cloudformation")
+        cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
         outputs = {
             o["OutputKey"]: o["OutputValue"]
             for o in cf.describe_stacks(StackName=vpc_stack_name)["Stacks"][0].get(
@@ -5760,7 +5766,7 @@ def _force_delete_vpc_stack_enis(vpc_stack_name):
         vpc_id = outputs.get("VpcId", "")
         if not vpc_id:
             return 0, False
-        ec2 = boto3.client("ec2")
+        ec2 = boto3.client("ec2", config=_THROTTLE_RETRY_CONFIG)
         enis = ec2.describe_network_interfaces(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
         ).get("NetworkInterfaces", [])
@@ -5835,7 +5841,7 @@ def delete_apigw_test_vpc(vpc_stack_name):
     Best effort — never raises.
     """
     print(f"[{vpc_stack_name}] Deleting test VPC...")
-    cf = boto3.client("cloudformation")
+    cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
 
     def _attempt():
         cf.delete_stack(StackName=vpc_stack_name)
@@ -6188,7 +6194,7 @@ def retain_failed_stack(stack_name):
 
     hours = min(KEEP_FAILED_STACK_HOURS, KEEP_FAILED_STACK_MAX_HOURS)
     try:
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         live = {
             name: until
@@ -6253,7 +6259,7 @@ def _keep_until_in_future(keep_until, now):
 
 def _expired_retention_markers(bucket, now):
     """Return ({stack_name: until} still protected, [names whose marker expired])."""
-    s3 = boto3.client("s3")
+    s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
     protected, expired = {}, []
     for name, until in _retention_markers(s3, bucket).items():
         if _keep_until_in_future(until, now):
@@ -6266,7 +6272,7 @@ def _expired_retention_markers(bucket, now):
 def _drop_retention_marker(bucket, stack_name):
     """Delete a retention marker once its stack has been reaped."""
     try:
-        boto3.client("s3").delete_object(
+        boto3.client("s3", config=_THROTTLE_RETRY_CONFIG).delete_object(
             Bucket=bucket, Key=f"{RETENTION_S3_PREFIX}/{stack_name}.json"
         )
     except Exception as e:  # noqa: BLE001
@@ -6540,7 +6546,7 @@ def _live_idp_run_prefixes():
     every non-terminal and terminal-but-present state.
     """
     prefixes = set()
-    cf = boto3.client("cloudformation")
+    cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
     paginator = cf.get_paginator("list_stacks")
     # All statuses EXCEPT DELETE_COMPLETE (a completed delete means the stack is
     # gone, so its buckets — if any survived — are fair game).
