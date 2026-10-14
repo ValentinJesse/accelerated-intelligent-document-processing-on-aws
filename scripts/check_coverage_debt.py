@@ -245,11 +245,38 @@ TREES: tuple[Tree, ...] = (
             "scripts/security/tests",
             "scripts/srt/tests",
         ),
-        # Measured serially, which is what its recorded figures are. The parallel run
-        # is not meaningfully faster on this tree anyway -- one root cannot use every
-        # worker -- and the coverage of the hooks its suites run as subprocesses is
-        # unaffected by the worker count either way. See `Tree.serial`.
-        serial=True,
+        # MEASURED PARALLEL-SAFE, 2026-10-14. See `Tree.serial` for what the flag
+        # does and does not protect; this entry records the measurement that the
+        # note there asked for before anyone flipped it.
+        #
+        # Both runs `--cov=scripts`, 6094 passed and 42 skipped in each, with
+        # subprocess instrumentation and the hermetic AWS environment live in both
+        # (those are what protect the figures; the worker count is not).
+        #   serial   1291s (21:31), 0.84 cores, 86.22% (37986/44058)
+        #   -n 4      462s (07:41), 4.1  cores, 86.22% (37989/44061)
+        # Compared PER FILE, which is the granularity the ratchet actually reads:
+        # all 214 files identical to the hundredth, whole-tree delta +0.0009
+        # points -- 3 statements, in `coverage_all.py`'s own worker-budget branch,
+        # which a parallel run executes and a serial one does not.
+        #
+        # ⚠️ The `-n 4` is measured at `-n 4`, not inferred from a wider run. An
+        # earlier pass of this measurement compared a 14-worker run instead,
+        # because `--only <one tree>` clamps `--jobs` to 1 and then hands that one
+        # tree every CPU -- so the obvious invocation measures a configuration
+        # nothing runs. Three trees at `--jobs 3` on a 14-CPU machine is what
+        # reproduces CI's share, since `worker_share` divides and floors.
+        #
+        # `-n 4` is the worker count this tree actually gets in CI, not an
+        # arbitrary one: `coverage-all-cicd` passes `--jobs 4` and
+        # `coverage_all.worker_share(4)` divides a 16-vCPU runner four ways. A
+        # measurement at `-n auto` would have been a measurement of a
+        # configuration nothing runs.
+        #
+        # The claim this replaces -- "the parallel run is not meaningfully faster
+        # on this tree anyway, one root cannot use every worker" -- was true when
+        # it was written and is not true at 6093 tests. It was costing 29 minutes
+        # of a 34-minute `unit_tests` job, 84% of the job, as the only serial tree
+        # of nine.
     ),
     Tree("idp_sdk", "lib/idp_sdk", "idp_sdk", ("-m", "not integration")),
     Tree("main_stack_extensions", "feature-platform/main-stack-extensions", "."),

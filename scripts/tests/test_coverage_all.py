@@ -478,14 +478,54 @@ class TestASerialTreeIsNeverRunInParallel:
         assert "-n" not in rec.cmd_for("ser")
         assert "-n" in rec.cmd_for("par")
 
-    def test_the_scripts_tree_is_declared_serial_in_the_real_registry(self):
-        """Not a synthetic tree: the one whose baseline was measured serially.
+    def test_no_registry_tree_declares_serial_without_recording_why(self):
+        """`serial` costs wall clock, so an entry that declares it has to say why.
 
-        The `scripts` figures in `coverage_debt.json` come from a serial run. Flipping this
-        changes the conditions the recorded numbers were taken under, so it is a decision
-        that comes with a measurement rather than a default.
+        This replaces an assertion that `scripts` **is** serial. That assertion was
+        the pin on a decision, and its docstring set the price of changing it: "a
+        decision that comes with a measurement rather than a default". The
+        measurement was taken on 2026-10-14 and is recorded at the entry --
+        `6093 passed` either way, `86.22%` either way, identical per file, and
+        1291s serial against 585s at the `-n 4` that `coverage-all-cicd` actually
+        gives this tree. So `scripts` is no longer serial, and the pin now guards
+        the general property instead of that one tree's value.
+
+        Why the general form. Serial was costing 29 of the 34 minutes of the
+        `unit_tests` job -- 84% of it, as the only serial tree of nine -- and the
+        reason in the entry ("not meaningfully faster on this tree anyway") had
+        quietly stopped being true as the suite grew to 6093 tests. A pin on the
+        literal value cannot catch a stale justification; requiring the entry to
+        carry its measurement at least puts the claim where the next reader will
+        check it.
+
+        ⚠️ Asserted as "the set is empty", not as a loop over serial trees with
+        the check inside. The loop form is what this test was first written as,
+        and with no serial tree left its body never executed: it passed
+        vacuously AND left its own line uncovered, which the per-file coverage
+        diff caught. A guard that cannot run is the thing this repository keeps
+        finding, so the assertion is on a value that is always computed.
+
+        `Tree.serial` stays as a capability -- the synthetic trees earlier in
+        this class cover both directions of it -- and if a tree ever needs it
+        again, the failure here is where the measurement gets asked for.
         """
-        assert ccd.TREES_BY_NAME["scripts"].serial is True
+        serial_trees = [tree.name for tree in ccd.TREES if tree.serial]
+        assert serial_trees == [], (
+            f"{serial_trees} declare serial=True. Serial is the expensive option: "
+            "it cost 29 of the 34 minutes of the `unit_tests` job when `scripts` "
+            "was the only one of nine. Record at the entry what the serial run "
+            "buys -- the measurement `Tree.serial` describes -- and then update "
+            "this test deliberately."
+        )
+
+    def test_the_scripts_tree_runs_in_parallel_in_the_real_registry(self):
+        """The flip itself, so a silent revert shows up as a failure.
+
+        Reverting this costs ~12 minutes of every `unit_tests` run, which is the
+        kind of regression that is invisible in a diff and obvious only in a
+        pipeline nobody is timing.
+        """
+        assert ccd.TREES_BY_NAME["scripts"].serial is False
 
 
 def _probe_tree(tmp_path: Path, name: str = "probe"):
