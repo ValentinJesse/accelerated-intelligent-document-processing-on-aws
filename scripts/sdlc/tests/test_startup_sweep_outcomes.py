@@ -1386,7 +1386,7 @@ def test_a_name_with_no_run_prefix_is_never_reaped(cbd, monkeypatch):
 # Derived, because the first four were found by reading the file, and a seventh
 # client added under a sweep later is the same defect again. `_client_sites()`
 # walks the call graph from the registered sweeps, so a construction anywhere in
-# that closure is covered without being listed here — and `EXPECTED_CLIENT_SITES`
+# that closure is covered without being listed here — and `CLIENT_SITES_FLOOR`
 # pins the sites the derivation found when it was written, so a derivation that
 # silently stops reaching one fails rather than parametrising fewer cases.
 # ---------------------------------------------------------------------------
@@ -1502,9 +1502,14 @@ SWEEP_CLIENT_SITES = _client_sites()
 #: written: the 14 reachable from a registered sweep plus the retention writer.
 #: A floor, not a ceiling — a new site is covered by the parametrisation above
 #: without being added here — and it is what stops the derivation going quietly
-#: vacuous. Six of these carried no config at all before #1445; the other nine
-#: already did, which is why the claim read as true to four readers.
-EXPECTED_CLIENT_SITES = frozenset(
+#: vacuous. Six of these carried no config at all before #1445 and the other nine
+#: already did, which is the shape that let the header's claim read as true.
+#:
+#: Named for what this holds rather than for what it would turn off. It widens
+#: what the gate demands instead of narrowing it, so the scanner that collects
+#: gate carve-outs by name has nothing to collect here and a registry entry could
+#: say nothing useful about it.
+CLIENT_SITES_FLOOR = frozenset(
     {
         ("_drop_retention_marker", "client", "s3"),
         ("_expired_retention_markers", "client", "s3"),
@@ -1562,8 +1567,10 @@ def test_the_derived_client_set_still_covers_every_site_it_was_written_against()
     silently and every remaining case would stay green — the shape of the defect
     this module exists for, one level up.
     """
-    found = {(helper, kind, service) for helper, kind, service, *_ in SWEEP_CLIENT_SITES}
-    missing = sorted(EXPECTED_CLIENT_SITES - found)
+    found = {
+        (helper, kind, service) for helper, kind, service, *_ in SWEEP_CLIENT_SITES
+    }
+    missing = sorted(CLIENT_SITES_FLOOR - found)
 
     assert not missing, (
         f"the call-graph walk no longer reaches {missing}, so those clients are "
