@@ -291,6 +291,46 @@ class TestTheWholeAgenticCallReportsIt:
         usage = next(v for k, v in response["metering"].items() if "bedrock" in k)
         assert usage["outputTokens"] == 9
 
+    def test_an_agent_run_that_finishes_carries_no_marker(self):
+        """The other direction, and the expensive one to get wrong: marking every
+        agentic run truncated would put a completeness warning on every Advanced-mode
+        section, which is how a real one stops being read."""
+        from idp_common.config.models import IDPConfig
+
+        rows = [{"Date": "2024-01-01", "Description": "P", "Amount": 1.0}]
+
+        class _FakeAgent:
+            def __init__(self, **_kwargs: Any) -> None:
+                self.state = _State({"current_extraction": {"Transactions": rows}})
+                self.event_loop_metrics = _Metrics(
+                    {"inputTokens": 5, "outputTokens": 9}
+                )
+
+        class _Result:
+            metrics = _Metrics({"inputTokens": 5, "outputTokens": 9})
+
+            def __str__(self) -> str:
+                return "done"
+
+        async def _ok(agent, input):  # noqa: ARG001 - signature parity
+            return _Result()
+
+        with (
+            patch.object(_agentic, "Agent", _FakeAgent),
+            patch.object(_agentic, "BedrockModel", MagicMock()),
+            patch.object(_agentic, "invoke_agent_with_retry", _ok),
+        ):
+            _result, response = _run(
+                _agentic.structured_output_async(
+                    model_id="us.anthropic.claude-sonnet-4-6",
+                    data_format=_Statement,
+                    prompt="extract this",
+                    config=IDPConfig(),
+                    emit_field_assessment=True,
+                )
+            )
+        assert "_output_truncated" not in response["metering"]
+
     def test_it_is_not_specific_to_integrated_confidence(self):
         """Integrated confidence is what makes this reachable routinely, not what
         the salvage is conditioned on — any truncated agent turn qualifies."""
@@ -475,6 +515,13 @@ class TestAGapIsNotCollated:
             ),
             ({"Transactions": [1, 2, 3]}, 3),
             (None, 0),
+            # A list the class model does not DECLARE as one still shifts, because
+            # merge_assessment_dicts concatenates on the value's shape as well as
+            # on the declared set. Counting only the declared fields would leave
+            # exactly this case unguarded.
+            ({"AccountNumber": "A", "Undeclared": [1, 2]}, 2),
+            # Two lists in one shard both occupy indices.
+            ({"Transactions": [1, 2], "Fees": [3]}, 3),
         ],
     )
     def test_the_row_count_reads_both_shapes(self, data, expected):
@@ -482,4 +529,4 @@ class TestAGapIsNotCollated:
         but a plain dict is what a test or a future caller is most likely to pass."""
         from idp_common.extraction.runtime import _shard_list_row_count
 
-        assert _shard_list_row_count(data, {"Transactions"}) == expected
+        assert _shard_list_row_count(data) == expected

@@ -915,7 +915,7 @@ def collate_shard_assessments(
         if sa is not None:
             shard_assessments.append(sa)
             continue
-        unassessed_rows += _shard_list_row_count(data, list_fields)
+        unassessed_rows += _shard_list_row_count(data)
     if not shard_assessments:
         return None
     if unassessed_rows:
@@ -934,22 +934,28 @@ def collate_shard_assessments(
     return merge_assessment_dicts(shard_assessments, list_fields)
 
 
-def _shard_list_row_count(data: Any, list_fields: set[str]) -> int:
-    """Rows this shard contributes to the section's list fields.
+def _shard_list_row_count(data: Any) -> int:
+    """Rows this shard contributes to the merged lists.
 
     Zero means the shard occupies no index in any merged list, so its missing
     assessment cannot shift another shard's rows. ``data`` is the shard's
-    ``data_format`` instance (both merge callers hold one).
+    ``data_format`` instance (both merge callers hold one); a plain dict is
+    accepted too.
+
+    It counts every field whose **value** is a list, deliberately rather than the
+    declared ``_list_valued_fields`` set, because that is the rule
+    :func:`merge_assessment_dicts` concatenates by — ``key in list_fields or
+    isinstance(value, list)``. Anything that rule would concatenate can shift, so
+    anything it would concatenate has to be counted here; the declared set is the
+    narrower of the two and would leave the difference unguarded. A declared list
+    field a shard left ``None`` contributes no rows either way.
     """
     if data is None:
         return 0
     values = data if isinstance(data, dict) else getattr(data, "__dict__", {}) or {}
-    total = 0
-    for name in list_fields:
-        rows = values.get(name) if isinstance(values, dict) else None
-        if isinstance(rows, list):
-            total += len(rows)
-    return total
+    if not isinstance(values, dict):
+        return 0
+    return sum(len(rows) for rows in values.values() if isinstance(rows, list))
 
 
 def _aggregate_shard_split_stats(
