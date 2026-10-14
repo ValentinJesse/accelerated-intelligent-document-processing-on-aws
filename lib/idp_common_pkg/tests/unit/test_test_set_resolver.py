@@ -1028,7 +1028,10 @@ class TestTestSetResolver:
 
             args = {"input": {"id": "nonexistent-id", "description": "new description"}}
 
-            with pytest.raises(Exception, match="Test set 'nonexistent-id' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound,
+                match="Test set 'nonexistent-id' not found",
+            ):
                 test_set_index.update_test_set(args)
 
     # -- Versioning -------------------------------------------------------
@@ -1159,7 +1162,9 @@ class TestTestSetResolver:
         assert meta["activeReference"] == 5
 
     def test_publish_nonexistent_test_set_raises(self, publish_table):
-        with pytest.raises(Exception, match="Test set 'ghost' not found"):
+        with pytest.raises(
+            test_set_index.ResourceNotFound, match="Test set 'ghost' not found"
+        ):
             test_set_index.publish_test_set_version({"input": {"testSetId": "ghost"}})
 
     def test_publish_race_on_deleted_test_set_raises(self, publish_table):
@@ -1176,7 +1181,9 @@ class TestTestSetResolver:
         with patch.object(
             test_set_index.db_client, "get_item", side_effect=delete_after_read
         ):
-            with pytest.raises(Exception, match="Test set 'ts1' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound, match="Test set 'ts1' not found"
+            ):
                 test_set_index.publish_test_set_version({"input": {"testSetId": "ts1"}})
 
         assert "Item" not in publish_table.get_item(
@@ -1277,7 +1284,9 @@ class TestTestSetResolver:
     def test_remove_documents_nonexistent_test_set_raises(self):
         with patch.object(test_set_index.db_client, "get_item") as mock_get:
             mock_get.return_value = None
-            with pytest.raises(Exception, match="Test set 'ghost' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound, match="Test set 'ghost' not found"
+            ):
                 test_set_index.remove_documents_from_test_set(
                     {"testSetId": "ghost", "fileNames": ["a.pdf"]}
                 )
@@ -2379,7 +2388,9 @@ class TestTestSetResolver:
     def test_get_draft_label_job_unknown_job_raises(self, labeling_env):
         table, _ = labeling_env
         _seed_test_set(table, "ts1")
-        with pytest.raises(Exception, match="Labeling job 'nope' not found"):
+        with pytest.raises(
+            test_set_index.ResourceNotFound, match="Labeling job 'nope' not found"
+        ):
             test_set_index.get_draft_label_job({"testSetId": "ts1", "jobId": "nope"})
 
     def test_attach_label_metadata_takes_the_worst_field_and_source(self, labeling_env):
@@ -2789,7 +2800,7 @@ class TestTestSetResolver:
             test_set_index.estimate_review_effort(
                 {"testSetId": "ts1", "targetAccuracy": 150}
             )
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             test_set_index.estimate_review_effort({"testSetId": "ghost"})
 
     def test_estimate_review_effort_includes_the_reliability_table(self, labeling_env):
@@ -4737,7 +4748,7 @@ class TestTestSetResolver:
     def test_an_unknown_test_set_is_refused(self, labeling_env):
         _table, _s3 = labeling_env
 
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             test_set_index.open_test_set_annotation_draft(
                 {"input": {"testSetId": "nope"}}
             )
@@ -9000,7 +9011,7 @@ class TestAddDocumentsToTestSetByKey:
             self._run({"testSetId": "my-set", "objectKeys": ["a.pdf"]}, item=item)
 
     def test_refuses_a_missing_set(self):
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             self._run({"testSetId": "nope", "objectKeys": ["a.pdf"]}, item={})
 
     @staticmethod
