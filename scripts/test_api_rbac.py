@@ -623,53 +623,73 @@ def _recover_seeded_user_keys(ctx, email, *, with_pointer):
     return keys
 
 
-#: Every seeded UsersTable row this harness writes: the ctx key it is recorded
-#: under, the address it can be recovered by, and whether a ``SUB#`` pointer went
-#: with it. Teardown walks this rather than naming the scoped user alone, so
-#: adding a seeded row cannot leave one behind — which is how an orphaned row in a
-#: shared account happens.
+#: Every seeded UsersTable row this harness writes, and the ctx key it is recorded
+#: under. Teardown reads these first, because a recorded key works even when
+#: EmailIndex cannot be read; the sweep below is what catches everything else.
 _SEEDED_USER_ROWS = (
-    ("_scoped_user_keys", SCOPED, True),
-    ("_annotator_scope_keys", ANNOTATOR_ROLE, False),
+    ("_scoped_user_keys", SCOPED),
+    ("_annotator_scope_keys", ANNOTATOR_ROLE),
 )
+
+#: Every address this harness owns. Teardown has to remove a UsersTable row for
+#: ALL of them, not only for the two it seeds, because **the matrix itself writes
+#: rows for the rest**: ``listUsers[Admin]`` runs ``sync_cognito_users_to_dynamodb``,
+#: which creates a row for every Cognito user then in the pool, and
+#: ``createUser[Admin]`` writes one directly. Deleting the Cognito user does not
+#: remove the row.
+#:
+#: Measured on a live stack rather than reasoned about: a run left rows for
+#: `admin`, `author`, `viewer`, `reviewer`, `userb`, `createusertarget` and the new
+#: groupless principal behind, four of them dated nearly a month earlier — so this
+#: has been accumulating one set per run in a shared account. The sweep is by
+#: ADDRESS rather than by a `test-rbac-` prefix scan, so it can only ever reach
+#: rows for principals named here.
+_OWNED_ADDRESS_ROLES = (*MATRIX_PRINCIPALS, SCOPED, USER_B, CREATED)
 
 
 def teardown_users(ctx):
     # Every principal the matrix drives — including the groupless one, whose whole
     # value is that it holds no group, and which is therefore the account a shared
     # pool least wants left behind — plus the three the suites create.
-    for role in [*MATRIX_PRINCIPALS, SCOPED, USER_B, CREATED]:
+    for role in _OWNED_ADDRESS_ROLES:
         delete_cognito_user(ctx, test_email(role))
-    # Every item the seedings wrote, including the scoped user's SUB# pointer.
-    # Deleting only the row would leave a pointer in the live stack's UsersTable
-    # naming a row that no longer exists — harmless to the lookup, which falls
-    # through to the email leg, but still our litter in a shared account.
-    deleted = 0
-    if ctx.get("users_table"):
-        for ctx_key, email_role, with_pointer in _SEEDED_USER_ROWS:
-            keys = ctx.get(ctx_key) or []
-            if not keys:
-                keys = _recover_seeded_user_keys(
-                    ctx, test_email(email_role), with_pointer=with_pointer
-                )
-            for key in keys:
-                subprocess.run(
-                    [
-                        AWS_BIN,
-                        "dynamodb",
-                        "delete-item",
-                        "--table-name",
-                        ctx["users_table"],
-                        "--key",
-                        json.dumps(key),
-                        "--region",
-                        ctx["region"],
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-                deleted += 1
-    print(f"Deleted test users and {deleted} seeded UsersTable item(s).")
+    if not ctx.get("users_table"):
+        print("Deleted test users (no UsersTable resolved, so no rows swept).")
+        return
+    # Keys are collected before any delete, and de-duplicated, so the printed count
+    # is the number of distinct items aimed at rather than the number of calls.
+    keys = []
+    for ctx_key, _role in _SEEDED_USER_ROWS:
+        keys += ctx.get(ctx_key) or []
+    for role in _OWNED_ADDRESS_ROLES:
+        # `with_pointer=True` for every address: a swept row records a `cognitoSub`
+        # only if something wrote one, and deleting a key that does not exist is a
+        # DynamoDB no-op. Asking for it conditionally would mean knowing which
+        # writer produced each row, which teardown cannot know.
+        keys += _recover_seeded_user_keys(
+            ctx, test_email(role), with_pointer=True
+        )
+    unique = []
+    for key in keys:
+        if key not in unique:
+            unique.append(key)
+    for key in unique:
+        subprocess.run(
+            [
+                AWS_BIN,
+                "dynamodb",
+                "delete-item",
+                "--table-name",
+                ctx["users_table"],
+                "--key",
+                json.dumps(key),
+                "--region",
+                ctx["region"],
+            ],
+            capture_output=True,
+            text=True,
+        )
+    print(f"Deleted test users and {len(unique)} UsersTable item(s).")
 
 
 def get_token(ctx, role):

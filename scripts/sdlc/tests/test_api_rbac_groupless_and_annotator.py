@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -345,6 +346,7 @@ class _Recorder:
         self.deleted_keys = []
         self.delete_tables = []
         self.queries = []
+        self.seeded_uids = {}
         self._groups = groups_by_email or {}
 
     # --- cognito -----------------------------------------------------------
@@ -362,17 +364,33 @@ class _Recorder:
     def aws(self, *args, region=None):
         if args[:2] == ("dynamodb", "put-item"):
             self.put_items.append(args)
+            # Remember the userId a seeding wrote for an address, so a later query
+            # for that address answers with the SAME key the seeding recorded in
+            # ctx. Without that the two sources of keys never overlap in this stub
+            # and the de-duplication below would have nothing to de-duplicate.
+            item = json.loads(args[args.index("--item") + 1])
+            email = (item.get("email") or {}).get("S")
+            uid = (item.get("userId") or {}).get("S")
+            if email and uid:
+                self.seeded_uids[email] = uid
         elif args[:2] == ("dynamodb", "query"):
             self.queries.append(args)
             # A row shaped as the recovery path reads it, so the KEYS it builds can
             # be asserted. Answering with no items would leave the key construction
             # unmeasured, and a wrong key deletes nothing while teardown reports a
             # delete — which is how the row stays in a live stack's table.
+            #
+            # Keyed on the address queried for, so "which addresses did teardown
+            # sweep?" is answerable from the keys it deleted rather than only from
+            # the queries it issued.
+            values = json.loads(args[args.index("--expression-attribute-values") + 1])
+            email = values[":e"]["S"]
+            uid = self.seeded_uids.get(email, f"uid-{email.split('@')[0]}")
             return {
                 "Items": [
                     {
-                        "userId": {"S": "recovered-uid"},
-                        "cognitoSub": {"S": "recovered-sub"},
+                        "userId": {"S": uid},
+                        "cognitoSub": {"S": f"sub-{email.split('@')[0]}"},
                     }
                 ]
             }
@@ -532,30 +550,57 @@ def test_teardown_only_recovers_the_annotator_row_from_the_table(seeded, capsys)
         "before teardown leaves it in the table forever"
     )
     deleted = [_json.loads(k) for k in seeded.deleted_keys]
-    row_key = {
-        "PK": {"S": "USER#recovered-uid"},
-        "SK": {"S": "USER#recovered-uid"},
-    }
+    # No `setup_users` here: this is the --teardown-only shape, where nothing
+    # recorded a key, so the stub answers with its address-derived id.
+    local = h.test_email(h.ANNOTATOR_ROLE).split("@")[0]
+    row_key = {"PK": {"S": f"USER#uid-{local}"}, "SK": {"S": f"USER#uid-{local}"}}
     assert row_key in deleted, (
         f"the recovered row key was not the one deleted: {deleted}"
     )
 
 
-def test_the_recovery_asks_for_a_sub_pointer_only_where_one_was_written(seeded, capsys):
-    """The scoped user's seeding writes a `SUB#` pointer and the Annotator's does
-    not, so asking for one in both places would report a delete that removed
-    nothing — and asking for one in neither would leave the scoped user's pointer
-    behind, naming a row that no longer exists."""
+def test_teardown_sweeps_a_users_table_row_for_every_address_it_owns(seeded, capsys):
+    """⭐ Not only the two rows the harness SEEDS — the matrix writes the rest.
+
+    `listUsers[Admin]` runs the resolver's `sync_cognito_users_to_dynamodb`, which
+    creates a UsersTable row for every Cognito user in the pool, and
+    `createUser[Admin]` writes one directly. Deleting the Cognito user leaves those
+    rows behind, so a teardown that swept only the seeded addresses left one row per
+    principal per run in a shared account — measured on a live stack, including a set
+    dated nearly a month before the run that found them.
+
+    The groupless principal is what made this worth fixing rather than noting: it is
+    a new address, so it would have been a new orphaned row every run.
+    """
     import json as _json
 
     h.teardown_users(_stack_ctx())
     capsys.readouterr()
-    deleted = [_json.loads(k) for k in seeded.deleted_keys]
-    pointer = {"PK": {"S": "SUB#recovered-sub"}, "SK": {"S": "SUB#recovered-sub"}}
-    assert deleted.count(pointer) == 1, (
-        "the SUB# pointer should be deleted exactly once — for the scoped user, who "
-        f"is the only seeding that writes one: {deleted}"
+    deleted = {_json.dumps(_json.loads(k), sort_keys=True) for k in seeded.deleted_keys}
+    missing = []
+    for role in [*h.MATRIX_PRINCIPALS, h.SCOPED, h.USER_B, h.CREATED]:
+        local = h.test_email(role).split("@")[0]
+        key = {"PK": {"S": f"USER#uid-{local}"}, "SK": {"S": f"USER#uid-{local}"}}
+        if _json.dumps(key, sort_keys=True) not in deleted:
+            missing.append(role)
+    assert not missing, (
+        f"teardown swept no UsersTable row for these addresses it owns: {missing}"
     )
+
+
+def test_teardown_deletes_each_distinct_item_once(seeded, capsys):
+    """The recorded seeded keys and the swept keys overlap for the two seeded
+    addresses, so the count teardown prints would double-report them. De-duplicated,
+    so the number a reader sees is items aimed at rather than calls made."""
+    import json as _json
+
+    ctx = _stack_ctx()
+    h.setup_users(ctx, yaml.safe_load(_EXPECTATIONS.read_text())["operations"])
+    h.teardown_users(ctx)
+    out = capsys.readouterr().out
+    keys = [_json.dumps(_json.loads(k), sort_keys=True) for k in seeded.deleted_keys]
+    assert len(keys) == len(set(keys)), f"an item was deleted twice: {keys}"
+    assert f"{len(keys)} UsersTable item(s)" in out
 
 
 # ===========================================================================
