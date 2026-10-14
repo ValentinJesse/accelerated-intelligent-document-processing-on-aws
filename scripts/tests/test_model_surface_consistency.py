@@ -169,16 +169,6 @@ _base_model = _retired.base_model_id
 # registry does not answer: a default is a model nobody chose, and a LEGACY model
 # takes no further Service Quota increases.
 LEGACY_EXAMPLES = {
-    "us.anthropic.claude-sonnet-4-20250514-v1:0": {
-        "review_by": "2026-10-14",
-        "note": (
-            "endOfLifeTime 2026-10-14T08:00:00Z. Already removed from every "
-            "selectable surface and every default, ahead of the date. What is left "
-            "for the date itself: move it to RETIRED_MODELS, drop its two "
-            "cachePoint-allowlist entries in bedrock/client.py, and drop its two "
-            "quota codes from template.yaml. Its pricing.yaml row stays"
-        ),
-    },
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0": {
         "review_by": "2027-04-08",
         "note": (
@@ -990,6 +980,51 @@ def test_legacy_examples_have_not_reached_their_eol_date():
 
 
 @pytest.mark.unit
+def test_no_model_is_both_legacy_and_end_of_life():
+    """The two registers are states of the same lifecycle, so they are disjoint.
+
+    Retiring a model is a two-part edit — delete the ``LEGACY_EXAMPLES`` entry,
+    add the ``RETIRED_MODELS`` one — and doing only the second half leaves the
+    model recorded as "deprecated but still invocable" *and* as dead. Nothing else
+    here notices: the expiry test above only reads ``review_by``, which a
+    half-finished edit can leave in the future, and every EOL assertion would
+    already be satisfied by the new registry entry. Compared on the base model id,
+    because a ``us.``-prefixed legacy entry and an ``eu.``-prefixed retirement
+    describe one foundation model.
+    """
+    both = sorted(
+        model for model in LEGACY_EXAMPLES if _base_model(model) in EOL_BASE_MODELS
+    )
+    assert not both, (
+        "these models are listed as LEGACY (deprecated but still invocable) while "
+        "also being in the retired-model registry, which cannot both be true. The "
+        "LEGACY_EXAMPLES entry is the one to delete when a model reaches its "
+        f"end-of-life date: {both}"
+    )
+
+
+@pytest.mark.unit
+def test_no_eol_model_is_in_the_cachepoint_allowlist():
+    """A stale allowlist entry advertises prompt caching for a model that is gone.
+
+    ``scripts/sdlc/tests/test_retired_models_not_offered.py`` checks this too, but
+    by exact string against the one spelling the registry lists, so the ``eu.``
+    entry of a model registered under its ``us.`` id was invisible to it — and
+    both spellings are listed here for every Anthropic model. End of life is a
+    property of the foundation model, so this compares base ids.
+    """
+    client = pytest.importorskip("idp_common.bedrock.client")
+    allowlist = client.CACHEPOINT_SUPPORTED_MODELS
+    assert allowlist, "the cachePoint allowlist is empty; this check is vacuous"
+    offenders = sorted(m for m in allowlist if _base_model(m) in EOL_BASE_MODELS)
+    assert not offenders, (
+        "the Converse cachePoint allowlist still names end-of-life model(s) "
+        f"{offenders}. Every call built for one fails at Bedrock regardless, so "
+        "the entry only advertises a discount for a model that cannot be invoked."
+    )
+
+
+@pytest.mark.unit
 def test_eol_entries_are_well_formed():
     """Each EOL fact carries a parseable date and a reproducible command, because
     a hand-maintained list whose provenance rots is the thing this file exists to
@@ -1283,9 +1318,9 @@ def test_the_literal_scan_reads_something():
 #: retired literal the file gains. Measured, not chosen — see the test below.
 RETIRED_LITERAL_EXEMPT_COUNTS = {
     "benchmarks/harness/run_classification_bench.py": 1,
-    "lib/idp_common_pkg/idp_common/config/retired_models.py": 8,
-    "scripts/discover_model_limits.py": 3,
-    "src/lambda/update_configuration/index.py": 5,
+    "lib/idp_common_pkg/idp_common/config/retired_models.py": 9,
+    "scripts/discover_model_limits.py": 4,
+    "src/lambda/update_configuration/index.py": 6,
 }
 
 
