@@ -18,6 +18,14 @@ DynamoDB Schema (in ConcurrencyTable):
     "recovery_attempts": number,
     "last_error": "error message"
 }
+
+Two further attributes live on the same item and are NOT written here:
+``half_open_probes`` and ``half_open_probe_window``, the queue processor's
+bounded HALF_OPEN probe budget (``src/lambda/queue_processor/index.py``). They
+are safe to ignore. ``update_circuit_breaker_state`` writes only the attributes
+it is passed, so it never clobbers them, and the window number is monotonic, so
+a budget left behind by a previous half-open episode is replaced rather than
+inherited.
 """
 
 import json

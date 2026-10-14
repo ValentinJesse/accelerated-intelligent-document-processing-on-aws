@@ -29,7 +29,30 @@ The circuit breaker short-circuits that cycle by refusing to start new workflows
 |-------|----------|
 | **CLOSED** | Normal operation. All requests processed. |
 | **OPEN** | Bedrock unavailable. Queue Processor returns messages to SQS for retry. |
-| **HALF_OPEN** | Testing recovery. Limited traffic allowed through. First successful workflow closes the breaker; first new alarm reopens it. |
+| **HALF_OPEN** | Testing recovery. A bounded number of probes is admitted — 5 workflows per 60 seconds — and every other message is returned to SQS for retry. First successful workflow closes the breaker; first new alarm reopens it. |
+
+### How much traffic HALF_OPEN admits
+
+Five workflows per rolling 60-second window, and the rest are refused with the
+message left on `DocumentQueue` to retry on its ordinary 60 s visibility
+timeout. The budget is claimed with a conditional DynamoDB write on the breaker
+record, so concurrent Queue Processor invocations cannot collectively exceed it.
+
+The two numbers are module constants in `src/lambda/queue_processor/index.py`
+(`HALF_OPEN_PROBE_BUDGET`, `HALF_OPEN_PROBE_WINDOW_SECONDS`) rather than stack
+parameters. One probe per window would be enough to detect recovery — a single
+successful workflow closes the breaker — but it would make that detection
+hostage to one document, so a handful per window gives recovery several
+independent chances a minute while still holding admitted work far below
+`MaxConcurrentWorkflows`.
+
+**The budget is per rolling window, not per half-open episode**, and that
+matters for what happens during a long outage. Nothing moves HALF_OPEN back to
+OPEN on its own: the health check only promotes OPEN → HALF_OPEN, and the alarm
+handler needs a fresh transition into ALARM, which cannot arrive while the alarm
+is already in ALARM. So a sustained outage settles in HALF_OPEN, where the
+breaker now admits a trickle instead of everything — and the trickle is what
+notices the service coming back.
 
 ### When the state cannot be read
 
@@ -127,7 +150,7 @@ Queue Processor never reads the record at all.
 - **BedrockServiceOutageAlarm**: CloudWatch MetricMath alarm on Bedrock error metrics (see [Alarm threshold](#alarm-threshold)).
 - **CircuitBreakerManager**: Lambda triggered by the alarm's SNS topic and by a 5-minute EventBridge schedule. Manages state transitions and publishes notifications.
 - **ConcurrencyTable**: Existing DynamoDB table — circuit breaker state is stored on the `circuit_breaker` partition key.
-- **QueueProcessor**: Reads state before starting workflows. If OPEN, it returns without starting the Step Functions execution, leaving the message in SQS.
+- **QueueProcessor**: Reads state before starting workflows. If OPEN, it returns without starting the Step Functions execution, leaving the message in SQS. If HALF_OPEN, it tries to claim one of the bounded probe slots and does the same when none is free (see [How much traffic HALF_OPEN admits](#how-much-traffic-half_open-admits)).
 - **WorkflowTracker**: On a successful workflow completion, if state is HALF_OPEN, transitions to CLOSED.
 
 ## Alarm threshold
