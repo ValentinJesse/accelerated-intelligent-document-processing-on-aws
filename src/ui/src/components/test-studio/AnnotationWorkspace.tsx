@@ -126,18 +126,36 @@ export interface QueueState {
 /**
  * The document to open next, from the queue already in hand.
  *
- * `current` is excluded by key rather than by position: the queue is ordered
- * worst-first, so after a save the document just finished may still be the first
- * entry, and taking the head would reopen it.
+ * Searched forward **from where `current` sits**, wrapping at the end, rather
+ * than from the head of the list. Taking the first available document that is
+ * merely not `current` makes skipping unable to move: on an available queue
+ * `[A, B, C]` with A open, one skip gives B and the next gives *A* again, so a
+ * reviewer skipping repeatedly bounces between the first two documents and can
+ * never reach the third. Wrapping is what keeps every document reachable while
+ * still advancing; `current` itself is excluded by key, so it is only ever
+ * returned to after everything else has been offered.
+ *
+ * A `current` the list no longer holds — the ordinary case after a save, which
+ * retires it — searches from the head, which is then the right answer rather
+ * than a repeat.
  *
  * Deliberately not read from the server's `nextObjectKey`. That field is correct
  * but it arrives with a reply that costs ~9s on a large set — `getAnnotationQueue`
  * reads every section of every ranked document from S3 — and nothing in it is
  * needed to know which document comes next. Waiting for it is what made "Save &
  * next in queue" sit on the document it had just saved ([#1321]).
+ *
+ * Skipped documents are not remembered. A set of keys skipped this session would
+ * let the rotation terminate rather than cycle, at the cost of state no other
+ * surface shares: a document would be absent from the skip order while still
+ * sitting in the rail, claimable and saveable, which is a second notion of
+ * "passed over" that nothing else in the queue models.
  */
-export const nextAvailableAfter = (documents: QueueItem[], current: string | null): string | null =>
-  documents.find((d) => d.available && d.objectKey !== current)?.objectKey ?? null;
+export const nextAvailableAfter = (documents: QueueItem[], current: string | null): string | null => {
+  const from = current ? documents.findIndex((d) => d.objectKey === current) : -1;
+  const searchOrder = from === -1 ? documents : [...documents.slice(from + 1), ...documents.slice(0, from + 1)];
+  return searchOrder.find((d) => d.available && d.objectKey !== current)?.objectKey ?? null;
+};
 
 /**
  * The queue as it stands once a review of `objectKey` has landed, applied locally
@@ -669,10 +687,13 @@ const AnnotationWorkspace = (): React.JSX.Element => {
       // "sections are still outstanding". Per-section review state is not on the
       // queue (TestSetDocumentSectionRef carries none) and `reviewStatus` only
       // separates InProgress from not-started, so saving the LAST section of a
-      // packet is indistinguishable here from saving its first. The message
-      // therefore states the rule and gives no instruction that would be wrong
-      // in that case: an earlier draft told the reviewer to go back for the rest,
-      // which on a final save is work already done.
+      // packet is indistinguishable here from saving its first.
+      //
+      // Which is why the message states the rule and issues no instruction. On
+      // that last save the server has already flipped the document to reviewed,
+      // so telling the reviewer to go back to the queue for the remaining
+      // sections would send them after work that is done. Naming the condition
+      // instead is true in both cases.
       const isMultiSection = (saved?.sectionCount ?? 1) > 1;
       setFlashItems([
         {

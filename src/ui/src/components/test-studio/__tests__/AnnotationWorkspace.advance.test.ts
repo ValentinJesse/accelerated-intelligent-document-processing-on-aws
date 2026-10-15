@@ -73,6 +73,34 @@ describe('nextAvailableAfter', () => {
     expect(nextAvailableAfter(documents, null)).toBe('free.pdf');
   });
 
+  it('reaches every document when skipping repeatedly, rather than bouncing between two', () => {
+    // Searching from the head for "the first available document that is not the
+    // open one" cannot advance: with A open it gives B, and from B it gives A
+    // again, so skipping oscillates and the third document is unreachable. The
+    // search runs forward from where the open document sits instead.
+    const documents = [doc('A'), doc('B'), doc('C')];
+    const visited: (string | null)[] = [];
+    let current: string | null = 'A';
+    for (let i = 0; i < 4; i += 1) {
+      current = nextAvailableAfter(documents, current);
+      visited.push(current);
+    }
+    expect(visited).toEqual(['B', 'C', 'A', 'B']);
+  });
+
+  it('wraps past the end instead of stranding the reviewer', () => {
+    // The last document in the rail is not the end of the work: everything before
+    // it is still unreviewed, and returning null there would empty the editor pane
+    // while the queue still held documents.
+    expect(nextAvailableAfter([doc('A'), doc('B'), doc('C')], 'C')).toBe('A');
+  });
+
+  it('searches from the head once the open document has left the queue', () => {
+    // A save retires it, so `current` names a document the list no longer holds.
+    // The head is then the right answer rather than a repeat of what was saved.
+    expect(nextAvailableAfter([doc('B'), doc('C')], 'A')).toBe('B');
+  });
+
   it('reports no next document rather than falling back to an unavailable one', () => {
     // Null closes the editor pane, which is honest. Returning a claimed document
     // would open one whose save the server refuses.

@@ -57,10 +57,14 @@ describe('reaching a document that has already been reviewed', () => {
   });
 
   it('reports progress on both copies, since revealing them costs a queue reload', () => {
-    // Shared rather than duplicated because the first fix did the rail and left the
-    // alert's copy inert — and the alert is the path an annotator who has finished
-    // the set takes. The top-of-page spinner cannot cover it: that one is gated on
-    // there being no queue yet, and by this point there is one.
+    // Two claims, and they are separable. The rail control and the alert's action
+    // must be one component, so the two render sites cannot drift — the alert is the
+    // path an annotator who has finished the set takes, and a progress line present
+    // on only one of them is the dead-click symptom surviving where it was fixed.
+    // And revealing reviewed rows is a server round trip (the server omits them
+    // unless asked), so it has to say so rather than appear instant. The
+    // top-of-page spinner cannot cover that: it is gated on there being no queue
+    // yet, and by this point there is one.
     expect(reveal).toContain('Loading reviewed documents');
     expect(SOURCE).toContain('action={showReviewedControl}');
   });
