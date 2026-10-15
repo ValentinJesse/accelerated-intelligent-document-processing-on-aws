@@ -381,6 +381,7 @@
         "get_agent_chat_messages_resolver/index.py": 64.0,
         "get_agent_chat_messages_resolver/log_sanitizer.py": 70.0,
         "get_file_contents_resolver/config_scope.py": 71.17,
+        "get_file_contents_resolver/document_scope.py": 95.45,
         "get_file_contents_resolver/index.py": 85.12,
         "get_file_contents_resolver/key_scope.py": 96.91,
         "get_file_contents_resolver/log_sanitizer.py": 72.0,
