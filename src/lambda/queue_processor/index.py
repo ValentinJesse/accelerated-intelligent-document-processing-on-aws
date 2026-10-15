@@ -327,7 +327,9 @@ def update_counter(increment: bool = True) -> bool:
                         "of this message, or a counter edited out from under the "
                         "stack."
                     )
-                    _emit_counter_underflow_metric()
+                    _emit_concurrency_event_metric(
+                        "ConcurrencyCounterUnderflow"
+                    )
                 return False
             if code == "TransactionConflictException":
                 last_conflict = e
@@ -854,34 +856,40 @@ def _emit_counter_active_metric(active: int) -> None:
         logger.warning(f"Could not emit concurrency counter metric: {e}")
 
 
-def _emit_counter_underflow_metric() -> None:
-    """Record that a hand-back was refused because the counter held no slot.
+def _emit_concurrency_event_metric(metric_name: str) -> None:
+    """Publish a single count for an exceptional concurrency-counter event.
 
-    The same metric name the workflow tracker publishes for the same condition on
-    its own decrement, so ``ConcurrencyCounterUnderflowAlarm`` fires whichever
-    function trips the floor — the alarm's description names both log lines. A
-    separate metric would mean a second alarm, and the operator question is
-    identical either way: a slot was released that nobody held, so either a
-    terminal event or a message was processed twice, or the counter was edited
-    out from under the stack.
+    Deliberately the same shape as the workflow tracker's ``_emit_event_metric``:
+    namespace is the stack name and there are no dimensions, so an alarm declared
+    without dimensions fires whichever function published. Two conditions use it.
 
-    Without this the condition is invisible outside a log search, and it is a
-    condition that could not occur before the floor existed. Never allowed to
-    affect the decrement it reports on.
+    ``ConcurrencyCounterUnderflow`` — a hand-back refused because the counter held
+    no slot. The tracker publishes the same name for the same condition on its own
+    decrement, so one alarm covers both and the operator question is identical
+    either way: a slot was released that nobody held.
+
+    ``ConcurrencyCounterUpdateFailed`` — the counter write RAISED, and the caller
+    swallowed it. That handling is what turned #1358 from an error into a silent
+    leak: a ``ValidationException`` on every decrement produced one log line and
+    no datapoint, so nothing moved that anyone was watching. The refusal case
+    above is now visible; this makes the raising case visible too, which is the
+    shape of the next variant rather than of this one.
+
+    Never allowed to affect the write it reports on.
     """
     try:
         boto3.client("cloudwatch").put_metric_data(
             Namespace=METRIC_NAMESPACE,
             MetricData=[
                 {
-                    "MetricName": "ConcurrencyCounterUnderflow",
+                    "MetricName": metric_name,
                     "Value": 1,
                     "Unit": "Count",
                 }
             ],
         )
     except Exception as e:  # never let telemetry break message processing
-        logger.warning(f"Could not emit ConcurrencyCounterUnderflow metric: {e}")
+        logger.warning(f"Could not emit {metric_name} metric: {e}")
 
 
 def _emit_circuit_breaker_check_failure(classification: str) -> None:
@@ -1559,6 +1567,11 @@ def process_message(record: Dict[str, Any]) -> Tuple[bool, str]:
                     logger.error(
                         f"Failed to decrement counter: {counter_error}", exc_info=True
                     )
+                    # Swallowing this is right — the execution exists and the
+                    # message must be acked — but swallowing it SILENTLY is what
+                    # made #1358 a leak rather than an error. The metric is the
+                    # only thing that moves here.
+                    _emit_concurrency_event_metric("ConcurrencyCounterUpdateFailed")
                 ack_message(receipt_handle)
                 return True, message_id
             workflow_started = True
@@ -1611,6 +1624,7 @@ def process_message(record: Dict[str, Any]) -> Tuple[bool, str]:
                 logger.error(
                     f"Failed to decrement counter: {counter_error}", exc_info=True
                 )
+                _emit_concurrency_event_metric("ConcurrencyCounterUpdateFailed")
             return False, message_id
 
     except json.JSONDecodeError as e:

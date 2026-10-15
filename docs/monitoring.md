@@ -125,7 +125,7 @@ The over-admission is therefore bounded to roughly one generation of documents
 rather than lasting forever — which is why the guards and the repair below matter
 for cost and for predictable capacity rather than for recoverability.
 
-Four metrics in the stack's own namespace (`<StackName>`) make all of this
+These metrics in the stack's own namespace (`<StackName>`) make all of this
 visible, all on the **Workflow Concurrency Counter** widget:
 
 - **`ConcurrencyCounterActive`** — the counter value, published on every document
@@ -154,8 +154,15 @@ visible, all on the **Workflow Concurrency Counter** widget:
   is the only signal that terminal events are being redelivered at all — a rising
   count alongside `WorkflowTrackerDLQAlarm` or tracker errors says the tracker is
   failing *after* it releases the slot.
+- **`ConcurrencyCounterUpdateFailed`** — a compensating hand-back that could not
+  be written at all, because the `UpdateItem` **raised**. Distinct from
+  `ConcurrencyCounterUnderflow`, which is the write DynamoDB *refused*: this one
+  is the write that errored. The queue processor logs the exception and carries
+  on by design — the execution exists, or the message is being retried — and that
+  is exactly what made issue #1358 a silent slot leak instead of an error, so
+  this metric is the only thing that moves. Each datapoint is one leaked slot.
 
-Four alarms publish to `AlertsTopic`:
+These alarms publish to `AlertsTopic`:
 
 - **`ConcurrencyCounterDriftAlarm`** — sustained drift (> 0 for 15 minutes). This
   fires on the *symptom*, once slots are already being held wrongly.
@@ -185,6 +192,12 @@ Four alarms publish to `AlertsTopic`:
   see it, the item was deleted or the initialiser never ran — check that the item
   exists before reading anything else here, because a stack in that state admits
   nothing at all.
+- **`ConcurrencyDecrementFailedAlarm`** — any hand-back the counter write
+  raised on. Fires on the first occurrence, because one lost hand-back is one
+  leaked slot and the defect it exists for failed on *every* attempt rather than
+  intermittently. Read the exception in the QueueProcessor logs: a
+  `ValidationException` means the request is malformed and every hand-back is
+  failing; a throttle or 5xx means retry pressure on the concurrency table.
 - **`ConcurrencyCounterNegativeAlarm`** — the counter observed below zero. This
   should be unreachable now that the decrement is floored; if it fires, the
   counter is being written by something that bypasses the floor.
@@ -827,6 +840,7 @@ on.
 | `WorkflowTimeoutsAlarm` | Any execution ended `TIMED_OUT` by the execution-level bound in 5 min | `AlertsTopic` | Threshold is fixed (≥ 1); the bound itself is `WorkflowExecutionTimeoutSeconds` (default `21600`, i.e. 6 hours) |
 | `ConcurrencyCounterDriftAlarm` | Concurrency drift > 0 sustained for 15 min | `AlertsTopic` | — |
 | `ConcurrencyCounterUnderflowAlarm` | Any decrement refused because the counter was not above 0 — a slot released that was not held, either a terminal event processed twice (workflow tracker) or a compensating hand-back with nothing to hand back (queue processor) | `AlertsTopic` | — |
+| `ConcurrencyDecrementFailedAlarm` | Any compensating hand-back whose counter write **raised** rather than being refused — logged and continued by design, so each occurrence is one silently leaked slot | `AlertsTopic` | — |
 | `ConcurrencyCounterNegativeAlarm` | Concurrency counter observed below 0 in 5 min — the ceiling is being exceeded | `AlertsTopic` | — |
 | `DocumentQueueDLQAlarm` | Any message in the document DLQ — a document that failed every retry | `AlertsTopic` | — |
 | `QueueSenderDLQAlarm` | Any message in the queue-sender DLQ — an upload that was never enqueued | `AlertsTopic` | — |

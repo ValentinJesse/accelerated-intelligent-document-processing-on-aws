@@ -9497,6 +9497,31 @@ Resources:
       AlarmActions:
         - !Ref AlertsTopic
 
+  # Issue #1358: the two compensating hand-backs in the queue processor catch and
+  # log a failed counter write and carry on, which is correct -- the execution
+  # exists, or the message is being retried -- but it is also what turned a
+  # ValidationException on EVERY decrement into a silent slot leak rather than an
+  # error. ConcurrencyCounterUnderflow covers the write that was REFUSED; this one
+  # covers the write that RAISED, which is the only remaining way for a hand-back
+  # to be lost with nothing moving that anyone is watching.
+  ConcurrencyDecrementFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when a ${AWS::StackName} compensating concurrency hand-back could not be written. The QueueProcessor logs 'Failed to decrement counter' and continues by design, so without this the slot is leaked with no error anywhere -- each occurrence raises the counter permanently relative to the work actually running, and enough of them stop admission entirely. Read the exception in the QueueProcessor logs: a ValidationException means the request itself is malformed and EVERY hand-back is failing, a throttle or 5xx means retry pressure on the ConcurrencyTable. Correlate with ConcurrencyCounterDriftAlarm, which fires later on the same underlying leak."
+      MetricName: ConcurrencyCounterUpdateFailed
+      Namespace: !Ref AWS::StackName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      # First occurrence: one lost hand-back is one leaked slot, and the defect
+      # this exists for failed every single time rather than intermittently.
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      # Published only on a failure, so "no data" means there has not been one.
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+
   ConcurrencyCounterNegativeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:

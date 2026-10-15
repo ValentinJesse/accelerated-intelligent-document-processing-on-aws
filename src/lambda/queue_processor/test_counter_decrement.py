@@ -345,6 +345,87 @@ class TestTheDecrementHasAFloor:
         assert _active(index_module) == 0
 
 
+class TestASwallowedFailureStillMoves:
+    """The remaining way for a hand-back to be lost with nothing moving.
+
+    Both callers in ``process_message`` catch a failed decrement, log it and carry
+    on, which is right — the execution exists, or the message is being retried. It
+    is also exactly what made #1358 a silent slot leak rather than an error: a
+    ``ValidationException`` on every decrement produced one log line and no
+    datapoint. The floor's refusal is now visible via
+    ``ConcurrencyCounterUnderflow``; this covers the write that RAISES.
+    """
+
+    @staticmethod
+    def _capture(module):
+        published = []
+        module.boto3 = MagicMock()
+        module.boto3.client.return_value.put_metric_data = lambda **kwargs: (
+            published.append(kwargs)
+        )
+        return published
+
+    @staticmethod
+    def _names(published):
+        return [d["MetricName"] for p in published for d in p["MetricData"]]
+
+    def test_a_raising_decrement_on_the_duplicate_path_emits_a_metric(
+        self, index_module
+    ):
+        _set_active(index_module, 3)
+        index_module.sfn.start_execution.side_effect = _already_exists()
+        published = self._capture(index_module)
+        index_module.update_counter = MagicMock(
+            side_effect=[True, RuntimeError("ddb down")]
+        )
+
+        success, _ = index_module.process_message(_record())
+
+        assert success is True, "the duplicate must still be acked"
+        assert "ConcurrencyCounterUpdateFailed" in self._names(published)
+
+    def test_a_raising_decrement_on_the_failed_start_path_emits_a_metric(
+        self, index_module
+    ):
+        _set_active(index_module, 3)
+        index_module.sfn.start_execution.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+            "StartExecution",
+        )
+        published = self._capture(index_module)
+        index_module.update_counter = MagicMock(
+            side_effect=[True, RuntimeError("ddb down")]
+        )
+
+        success, _ = index_module.process_message(_record())
+
+        assert success is False, "the message must still be retried"
+        assert "ConcurrencyCounterUpdateFailed" in self._names(published)
+
+    def test_a_successful_hand_back_emits_no_failure_metric(self, index_module):
+        _set_active(index_module, 3)
+        index_module.sfn.start_execution.side_effect = _already_exists()
+        published = self._capture(index_module)
+
+        assert index_module.process_message(_record())[0] is True
+
+        assert "ConcurrencyCounterUpdateFailed" not in self._names(published)
+
+    def test_a_failed_metric_never_changes_the_outcome(self, index_module):
+        """Telemetry on a path that already failed must not fail it differently."""
+        _set_active(index_module, 3)
+        index_module.sfn.start_execution.side_effect = _already_exists()
+        index_module.boto3 = MagicMock()
+        index_module.boto3.client.return_value.put_metric_data.side_effect = (
+            RuntimeError("cloudwatch down")
+        )
+        index_module.update_counter = MagicMock(
+            side_effect=[True, RuntimeError("ddb down")]
+        )
+
+        assert index_module.process_message(_record())[0] is True
+
+
 class TestTheIncrementStillHasItsCeiling:
     """``:max`` must still be supplied where it IS referenced. Dropping it from
     both paths would also make the decrement work — and would silently remove
