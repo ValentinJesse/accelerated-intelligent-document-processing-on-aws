@@ -339,27 +339,33 @@ def _judge(
     present = {name: value for name, value in members}
     if VALUES_KEY not in present:
         return None
-    expression_names = [k for k in EXPRESSION_KEYS if k in present]
-    if not expression_names:
-        return None
 
     supplied = _supplied_placeholders(present[VALUES_KEY])
     if not supplied:
         return None
 
     expressions: List[str] = []
-    for key in expression_names:
+    for key in [k for k in EXPRESSION_KEYS if k in present]:
         text = _literal_string(present[key])
         if text is None:
             # An expression nobody can read could reference anything.
             return None
         expressions.append(text)
 
+    # The sibling lookup runs BEFORE the "no expression here" exit, not after.
+    # A group whose values are in the literal and whose expression is assigned by
+    # subscript at the same block depth carries no expression key in the literal
+    # at all, and returning early on that skipped a group this gate's own rule
+    # judges perfectly well — the expression is as unconditional as the values.
     if dict_node is not None:
         sibling, unreadable = _sibling_expressions(module, dict_node)
         if unreadable:
             return None
         expressions.extend(sibling)
+
+    if not expressions:
+        # Nothing to compare against: not a request this reading can judge.
+        return None
 
     referenced: Set[str] = set()
     for text in expressions:
@@ -530,6 +536,28 @@ def test_the_repaired_site_is_covered_by_discovery():
         ),
         (
             "args = {\n"
+            '    "Key": {"id": 1},\n'
+            '    "ExpressionAttributeValues": {":inc": 1, ":max": 100},\n'
+            "}\n"
+            'args["UpdateExpression"] = "ADD c :inc"\n'
+            "table.update_item(**args)",
+            True,
+            "the literal carries no expression key at all — the expression is a "
+            "same-depth subscript assignment, which is as unconditional as the "
+            "values, so the group is judgeable and :max is unused",
+        ),
+        (
+            "args = {\n"
+            '    "Key": {"id": 1},\n'
+            '    "ExpressionAttributeValues": {":inc": 1},\n'
+            "}\n"
+            "table.update_item(**args)",
+            False,
+            "and with no expression anywhere there is nothing to compare against, "
+            "so the group is skipped rather than reported",
+        ),
+        (
+            "args = {\n"
             '    "UpdateExpression": "ADD c :inc",\n'
             '    "ExpressionAttributeValues": {":inc": 1, ":max": 100},\n'
             "}\n"
@@ -611,6 +639,8 @@ def test_the_repaired_site_is_covered_by_discovery():
         "the-1358-repair",
         "same-block-addition",
         "same-block-update-call",
+        "expression-only-by-subscript",
+        "no-expression-anywhere",
         "augmented-subscript-append",
         "same-block-addition-to-a-dict-call",
         "runtime-expression",
