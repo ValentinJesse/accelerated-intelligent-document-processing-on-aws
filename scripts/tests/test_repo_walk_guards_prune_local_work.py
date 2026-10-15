@@ -106,7 +106,7 @@ LOCAL_WORK_DIRS = ("scratch", ".claude")
 #: ``repo_files.tracked_paths`` is stronger than any name list — but only because
 #: every such copy is gitignored, and ``tracked_paths`` lists ``--others``, so
 #: *untracked* is not enough. A tree copy in a directory nobody ignored is read as
-#: part of the branch by all nine gates that discover through it.
+#: part of the branch by every gate that discovers through it.
 #:
 #: ``.ai-review/base/`` is the live example and the reason this is pinned: the
 #: advisory reviewer checks out the whole merge-base tree there, so inside a review
@@ -436,7 +436,7 @@ def test_tracked_discovery_does_not_list_a_tree_copy(
     """The behavioural half: a real file under the directory, in this checkout.
 
     The two assertions above read configuration. This one drives the helper the
-    nine gates actually call, because that is the thing whose answer matters, and
+    gates actually call, because that is the thing whose answer matters, and
     it is the assertion that fails on the state this was written for.
 
     It writes a real ``.py`` into the checkout for the duration, which is the

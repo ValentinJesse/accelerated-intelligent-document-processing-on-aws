@@ -180,8 +180,8 @@ ai-reviews/
 # the merge base. Being gitignored is what keeps that second copy out of
 # `scripts/tests/repo_files.tracked_paths`, whose whole premise is that asking git
 # cannot see a stale copy of the repository (it lists `--others`, so untracked is
-# not enough). Nine repo-wide gates discover through it, and without this line
-# every one of them reads the pre-change tree as if it were part of the branch —
+# not enough). Every repo-wide gate discovers through it, and without this line
+# each one reads the pre-change tree as if it were part of the branch —
 # so a defect the branch FIXES is reported against it. Pinned by
 # `scripts/tests/test_repo_walk_guards_prune_local_work.py`.
 .ai-review/
