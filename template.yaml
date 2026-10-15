@@ -11799,7 +11799,8 @@ Resources:
           # model _lookup_quota misses, so Capacity Planning errors out rather than
           # omitting a row. The maps are an incomplete subset of the picklists
           # (Opus 5, Opus 5.5, Sonnet 4.6, Fable 5, Haiku 5.5, every openai.gpt-5.x
-          # id and every eu. id are all absent), so that failure is reachable today
+          # id and every eu. id other than claude-sonnet-5-5 are absent), so that
+          # failure is reachable today
           # for models other than the ones listed here — tracked separately rather
           # than closed here.
           #
