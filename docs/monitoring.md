@@ -174,7 +174,13 @@ Four alarms publish to `AlertsTopic`:
   executions actually running and so excludes the slot about to be handed back.
   Look for a `RECONCILED` line in the QueueProcessor logs immediately before. It
   needs the stack to be at its ceiling (reconciliation runs only on a refused
-  increment), so it is rare, and nothing is wrong afterwards.
+  increment), so it is rare, and nothing is wrong afterwards. A **newly deployed
+  stack** is the other benign case: `active_count > 0` is false when the counter
+  item does not exist yet, so a hand-back before any document has completed is
+  refused and reported as an underflow when the real condition is an
+  uninitialised counter. Refusing is still right — the alternative creates the
+  item at −1 — but do not go looking for a leak on a stack that has not run a
+  document yet.
 - **`ConcurrencyCounterNegativeAlarm`** — the counter observed below zero. This
   should be unreachable now that the decrement is floored; if it fires, the
   counter is being written by something that bypasses the floor.

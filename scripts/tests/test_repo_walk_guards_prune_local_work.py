@@ -97,7 +97,14 @@ def _run_all_tests_module():
 
 
 #: Gitignored directories that can hold a whole copy of this tree.
-LOCAL_WORK_DIRS = ("scratch", ".claude")
+#:
+#: Local work is two of them; the third is written by this repository's own tooling
+#: and is derived from :data:`TREE_COPY_DIRS` below rather than restated, so adding
+#: an entry there makes every registered gate prune it without a second edit. That
+#: derivation is the point: `.ai-review` was first fixed for the git discovery route
+#: only, which left five filesystem-walking gates reading the merge-base copy — the
+#: instance-not-class shape the registry entry for TREE_COPY_DIRS argues against.
+_LOCAL_WORK_DIRS_PROPER = ("scratch", ".claude")
 
 #: Directories into which this repository's **own tooling** writes a whole second
 #: copy of the tree, each paired with the file that creates it.
@@ -114,6 +121,9 @@ LOCAL_WORK_DIRS = ("scratch", ".claude")
 #: after it, and a defect the branch FIXES is reported against it. The creating file
 #: is named so a rename there fails here rather than leaving a dead ignore rule.
 TREE_COPY_DIRS = ((".ai-review", "scripts/sdlc/ai_mr_review.py"),)
+
+#: Every directory a repo-walking gate must prune, local work plus tree copies.
+LOCAL_WORK_DIRS = _LOCAL_WORK_DIRS_PROPER + tuple(d for d, _ in TREE_COPY_DIRS)
 
 #: Gates that walk the repo and must therefore prune local work. Each entry is a
 #: filename in this directory. A gate added later that calls `rglob` on the repo
