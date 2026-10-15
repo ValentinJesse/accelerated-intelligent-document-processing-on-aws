@@ -298,6 +298,25 @@ def _contents(cbd, sweep, with_target):
             ),
         }
 
+    if sweep == "cleanup_stale_idp_roles":
+        # No stacks at all, so nothing protects the role's run prefix. These are
+        # leaked by `DeletionPolicy: Retain` rather than by a failed teardown, so
+        # the realistic target is a role whose stack is long gone.
+        roles = (
+            [
+                {
+                    "RoleName": f"{DEAD_RUN}-DOCUMENTK-StartIngestionJobFunction-abc",
+                    "CreateDate": old,
+                }
+            ]
+            if with_target
+            else []
+        )
+        return {
+            "list_stacks": [{"StackSummaries": []}],
+            "list_roles": [{"Roles": roles}],
+        }
+
     if sweep == "cleanup_stale_idp_policies":
         policies = (
             [
@@ -380,6 +399,12 @@ _SWEEP_SPECS = {
             "young_line": "younger than the age gate",
         },
     },
+    "cleanup_stale_idp_roles": {
+        "enumerations": ("list_stacks", "list_roles"),
+        "per_item": None,  # _delete_iam_role reports (False, detail)
+        "quiet_line": "✅ No leaked idp- IAM roles to reap",
+        "age_gate": {"field": "CreateDate", "young_line": "younger than the age gate"},
+    },
     "cleanup_stale_idp_policies": {
         "enumerations": ("list_stacks", "list_policies"),
         "per_item": None,  # _delete_managed_policy reports (False, detail)
@@ -446,8 +471,13 @@ def _install(
         aws.deleted.append(arn)
         return (True, "")
 
+    def _reap_role(_client, name):
+        aws.deleted.append(name)
+        return (True, "")
+
     monkeypatch.setattr(cbd, "delete_apigw_test_vpc", _reap_vpc)
     monkeypatch.setattr(cbd, "_delete_managed_policy", _reap_policy)
+    monkeypatch.setattr(cbd, "_delete_iam_role", _reap_role)
     return aws
 
 
