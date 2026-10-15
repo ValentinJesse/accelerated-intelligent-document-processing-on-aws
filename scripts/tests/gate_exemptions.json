@@ -195,6 +195,17 @@
       },
       "memberKind": "cfn-lint rule id"
     },
+    "docs-site/add-frontmatter.sh::skipped": {
+      "kind": "fixture",
+      "memberKind": "shell variable holding a count",
+      "turnsOff": "nothing. It is a counter in the docs-site frontmatter helper, incremented once per Markdown file that already has frontmatter and printed in the closing summary line",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "none",
+      "reason": "An integer, not a list of members, and it decides nothing beyond a line of output: the loop skips a file because that file already carries frontmatter, and this records how many times that happened. It is discovered at all only because the shell pattern's first character is now matched by a lookahead rather than consumed, so a variable whose name BEGINS with a vocabulary fragment can match -- and this one entry is the whole measured cost of that fix over this tree, which is also the evidence that the fix reaches something.",
+      "ratchetGap": "Nothing in this registry re-measures a SHELL variable -- there is no parser for one here -- so no ratchet applies and claiming one would be a label with nothing behind it. What remains is the registry's own both-directions membership assertion, which fails if the variable is renamed or removed. It costs one slot of the unratcheted budget, which the PYTHON_PATHSPECS entry frees in the same change by gaining the dead-glob ratchet it did not have."
+    },
     "feature-platform/confbench-testset/shared/prune_layer.py::PRUNE_DIRS": {
       "kind": "prune",
       "memberKind": "path",
@@ -1261,9 +1272,12 @@
       "premise": [
         "JUDGEMENT"
       ],
-      "ratchet": "none",
-      "reason": "The aperture. Narrowing it silently shrinks the registry -- widening it produced seven live unregistered exemptions including a repo-walking gate that discovered .claude/worktrees/.",
-      "ratchetGap": "No check that the aperture covers every tree holding a gate; that is a judgement about where gates live."
+      "ratchet": "non-vacuity",
+      "reason": "The aperture. Narrowing it silently shrinks the registry -- widening it produced seven live unregistered exemptions including a repo-walking gate that discovered .claude/worktrees/. Where a gate lives is a judgement about this repository's layout and is not computable here; what IS now computed is that no glob on this list, nor any of the vocabulary-derived globs in TEXT_SOURCES, matches zero files.",
+      "ratchetGap": "Non-vacuity reaches a dead glob and no further. Nothing asserts the aperture covers every tree holding a gate, and several hundred tracked .py files are outside it -- most of them the shared library, where the wider glob finds dozens of further constants nobody has triaged against this registry. No figure is quoted: the count moves with the glob chosen.",
+      "ratchetEvidence": [
+        "scripts/tests/test_gate_exemption_registry.py"
+      ]
     },
     "scripts/tests/exemption_discovery.py::TEXT_SOURCES": {
       "kind": "enforced-universe",
@@ -1635,6 +1649,20 @@
       "ratchet": "none",
       "reason": "Must mirror the three greps in the check-arn-partitions recipe. Measuring only the first scored twelve hidden service principals as covering one file.",
       "ratchetGap": "Nothing asserts this mirrors the recipe's greps; a fourth check added to the Makefile would not be counted here."
+    },
+    "scripts/tests/test_gate_exemption_registry.py::META_TEST_PERMITTED_RATCHETS": {
+      "kind": "enforced-universe",
+      "memberKind": "ratchet kind name, as the exact string an entry's `ratchet` field uses",
+      "turnsOff": "nothing. It IS the ratchet kinds this module may be named as evidence for, so a member PERMITS a label rather than excusing one, and the risk it carries is a member added for a ratchet this module does not implement",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "non-vacuity",
+      "ratchetEvidence": [
+        "scripts/tests/test_gate_exemption_registry.py"
+      ],
+      "reason": "Which ratchets a file implements is a reading of that file, not something computable: the marker vocabulary matches by substring and cannot tell prose from an implementation, which is exactly why this exists. Two members, each with its implementation named -- non-vacuity is the dead-glob check on the two discovery apertures, universe-closure is the both-directions membership assertion. The three it leaves out are the point: after the marker table is excised this file still carries 'stale', 'vanished', 'pinned', 'scratch' and '.claude' in ordinary prose, so without this restriction an entry could claim staleness, count-pinning or the prune meta-test on the strength of a word. The ratchet is that each member is claimed by at least one entry naming this file and that a marker for it survives excision.",
+      "ratchetGap": "Per file rather than per claim: nothing checks that a member really is implemented here, which is the judgement this entry records. What IS closed is the bypass the per-entry form left -- the restriction applies to each named evidence file rather than to an entry whose only evidence is this module, because the marker search is `any(...)` across the named files on purpose and naming any second tracked file therefore lifted it."
     },
     "scripts/tests/test_gate_exemption_registry.py::RATCHET_EVIDENCE_MARKERS": {
       "kind": "enforced-universe",
