@@ -789,7 +789,16 @@ def test_the_token_limit_is_the_most_constrained_model_not_the_best_provisioned(
 
 @pytest.mark.unit
 def test_the_request_limit_is_also_the_most_constrained_model(monkeypatch):
-    """The RPM half of the same `min` is reduced the same way, and is measured.
+    """The RPM half of the same `min` takes the binding model, and is measured.
+
+    ⚠️ "The same way" would be wrong, and the difference is the point of this
+    docstring rather than a detail: the TPM half is narrowed to the plan's step
+    models (see `test_only_the_models_the_plan_calls_constrain_its_throughput`),
+    while this one reduces over EVERY entry in the mapping —
+    `min(bedrock_quota_rpm.values())`. So a genuinely low RPM quota for a model the
+    pipeline never calls still binds the request limit, which is the defect that was
+    fixed for TPM and not for RPM. What both halves do share is taking the minimum
+    rather than a maximum, which is what the rest of this docstring is about.
 
     Stated because the two halves disagreed for a long time — the token limit was
     taken from an account-wide ceiling that collapsed the per-model quotas to

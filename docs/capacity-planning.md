@@ -145,16 +145,24 @@ The capacity calculation system provides sophisticated analysis through GraphQL 
 > measurement**, and read the TPM table when deciding whether to request an
 > increase.
 >
-> This does not distort the capacity figure itself. The plan reduces over the
-> *minimum* RPM across the models it calls, so an overstated value cannot bind —
-> the error is a confidently wrong row, not a wrong throughput.
+> This does not distort the capacity figure. The request limit is the **minimum
+> RPM across every model in `BEDROCK_MODEL_RPM_QUOTA_CODES`**, not just the ones the
+> plan calls, so an overstated value cannot bind a minimum.
+>
+> ⚠️ **Note that reduction is wider than the TPM one, and the difference is not
+> cosmetic.** The token limit *is* narrowed to the plan's step models, so a model
+> the pipeline never calls cannot constrain it. The request limit is not, so a
+> genuinely **low** RPM quota for a model you do not use still binds the RPM row and
+> can send you to request an increase you do not need. Check which model the row
+> names before acting on it.
 >
 > ⚠️ Separately: the quota maps cover a **subset** of the selectable models. A step
 > model with no entry in them fails Capacity Planning outright with
 > `ValueError: TPM quota not available for model <id>` rather than omitting a row,
-> and the message names the variable to add it to. Claude Opus 5, Opus 5.5, Sonnet
-> 4.6, Fable 5, Haiku 5.5, the `openai.gpt-5.x` models and most `eu.` profiles are
-> currently absent.
+> and the message names the variable to add it to. `BEDROCK_MODEL_QUOTA_CODES` and
+> `BEDROCK_MODEL_RPM_QUOTA_CODES` in `template.yaml` are the authority for which
+> models are covered — read them rather than a list here, which would go stale on
+> the next model addition.
 
 **Latency Bar Color Coding**:
 - **Green** (P50, P75): When all model quotas are within limits
