@@ -965,7 +965,19 @@ def test_every_coverage_tree_is_measured_through_the_neutralisation(monkeypatch)
     class _Result:
         returncode = 0
 
+    real_run = subprocess.run
+
     def _capture(cmd, cwd=None, env=None, **kwargs):
+        # ⚠️ `git` passes THROUGH, and the reason is not cosmetic. `coverage_all` and
+        # `check_coverage_debt` share one `subprocess` module object, so replacing `run`
+        # on it also replaces the one the fan-out trees derive their pytest roots with
+        # (`check_coverage_debt.fanout_roots` asks `git ls-files`). A blanket stub makes
+        # that derivation see no output at all, so those trees are measured over nothing
+        # and this probe captures no invocation for them -- it would pass while asserting
+        # about fewer trees than the registry holds, which is the shape of vacuity this
+        # whole module is about.
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, cwd=cwd, env=env, **kwargs)
         seen[str(cwd)] = dict(env or {})
         return _Result()
 

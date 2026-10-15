@@ -79,6 +79,25 @@ Not read, each a deliberate miss rather than an invented finding:
   shared ``idp_common.dynamodb.client`` assembles both halves from its callers'
   arguments, so the defect class routed through it is out of reach of any source
   reading and would need a runtime assertion in that client instead.
+* A group whose ``ExpressionAttributeValues`` is a **name** rather than a mapping
+  this can enumerate — the values are accumulated in a local dict and the request
+  is assembled from it afterwards. Pairing the two halves would mean following
+  data flow. This is the **largest** category here rather than a corner of it:
+  there are dozens of such groups, most of them supply at least one value
+  conditionally, and several supply all of theirs that way, so a green run from
+  this gate says nothing about any of them. Measure the current set with the
+  gate's own helpers (``_members`` over each group's ``ExpressionAttributeValues``
+  member) rather than trusting a figure written here, which goes stale as soon as
+  a request is added. ``circuit_breaker_manager.update_circuit_breaker_state`` is
+  the one with the most conditionally supplied values and is covered
+  behaviourally, by
+  ``src/lambda/circuit_breaker_manager/test_update_expression_pairing.py``;
+  ``test_the_site_this_cannot_reach_is_covered_behaviourally`` below keeps those
+  two statements from drifting apart. **That cover is for that one site and does
+  not extend to the others.** Closing the category means either a behavioural
+  instrument per site — a few already have one incidentally, in the suite that
+  sits beside them, which is worth checking before writing another — or an
+  instrument here that follows data flow.
 * A group whose supplied set might be **smaller** than what this read: the
   values mapping replaced wholesale, a ``pop`` or a ``del``, a member key this
   cannot name (which could be the values mapping itself). Any one of those skips
@@ -1056,6 +1075,85 @@ def test_the_repaired_exemplar_is_read_rather_than_skipped():
     assert {":max", ":zero"} <= read, (
         f"read {sorted(read)} from update_counter's branches, expected both :max "
         "and :zero — the two conditionally supplied values the #1358 fix adds"
+    )
+
+
+@pytest.mark.unit
+def test_the_site_this_cannot_reach_is_covered_behaviourally():
+    """The one call site in this gate's blind spot that has a per-site test.
+
+    ``circuit_breaker_manager.update_circuit_breaker_state`` accumulates the
+    expression and its values in separate local names across a series of
+    conditional branches and assembles the request from them afterwards, so the
+    member this gate would enumerate holds a ``Name``. It is skipped — correctly,
+    since pairing the two halves means following data flow — and it supplies more
+    of its values conditionally than any other group in that blind spot, which is
+    why it was the one picked to cover behaviourally. Issue #1466.
+
+    ⚠️ **The others in that blind spot are unread by this gate.** Some of them are
+    driven incidentally by the suites that sit beside them and some are not, so
+    what covers any given one has to be measured rather than inferred from here.
+    This is the join between two statements about *one* site, not a closure over
+    the category; the reach note at the top of this module says so, and neither it
+    nor this test is a ratchet on the category's size.
+
+    It fails in **both** directions: if the per-site test is deleted or gutted, the
+    site is in neither set again; if the site is refactored into a shape this gate
+    can read, the per-site test may be redundant and the reach note is wrong about
+    why it exists. Either way the two statements have drifted and somebody should
+    decide which is now true, rather than discovering it from a green run.
+    """
+    site = REPO_ROOT / "src/lambda/circuit_breaker_manager/index.py"
+    per_site_test = (
+        REPO_ROOT
+        / "src/lambda/circuit_breaker_manager/test_update_expression_pairing.py"
+    )
+    assert site.is_file(), f"{site} is gone; this test asserts nothing without it"
+    assert per_site_test.is_file(), (
+        f"{per_site_test.relative_to(REPO_ROOT)} is gone, so the request group "
+        "this test is about is now covered by nothing. Restore it, or give the "
+        "gate an instrument that can read the site."
+    )
+    # Existence is not cover: a file left in place with its body removed reads as
+    # green here, which is the cheapest way for this join to go vacuous. Parsed
+    # rather than searched as text, because the sweep's name surviving only inside
+    # a comment passes a substring check over a file that collects nothing.
+    cover = ast.parse(per_site_test.read_text(encoding="utf-8"))
+    defined = {
+        node.name
+        for node in ast.walk(cover)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "test_every_supplied_token_is_referenced" in defined, (
+        f"{per_site_test.relative_to(REPO_ROOT)} exists but defines no "
+        "`test_every_supplied_token_is_referenced`, so it is not the cover this "
+        "test is about. A file that is present and gutted is not cover."
+    )
+    # ⚠️ The residual: this reads the file, so it cannot see a cover that is
+    # *collected and skipped* — a module-level `pytest.mark.skip` leaves every
+    # name above in place. Only a run can answer that, and this gate does not run
+    # the cover.
+
+    module = ast.parse(site.read_text(encoding="utf-8"))
+    groups = [
+        members
+        for node in ast.walk(module)
+        if isinstance(node, ast.Dict)
+        for members in [_members(node)]
+        if members is not None and VALUES_KEY in dict(members)
+    ]
+    assert groups, (
+        f"no {VALUES_KEY} group found in {site.relative_to(REPO_ROOT)}; this test "
+        "would otherwise pass over nothing"
+    )
+    unreadable = [
+        members for members in groups if _members(dict(members)[VALUES_KEY]) is None
+    ]
+    assert unreadable, (
+        f"every {VALUES_KEY} group in {site.relative_to(REPO_ROOT)} is now "
+        "enumerable, so this gate reads the site directly and the per-site test "
+        "beside it may be redundant — and the reach note in this module's "
+        "docstring no longer describes the tree"
     )
 
 
