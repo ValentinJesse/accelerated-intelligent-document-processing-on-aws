@@ -145,9 +145,14 @@ The capacity calculation system provides sophisticated analysis through GraphQL 
 > measurement**, and read the TPM table when deciding whether to request an
 > increase.
 >
-> This does not distort the capacity figure. The request limit is the **minimum
-> RPM across every model in `BEDROCK_MODEL_RPM_QUOTA_CODES`**, not just the ones the
-> plan calls, so an overstated value cannot bind a minimum.
+> This does not distort the capacity figure. The request limit is the **minimum RPM
+> across every model in the TPM map**, not just the ones the plan calls, so an
+> overstated value cannot bind a minimum. (The TPM map is what decides membership:
+> the RPM lookup is built from its key set — `generate_rpm_quota_codes(
+> tpm_model_quotas.keys())` — and `BEDROCK_MODEL_RPM_QUOTA_CODES` only supplies the
+> code for each key it finds. The two maps carry the same keys today, and a model
+> added to one and not the other is the case the checklist in
+> `.claude/skills/add-model.md` exists to prevent.)
 >
 > ⚠️ **Note that this reduction is over a wider set than the TPM one, and the
 > difference is not cosmetic.** The token limit *is* narrowed to the plan's step models, so a model
@@ -159,7 +164,16 @@ The capacity calculation system provides sophisticated analysis through GraphQL 
 > ⚠️ Separately: the quota maps cover a **subset** of the selectable models. A step
 > model with no entry in them fails Capacity Planning outright with
 > `ValueError: TPM quota not available for model <id>` rather than omitting a row,
-> and the message names the variable to add it to. `BEDROCK_MODEL_QUOTA_CODES` and
+> and the message names the variable to add it to.
+>
+> ⚠️ **The reverse also holds, and it is not scoped to one row: a quota code that
+> does not resolve in the stack's Region fails the whole Capacity Planning
+> response.** Every entry in both maps is fetched with `get_service_quota`, and a
+> non-throttling error is re-raised rather than skipped — so one bad code takes out
+> the report for every model, not just its own. Add a code only after confirming it
+> resolves in the Regions you deploy to, with the `aws service-quotas
+> list-service-quotas --service-code bedrock` query in
+> `.claude/skills/add-model.md`. `BEDROCK_MODEL_QUOTA_CODES` and
 > `BEDROCK_MODEL_RPM_QUOTA_CODES` in `template.yaml` are the authority for which
 > models are covered — read them rather than a list here, which would go stale on
 > the next model addition.
