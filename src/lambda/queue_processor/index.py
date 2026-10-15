@@ -240,7 +240,7 @@ def update_counter(increment: bool = True) -> bool:
     the two branches below now add theirs, so this call site is outside its reach
     by construction. The behavioural suite drives both directions against a real
     expression engine instead. Do not read a green run of that gate as cover for
-    an edit here.
+    an edit here. Issue #1461 tracks teaching the gate this shape.
 
     Args:
         increment: Whether to increment (True) or decrement (False) the counter
