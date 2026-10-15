@@ -560,6 +560,47 @@ class TestThePicklists:
         ).read_text()
         assert f"'{prefix}.anthropic.claude-sonnet-5-5'" in text
 
+    def test_both_capacity_quota_maps_name_it_explicitly(self):
+        """Capacity Planning raises for a step model it has no TPM quota for, so a
+        selectable model missing from these maps is a hard failure rather than a
+        missing row — ``calculate_capacity`` does
+        ``raise ValueError("TPM quota not available for model ...")``.
+
+        ⚠️ The RPM half is the one that matters most here, and it is the opposite
+        shape. Its builder matches with ``clean_mapping_key in clean_model_id``, and
+        ``us.anthropic.claude-sonnet-5`` is a SUBSTRING of
+        ``us.anthropic.claude-sonnet-5-5`` — so an absent Sonnet 5.5 entry does not
+        raise, it silently binds this model to **Sonnet 5's** quota code. Haiku 5.5
+        has no substring parent and so fails loudly instead, which is why this
+        assertion is about Sonnet 5.5 specifically and is about *explicit membership*
+        rather than about resolution: resolution already "works", wrongly.
+
+        The codes were read live from Service Quotas (us-east-1, 2026-10-14):
+        L-94A31E46 is "Cross-region model inference tokens per minute for Anthropic
+        Claude Sonnet 5.5" and L-31AB82D0 its global. twin.
+        """
+        import json
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[5]
+        text = (root / "template.yaml").read_text()
+        for var in ("BEDROCK_MODEL_QUOTA_CODES", "BEDROCK_MODEL_RPM_QUOTA_CODES"):
+            match = re.search(var + r": '(\{.*?\})'", text)
+            assert match, f"{var} not found in template.yaml"
+            codes = json.loads(match.group(1))
+            assert codes.get("us.anthropic.claude-sonnet-5-5") == "L-94A31E46", (
+                f"{var} must name us.anthropic.claude-sonnet-5-5 explicitly"
+            )
+            assert codes.get("global.anthropic.claude-sonnet-5-5") == "L-31AB82D0"
+            # Non-vacuity: Sonnet 5's own entries are still there and still
+            # different, so the two models are not collapsed onto one code.
+            assert codes["us.anthropic.claude-sonnet-5"] == "L-D4FBCF4E"
+            assert (
+                codes["us.anthropic.claude-sonnet-5-5"]
+                != codes["us.anthropic.claude-sonnet-5"]
+            )
+
     def test_the_eu_mapping_row_exists(self):
         """An EU deployment whose stored config names the ``us.`` id keeps an id that
         is not callable there; ``filter_models_by_region`` only hides it from the

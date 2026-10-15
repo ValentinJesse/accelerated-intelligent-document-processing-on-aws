@@ -646,7 +646,8 @@ what excludes them from Discovery. Use it the same way as the tool-config gate.
 
 **Inference-profile ARNs.** `is_grok_model()`, `is_astra_model()`,
 `strips_sampling_params()`, `is_claude_4_7_model()`, `is_claude_effort_model()`,
-`thinking_can_be_disabled()`, `forced_tool_choice_unsupported_reason()` and
+`thinking_can_be_disabled()`, `thinking_disable_payload()`,
+`forced_tool_choice_unsupported_reason()` and
 `document_blocks_unsupported_reason()` resolve
 inference-profile ARNs (via `resolve_model_id_from_arn`) before matching, so a
 config that names

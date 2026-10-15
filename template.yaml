@@ -11791,9 +11791,39 @@ Resources:
           MEDIUM_COMPLEXITY_MULTIPLIER: "1.5"
           # Token calculation
           MIN_TOKENS_PER_REQUEST: "500"
-          # Bedrock model quota codes (TPM and RPM)
-          BEDROCK_MODEL_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-7C42E72A","us.amazon.nova-pro-v1:0":"L-C0326783","us.amazon.nova-2-lite-v1:0":"L-C6F5908D","global.amazon.nova-2-lite-v1:0":"L-C6F5908D","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-BD85BFCD","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9"}'
-          BEDROCK_MODEL_RPM_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-89F8391A","us.amazon.nova-pro-v1:0":"L-ED46B8C5","us.amazon.nova-2-lite-v1:0":"L-F06F1187","global.amazon.nova-2-lite-v1:0":"L-F06F1187","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-7EC72A47","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42"}'
+          # Bedrock model quota codes (TPM and RPM).
+          #
+          # ⚠️ A step model missing from BOTH maps is a hard failure, not a
+          # degraded estimate: calculate_capacity raises
+          # ValueError("TPM quota not available for model ...") for any configured
+          # model _lookup_quota misses, so Capacity Planning errors out rather than
+          # omitting a row. The maps are an incomplete subset of the picklists
+          # (Opus 5, Opus 5.5, Sonnet 4.6, Fable 5, Haiku 5.5, every openai.gpt-5.x
+          # id and every eu. id are all absent), so that failure is reachable today
+          # for models other than the ones listed here — tracked separately rather
+          # than closed here.
+          #
+          # ⚠️ Claude Sonnet 5.5 is in BOTH maps on purpose, and it is the one id
+          # where omitting it from the RPM map is WORSE than it looks. The RPM
+          # builder matches with `clean_mapping_key in clean_model_id`
+          # (generate_rpm_quota_codes), and "us.anthropic.claude-sonnet-5" is a
+          # substring of "us.anthropic.claude-sonnet-5-5" — so an absent Sonnet 5.5
+          # entry silently binds it to SONNET 5's quota code instead of raising, the
+          # way Haiku 5.5 (which has no substring parent) correctly does. An
+          # explicit entry is what stops a different model's number being used.
+          #
+          # TPM codes read live from Service Quotas in us-east-1 on 2026-10-14:
+          # L-94A31E46 "Cross-region model inference tokens per minute for Anthropic
+          # Claude Sonnet 5.5" and L-31AB82D0 for the global. profile, both
+          # defaulting to 6,000,000 — the same default as Sonnet 5's pair.
+          # AWS publishes NO requests-per-minute quota for Claude Sonnet 5.5, and
+          # none for Sonnet 5 either, which is why the Sonnet 5 row in the RPM map
+          # carries a tokens-per-minute code. Sonnet 5.5 follows that existing
+          # convention rather than inventing a second one; the value is as
+          # approximate as Sonnet 5's and is now at least attributed to the right
+          # model.
+          BEDROCK_MODEL_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.anthropic.claude-sonnet-5-5":"L-94A31E46","global.anthropic.claude-sonnet-5-5":"L-31AB82D0","us.amazon.nova-lite-v1:0":"L-7C42E72A","us.amazon.nova-pro-v1:0":"L-C0326783","us.amazon.nova-2-lite-v1:0":"L-C6F5908D","global.amazon.nova-2-lite-v1:0":"L-C6F5908D","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-BD85BFCD","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9"}'
+          BEDROCK_MODEL_RPM_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.anthropic.claude-sonnet-5-5":"L-94A31E46","global.anthropic.claude-sonnet-5-5":"L-31AB82D0","us.amazon.nova-lite-v1:0":"L-89F8391A","us.amazon.nova-pro-v1:0":"L-ED46B8C5","us.amazon.nova-2-lite-v1:0":"L-F06F1187","global.amazon.nova-2-lite-v1:0":"L-F06F1187","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-7EC72A47","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42"}'
       Policies:
         - Statement:
             - Effect: Allow
