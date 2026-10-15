@@ -228,11 +228,20 @@ def update_counter(increment: bool = True) -> bool:
     the same shape the tracker's decrement uses, and deliberately conservative:
     the real conflict rate is unmeasured (this change is not deploy-validated).
 
+    Both directions are conditional, and on DIFFERENT conditions: the increment
+    refuses to cross ``MAX_CONCURRENT`` and the decrement refuses to cross zero.
+    Each supplies only the expression value its own condition references — see
+    the comment below, which is the defect that made that worth spelling out.
+
     Args:
         increment: Whether to increment (True) or decrement (False) the counter
 
     Returns:
-        bool: True if update successful, False if at limit
+        bool: True if the write landed. False if its condition refused it: at
+        ``MAX_CONCURRENT`` for an increment, at zero for a decrement. Callers
+        act on the increment's answer (it is the admission decision); a refused
+        decrement is logged, because the slot it would have released is not held
+        and there is nothing for the caller to do differently.
 
     Raises:
         ClientError: If DynamoDB operation fails
@@ -258,6 +267,19 @@ def update_counter(increment: bool = True) -> bool:
     if increment:
         update_args["ConditionExpression"] = "active_count < :max"
         update_args["ExpressionAttributeValues"][":max"] = MAX_CONCURRENT
+    else:
+        # The same floor the tracker's decrement carries (issue #915), and it
+        # matters here for the first time: until the ``:max`` defect above was
+        # fixed this write never landed at all. ``ADD active_count :inc`` with
+        # ``:inc = -1`` is unconditional arithmetic, so a hand-back racing a
+        # ``reconcile_counter`` reset — or any decrement the counter has already
+        # accounted for — drives it NEGATIVE. Admission is ``active_count <
+        # :max``, so every unit below zero permanently raises the effective
+        # ceiling above MaxConcurrentWorkflows, and the only thing that notices
+        # is ``_repair_if_counter_was_negative`` on some later increment.
+        # Refusing the write is the safe direction: the slot stays released.
+        update_args["ConditionExpression"] = "active_count > :zero"
+        update_args["ExpressionAttributeValues"][":zero"] = 0
 
     last_conflict: Optional[ClientError] = None
     for attempt in range(1, COUNTER_CONFLICT_MAX_ATTEMPTS + 1):
@@ -274,7 +296,20 @@ def update_counter(increment: bool = True) -> bool:
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code")
             if code == "ConditionalCheckFailedException":
-                logger.warning("Concurrency limit reached")
+                # Direction-aware: the two paths now carry DIFFERENT conditions,
+                # and the same message for both would report a counter at its
+                # floor as a counter at its ceiling — the opposite reading, on
+                # the one log line an operator goes looking for when intake
+                # stops.
+                if increment:
+                    logger.warning("Concurrency limit reached")
+                else:
+                    logger.warning(
+                        "Counter decrement refused: active_count is already 0, so "
+                        "the slot this hand-back would release is not held. "
+                        "Leaving it rather than driving the counter negative, "
+                        "which would admit work above MaxConcurrentWorkflows."
+                    )
                 return False
             if code == "TransactionConflictException":
                 last_conflict = e

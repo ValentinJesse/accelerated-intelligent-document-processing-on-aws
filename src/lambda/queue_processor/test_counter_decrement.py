@@ -27,6 +27,13 @@ than a missing case:
 So these tests use a real (moto) table AND the real ``update_counter``, and
 assert the value the table is left holding. ``ADD active_count :inc`` is the one
 operation whose outcome a mock cannot stand in for.
+
+The decrement's **floor** is pinned here for the same reason. It is the other
+half of the repair rather than a separate change: an unconditional
+``ADD active_count -1`` that now lands can drive the counter NEGATIVE, and
+because admission is ``active_count < MaxConcurrentWorkflows`` every unit below
+zero permanently raises the effective ceiling — the mirror-image outage, and the
+one the tracker's decrement already guards against (issue #915).
 """
 
 import importlib.util
@@ -203,6 +210,81 @@ class TestDecrementReachesTheTable:
         assert index_module.update_counter(increment=False) is True
 
         assert _active(index_module) == 2
+
+
+class TestTheDecrementHasAFloor:
+    """The other half of the repair.
+
+    Until the ``:max`` defect was fixed this write never landed, so nothing about
+    it was reachable. It lands now, and ``ADD active_count :inc`` is
+    unconditional arithmetic — so a hand-back racing a ``reconcile_counter``
+    reset, or one the counter has already accounted for, takes it below zero.
+    That is the mirror-image outage: admission is
+    ``active_count < MaxConcurrentWorkflows``, so a counter at −N runs N
+    workflows above the configured ceiling, and only a later increment notices
+    (``_repair_if_counter_was_negative``). The tracker's decrement has carried
+    this floor since #915; this one now matches it.
+    """
+
+    def test_a_decrement_at_zero_is_refused(self, index_module):
+        _set_active(index_module, 0)
+
+        assert index_module.update_counter(increment=False) is False
+
+        assert _active(index_module) == 0
+
+    def test_a_refused_decrement_never_persists_a_negative(self, index_module):
+        """The property, rather than the mechanism: however many redundant
+        hand-backs arrive, the counter does not go below zero."""
+        _set_active(index_module, 1)
+
+        assert index_module.update_counter(increment=False) is True
+        for _ in range(3):
+            assert index_module.update_counter(increment=False) is False
+
+        assert _active(index_module) == 0
+
+    def test_a_negative_counter_is_not_driven_further_down(self, index_module):
+        """A counter already negative — from a release before the floor, or from
+        the tracker's own path — must not be made worse by a hand-back."""
+        _set_active(index_module, -2)
+
+        assert index_module.update_counter(increment=False) is False
+
+        assert _active(index_module) == -2
+
+    def test_the_floor_is_a_condition_and_not_a_read(self, index_module):
+        """Compare-and-swap rather than read-then-write: two invocations handing
+        back the last slot concurrently would both pass a prior read."""
+        _set_active(index_module, 0)
+        calls = _record_update_items(index_module)
+
+        assert index_module.update_counter(increment=False) is False
+
+        assert calls[-1]["ConditionExpression"] == "active_count > :zero"
+        assert calls[-1]["ExpressionAttributeValues"][":zero"] == 0
+
+    def test_a_refused_decrement_is_not_reported_as_a_full_counter(
+        self, index_module, caplog
+    ):
+        """The two paths now refuse for opposite reasons, and one log line is
+        what an operator reads when intake stops. Reporting a counter at its
+        FLOOR as a counter at its CEILING points the diagnosis the wrong way."""
+        _set_active(index_module, 0)
+
+        with caplog.at_level("WARNING"):
+            assert index_module.update_counter(increment=False) is False
+
+        assert "Concurrency limit reached" not in caplog.text
+        assert "already 0" in caplog.text
+
+    def test_the_increment_still_says_limit_reached(self, index_module, caplog):
+        _set_active(index_module, MAX_CONCURRENT)
+
+        with caplog.at_level("WARNING"):
+            assert index_module.update_counter(increment=True) is False
+
+        assert "Concurrency limit reached" in caplog.text
 
 
 class TestTheIncrementStillHasItsCeiling:

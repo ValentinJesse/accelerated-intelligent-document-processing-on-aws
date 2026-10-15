@@ -56,7 +56,10 @@ is the same reading ``test_dynamodb_query_filter_keys.py`` does.
 Not read, each a deliberate miss rather than an invented finding:
 
 * A group whose expression is built at run time from variables. There is nothing
-  to compare the placeholders against, so the group is skipped entirely.
+  to compare the placeholders against, so the group is skipped entirely. The
+  shared ``idp_common.dynamodb.client`` assembles both halves from its callers'
+  arguments, so the defect class routed through it is out of reach of any source
+  reading and would need a runtime assertion in that client instead.
 * A value added by subscript (``args["ExpressionAttributeValues"][":max"] = ...``)
   rather than appearing in the dict literal. Conditionally supplied values are
   how the #1358 fix is written, and the conservative direction here is to miss a
@@ -210,6 +213,11 @@ def _innermost_block(module: ast.Module, target: ast.AST) -> Optional[List[ast.s
                     descend(nested)
             for handler in getattr(statement, "handlers", None) or []:
                 descend(handler.body)
+            # A `match` case's body is as conditional as an `if` branch's, and it
+            # reaches neither `body` nor `handlers` — so without this, a value
+            # added inside one reads as unconditional.
+            for case in getattr(statement, "cases", None) or []:
+                descend(case.body)
             return True
         return False
 
@@ -441,6 +449,19 @@ def test_the_repaired_site_is_covered_by_discovery():
             "expression that uses it is one block deeper",
         ),
         (
+            "args = {\n"
+            '    "UpdateExpression": "ADD c :inc",\n'
+            '    "ExpressionAttributeValues": {":inc": 1, ":max": 100},\n'
+            "}\n"
+            "match direction:\n"
+            "    case 'up':\n"
+            '        args["ConditionExpression"] = "c < :max"\n'
+            "table.update_item(**args)",
+            True,
+            "a match case's body is as conditional as an if branch's, and it "
+            "reaches neither `body` nor `handlers` on the statement",
+        ),
+        (
             'table.update_item(UpdateExpression="ADD c :inc",\n'
             '    ExpressionAttributeValues={":inc": -1, ":max": 100})',
             True,
@@ -556,6 +577,7 @@ def test_the_repaired_site_is_covered_by_discovery():
     ],
     ids=[
         "the-1358-defect",
+        "a-match-case-is-conditional",
         "keyword-arguments",
         "dict-call-not-literal",
         "a-query-not-an-update",
