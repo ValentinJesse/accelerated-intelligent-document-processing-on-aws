@@ -956,7 +956,7 @@ def test_every_coverage_tree_is_measured_through_the_neutralisation(monkeypatch)
     This is the half that catches a control present and not consulted: it intercepts
     the `subprocess.run` `coverage_all.run` makes and inspects the environment that
     pytest would actually have received, for each registry tree in turn. A `run`
-    that neutralises eight trees and not the ninth fails here naming it.
+    that neutralises every tree but one fails here naming it.
     """
     module = _coverage_all()
     unset, assigned = _hermetic_spec()

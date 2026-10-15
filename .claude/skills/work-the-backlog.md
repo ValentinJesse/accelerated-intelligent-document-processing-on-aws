@@ -1355,7 +1355,7 @@ brief:
 >    line did not run. ⚠️ **Do not edit anything in that worktree while the
 >    battery runs** — an interrupted run still writes a `coverage.xml`, and the
 >    ratchet will then report fabricated losses.
-> 5. **Never `make coverage-all`.** It measures all nine trees from scratch, is in
+> 5. **Never `make coverage-all`.** It measures every registry tree from scratch, is in
 >    **neither** CI configuration and in no tier of this skill, and it is not the
 >    coverage gate — `scripts/check_coverage_debt.py` is, it takes seconds, and it
 >    reads the report `make test-cicd` has already written. Measured: one merge agent

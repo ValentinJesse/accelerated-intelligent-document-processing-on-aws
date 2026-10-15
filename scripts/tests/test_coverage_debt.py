@@ -1195,7 +1195,7 @@ def _fake_tree(tmp_path: Path, name: str = "faketree"):
     """A tree rooted in `tmp_path`, so `--write` cannot touch the real baseline.
 
     Registered by monkeypatching TREES, not by editing the real registry: these tests
-    exercise the orchestration, and doing that against the nine real trees would make
+    exercise the orchestration, and doing that against the real registry would make
     them depend on whichever reports happen to be lying around from the last run.
     """
     root = tmp_path / name
@@ -1377,7 +1377,7 @@ class TestWriteBaseline:
         """The load-bearing property of `--write`.
 
         `make coverage-all --only one_tree` followed by `--write` must not erase the
-        other eight trees' baselines. If it did, the routine act of re-recording one
+        other trees' baselines. If it did, the routine act of re-recording one
         tree would silently un-ratchet everything else, and the next run would report
         no problems because there would be nothing left to compare against.
         """
@@ -2141,7 +2141,7 @@ class TestWriteRefusesUntrustworthyInput:
         """Not "skips that tree": records nothing.
 
         `--write` regenerates the whole file, and the operator's next act is to commit it.
-        Recording the other eight trees while silently dropping the bad one would leave
+        Recording every other tree while silently dropping the bad one would leave
         the baseline half-refreshed and read as a success.
         """
         good, bad = _fake_tree(tmp_path, "good"), _fake_tree(tmp_path, "bad")
@@ -2652,7 +2652,7 @@ class TestRequireAllTreesIsDerivedFromTheRegistry:
     ):
         """Case 3, and the reason the derivation is inside the script.
 
-        The tree is **invented by this test** and named nothing like the nine real ones,
+        The tree is **invented by this test** and named nothing like the real ones,
         so the requirement cannot be satisfied by a list of today's names in a Makefile,
         a CI config or this module. If the derivation stopped reading `TREES`, a tree
         added to the registry and produced by nobody would be unratcheted while the gate
