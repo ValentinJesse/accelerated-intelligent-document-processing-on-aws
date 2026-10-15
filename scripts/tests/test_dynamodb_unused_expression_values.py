@@ -264,8 +264,17 @@ def _sibling_expressions(
     unreadable = False
     for statement in block:
         for node in ast.walk(statement):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
+            # ``AugAssign`` alongside ``Assign``: ``args["UpdateExpression"] +=
+            # " REMOVE x"`` appends a clause, and a placeholder that appears only
+            # in the appended fragment is referenced just as surely as one in the
+            # original. Reading only ``Assign`` would treat such a fragment as
+            # absent and report the value it uses, which is the false-positive
+            # direction this gate must not take.
+            if isinstance(node, (ast.Assign, ast.AugAssign)):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                for target in targets:
                     if (
                         isinstance(target, ast.Subscript)
                         and isinstance(target.value, ast.Name)
@@ -514,6 +523,18 @@ def test_the_repaired_site_is_covered_by_discovery():
             "and the .update spelling of the same same-block addition",
         ),
         (
+            "args = {\n"
+            '    "UpdateExpression": "ADD c :inc",\n'
+            '    "ExpressionAttributeValues": {":inc": 1, ":max": 100},\n'
+            "}\n"
+            'args["UpdateExpression"] += " SET limit_seen = :max"\n'
+            "table.update_item(**args)",
+            False,
+            "an augmented assignment appends a clause, so a placeholder used only "
+            "in the appended fragment is referenced — reading Assign alone would "
+            "report the value it uses",
+        ),
+        (
             'args = dict(UpdateExpression="ADD c :inc",\n'
             '    ExpressionAttributeValues={":inc": 1, ":max": 100})\n'
             'args["ConditionExpression"] = "c < :max"\n'
@@ -584,6 +605,7 @@ def test_the_repaired_site_is_covered_by_discovery():
         "the-1358-repair",
         "same-block-addition",
         "same-block-update-call",
+        "augmented-subscript-append",
         "same-block-addition-to-a-dict-call",
         "runtime-expression",
         "interpolated-f-string",

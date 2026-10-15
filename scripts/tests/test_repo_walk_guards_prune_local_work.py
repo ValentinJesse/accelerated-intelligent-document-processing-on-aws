@@ -392,6 +392,27 @@ def test_a_tree_copy_directory_is_gitignored(directory: str, creator: str) -> No
 
 @pytest.mark.unit
 @pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
+def test_a_tree_copy_directory_is_also_in_the_fallback_prune_list(
+    directory: str, creator: str
+) -> None:
+    """The non-git branch needs the same name, for the case it exists for.
+
+    Being gitignored settles the git route and nothing else. ``tracked_paths``
+    walks when its root is not a checkout top, and that walk is filtered only by
+    :data:`repo_files.FALLBACK_PRUNE_DIRS` — so a name present in one route and
+    absent from the other is covered exactly while the primary route works, which
+    is not what a fallback is for.
+    """
+    assert directory in repo_files.FALLBACK_PRUNE_DIRS, (
+        f"{directory!r} is gitignored but missing from "
+        f"repo_files.FALLBACK_PRUNE_DIRS, so the non-git walk still descends into "
+        f"the whole copy of the tree {creator} writes there. Both routes or "
+        f"neither: {sorted(repo_files.FALLBACK_PRUNE_DIRS)}"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
 def test_the_file_that_writes_the_tree_copy_still_names_it(
     directory: str, creator: str
 ) -> None:
@@ -417,6 +438,13 @@ def test_tracked_discovery_does_not_list_a_tree_copy(
     The two assertions above read configuration. This one drives the helper the
     nine gates actually call, because that is the thing whose answer matters, and
     it is the assertion that fails on the state this was written for.
+
+    It writes a real ``.py`` into the checkout for the duration, which is the
+    concurrent-interference shape CLAUDE.md warns about for ``make srt-scan``
+    overlapping the offline suite. Checked rather than assumed: the probe is
+    gitignored, so ``ruff`` skips it natively, and ``basedpyright``'s ``include``
+    never reaches this directory — so neither whole-tree gate can see it. It is
+    removed in a ``finally``, along with the directories it had to create.
     """
     probe = REPO_ROOT / directory / "base" / "scripts" / "probe_tree_copy.py"
     probe.parent.mkdir(parents=True, exist_ok=True)

@@ -48,6 +48,12 @@ import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
+#: Applied at module scope rather than per class. These are hermetic unit tests —
+#: moto stands in for DynamoDB and every other client is a mock — and without the
+#: marker a `pytest -m unit` selection runs none of them, which is the one
+#: invocation shape the repository's testing standard names.
+pytestmark = pytest.mark.unit
+
 _INDEX_PATH = os.path.join(os.path.dirname(__file__), "index.py")
 _MODULE_NAME = "queue_processor_counter_decrement_under_test"
 
