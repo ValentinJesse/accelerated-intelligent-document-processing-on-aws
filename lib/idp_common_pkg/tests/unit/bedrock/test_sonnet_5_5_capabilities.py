@@ -366,6 +366,64 @@ class TestCachingAndWindows:
         assert "claude-sonnet-5" in patterns
         assert patterns.index("claude-sonnet-5-5") < patterns.index("claude-sonnet-5")
 
+    def test_the_scan_table_orders_it_ahead_of_sonnet_5_too(self):
+        """``benchmarks/harness/cache_audit.py`` has the same order dependency, and
+        nothing else pins it for THIS model.
+
+        ``CACHE_MINIMUMS`` is scanned in insertion order with ``if name in model_id``,
+        so ``"claude-sonnet-5"`` placed first shadows ``"claude-sonnet-5-5"`` and the
+        scan reports 1,024 — double the real minimum. That is not hypothetical: it is
+        the state the tree was in before this model's entry was added.
+
+        ⚠️ ``benchmarks/tests/test_cache_minimum_parity.py`` cannot catch a reorder
+        here. Its agreement check compares key→value on the intersection of the two
+        tables, which sees a wrong *number* and not a wrong *position*; the check that
+        does resolve by substring iterates ids derived from ``config_matrix.yaml``'s
+        axes, and this model is deliberately on no axis. So a later reorder would
+        leave every suite green. The equivalent dependency in
+        ``model_config_limits.yaml`` is pinned by
+        ``test_the_limits_entry_precedes_the_sonnet_5_one`` above and the one in
+        ``prompt_cache.py`` by the resolved-value rows in
+        ``test_prompt_cache_minimums.py``; this is the third of the three.
+
+        Read from source with ``ast`` rather than by importing the harness, which is
+        not on this suite's path — and the property under test is the literal key
+        order a reader sees, which is exactly what the source gives.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[5]
+        tree = ast.parse(
+            (root / "benchmarks" / "harness" / "cache_audit.py").read_text()
+        )
+        keys: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "CACHE_MINIMUMS"
+                for t in node.targets
+            ):
+                assert isinstance(node.value, ast.Dict)
+                keys = [
+                    k.value
+                    for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                ]
+                break
+        assert keys, "could not read CACHE_MINIMUMS out of cache_audit.py"
+        assert "claude-sonnet-5-5" in keys, (
+            "cache_audit.CACHE_MINIMUMS has no claude-sonnet-5-5 key, so the scan "
+            "resolves this model through claude-sonnet-5 and reports 1,024 against "
+            "the product's 512."
+        )
+        assert keys.index("claude-sonnet-5-5") < keys.index("claude-sonnet-5"), (
+            "claude-sonnet-5-5 must precede claude-sonnet-5 in "
+            "cache_audit.CACHE_MINIMUMS. The dict is scanned in insertion order with "
+            "a substring match, and the shorter key is a substring of the longer, so "
+            "below it this entry is unreachable and the scan silently reports double "
+            "this model's real minimum."
+        )
+
     def test_sonnet_5_keeps_its_200k_sizing_budget(self):
         """The pair for the window assertion. Sonnet 5's base id is pinned at 200,000
         on purpose so auto-sizing stays conservative unless its ``:1m`` variant is
