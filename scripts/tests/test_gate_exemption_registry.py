@@ -518,6 +518,14 @@ PREDICATE_DOMAIN_WORDING = {
         "generated filename",
         "written into the tree while",
     ),
+    "not_reachable_by_a_package_walk": (
+        "not a package",
+        "no __init__.py",
+        "package walk",
+        "not an importable package",
+        "nothing imports it",
+        "cannot be discovered",
+    ),
 }
 
 
