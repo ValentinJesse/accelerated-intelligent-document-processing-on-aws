@@ -455,6 +455,13 @@ def test_tracked_discovery_does_not_list_a_tree_copy(
     gitignored, so ``ruff`` skips it natively, and ``basedpyright``'s ``include``
     never reaches this directory — so neither whole-tree gate can see it. It is
     removed in a ``finally``, along with the directories it had to create.
+
+    The window in which the file exists is **accepted**, not overlooked: every
+    gate that could read a stray ``.py`` honours the ignore file or never walks
+    here, and a hard-killed run leaves behind one gitignored file that the next
+    run of this test overwrites. The alternative — a synthetic checkout in
+    ``tmp_path`` — would assert against an ignore file this test wrote, which is
+    not the claim. The claim is about **this** repository's ``.gitignore``.
     """
     probe = REPO_ROOT / directory / "base" / "scripts" / "probe_tree_copy.py"
     probe.parent.mkdir(parents=True, exist_ok=True)

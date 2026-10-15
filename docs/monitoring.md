@@ -174,13 +174,17 @@ Four alarms publish to `AlertsTopic`:
   executions actually running and so excludes the slot about to be handed back.
   Look for a `RECONCILED` line in the QueueProcessor logs immediately before. It
   needs the stack to be at its ceiling (reconciliation runs only on a refused
-  increment), so it is rare, and nothing is wrong afterwards. A **newly deployed
-  stack** is the other benign case: `active_count > 0` is false when the counter
-  item does not exist yet, so a hand-back before any document has completed is
-  refused and reported as an underflow when the real condition is an
-  uninitialised counter. Refusing is still right — the alternative creates the
-  item at −1 — but do not go looking for a leak on a stack that has not run a
-  document yet.
+  increment), so it is rare, and nothing is wrong afterwards. ⚠️ **A missing
+  counter item is the opposite of benign and reaches the same alarm.**
+  `active_count > 0` is also false when the `workflow_counter` item or its
+  `active_count` attribute does not exist, so the refusal looks identical. That
+  state should be unreachable: `InitializeConcurrencyTableCustomResource` writes
+  the item at `0` on stack create, and a compensating hand-back always follows a
+  *successful* increment, whose own `active_count < MaxConcurrentWorkflows`
+  condition would already have refused against a missing attribute. So if you
+  see it, the item was deleted or the initialiser never ran — check that the item
+  exists before reading anything else here, because a stack in that state admits
+  nothing at all.
 - **`ConcurrencyCounterNegativeAlarm`** — the counter observed below zero. This
   should be unreachable now that the decrement is floored; if it fires, the
   counter is being written by something that bypasses the floor.

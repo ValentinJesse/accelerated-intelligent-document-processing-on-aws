@@ -104,6 +104,13 @@ def index_module(monkeypatch):
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
+    # WORKING_BUCKET is removed rather than merely left unset: `start_workflow`
+    # branches on it, so a host that happens to export one sends these tests down
+    # the serialize-to-S3 path instead of the inline one. `clear=False` inherits
+    # whatever the machine has, which is the shape of a suite that passes in CI
+    # and fails on somebody's laptop.
+    monkeypatch.delenv("WORKING_BUCKET", raising=False)
+
     with patch.dict(os.environ, env_vars, clear=False), mock_aws():
         boto3.client("dynamodb", region_name="us-east-1").create_table(
             TableName="test-concurrency",
