@@ -19,8 +19,8 @@ import {
 } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
 import { getFieldConfidenceInfo } from '../common/confidence-alerts-utils';
-import FieldGeometryAffordance from './FieldGeometryAffordance';
-import { summariseGeometryCoverage } from './geometry-coverage';
+import FieldGeometryAffordance from '../common/FieldGeometryAffordance';
+import { summariseGeometryCoverage } from '../common/geometry-coverage';
 import type { BoxProps } from '@cloudscape-design/components';
 
 // Extended Box props to allow native HTML attributes that Cloudscape passes through at runtime
@@ -141,6 +141,17 @@ const FormFieldRenderer = memo<Record<string, any>>(
      * the recursive render path, where it would be recomputed per field.
      */
     const coverage = summariseGeometryCoverage(explainabilityInfo);
+
+    /**
+     * Whether this document produced any boxes at all, which decides whether a
+     * field's own value explains anything about its missing box.
+     *
+     * `total === 0` is "no per-field data to judge from", which is NOT the same
+     * claim as "no boxes were produced" — so it reads as available and the
+     * per-field reasons apply, rather than asserting a configuration cause this
+     * component cannot see.
+     */
+    const geometryAvailable = coverage.total === 0 || coverage.located > 0;
 
     // Helper to check if a value has confidence alerts (recursively)
     const hasConfidenceAlertInTree = (
@@ -669,7 +680,13 @@ const FormFieldRenderer = memo<Record<string, any>>(
                     {/* The only visible sign of whether this field can be shown on the
                         page, and the only keyboard-reachable way to ask. The reasoning
                         lives in the component, which all four value branches share. */}
-                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
+                    <FieldGeometryAffordance
+                      fieldKey={fieldKey}
+                      value={value}
+                      geometry={geometry}
+                      geometryAvailable={geometryAvailable}
+                      onLocate={handleClick}
+                    />
                   </SpaceBetween>
                   <div
                     style={{
@@ -883,7 +900,13 @@ const FormFieldRenderer = memo<Record<string, any>>(
                     {/* The only visible sign of whether this field can be shown on the
                         page, and the only keyboard-reachable way to ask. The reasoning
                         lives in the component, which all four value branches share. */}
-                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
+                    <FieldGeometryAffordance
+                      fieldKey={fieldKey}
+                      value={value}
+                      geometry={geometry}
+                      geometryAvailable={geometryAvailable}
+                      onLocate={handleClick}
+                    />
                   </SpaceBetween>
                   <div
                     style={{
@@ -1107,7 +1130,13 @@ const FormFieldRenderer = memo<Record<string, any>>(
                     {/* The only visible sign of whether this field can be shown on the
                         page, and the only keyboard-reachable way to ask. The reasoning
                         lives in the component, which all four value branches share. */}
-                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
+                    <FieldGeometryAffordance
+                      fieldKey={fieldKey}
+                      value={value}
+                      geometry={geometry}
+                      geometryAvailable={geometryAvailable}
+                      onLocate={handleClick}
+                    />
                   </SpaceBetween>
                   <div
                     style={{
@@ -1337,8 +1366,23 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   fields could not be located. */}
               {path.length === 0 && coverage.total > 0 && (
                 <ExtBox fontSize="body-s" color="text-body-secondary">
-                  {`${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} can be shown on the page`}
-                  {coverage.located < coverage.total && ' — the rest carry no value, or no match was found for it'}
+                  {!geometryAvailable
+                    ? 'No field can be shown on the page: this document carries no bounding boxes'
+                    : `${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} can be shown on the page`}
+                  {/* "in this section" once a filter is on, because the count is of
+                      the section and the rows are a subset of it. Without that the
+                      caption reads as a statement about what is on screen, and
+                      "6 of 10" above two rows is the same two-facts-no-way-to-choose
+                      problem this caption exists to remove. */}
+                  {geometryAvailable && filterMode !== 'none' && ' in this section'}
+                  {/* No "the rest carry no value, or no match was found" clause. It
+                      restated both causes on every partial section even where only
+                      one applied, and it cannot be narrowed from here: this count
+                      is derived from `explainability_info` alone, which says
+                      nothing about values — and deriving it from the value tree as
+                      well would be the second traversal that lets a caption and
+                      the rows disagree. Each row's own control names its own
+                      cause, which is where that belongs. */}
                 </ExtBox>
               )}
             </ExtBox>
@@ -1546,7 +1590,13 @@ const FormFieldRenderer = memo<Record<string, any>>(
                     {/* The only visible sign of whether this field can be shown on the
                         page, and the only keyboard-reachable way to ask. The reasoning
                         lives in the component, which all four value branches share. */}
-                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
+                    <FieldGeometryAffordance
+                      fieldKey={fieldKey}
+                      value={value}
+                      geometry={geometry}
+                      geometryAvailable={geometryAvailable}
+                      onLocate={handleClick}
+                    />
                   </SpaceBetween>
                   <div
                     style={{

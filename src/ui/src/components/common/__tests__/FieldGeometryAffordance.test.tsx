@@ -22,9 +22,10 @@
  */
 
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import FormFieldRenderer from '../FormFieldRenderer';
+import FormFieldRenderer from '../../document-viewer/FormFieldRenderer';
 
 const box = (page = 1) => [{ boundingBox: { left: 0.1, top: 0.2, width: 0.3, height: 0.04 }, page }];
 
@@ -101,18 +102,49 @@ describe('a section that can only partly be shown on the page', () => {
 
     // The agreement is the point: both come from explainability_info, so there is
     // one source of truth rather than a caption and a renderer that can drift.
-    expect(screen.getByText(/6 of 10 fields can be shown on the page/)).toBeInTheDocument();
+    expect(screen.getByText(/^6 of 10 fields can be shown on the page$/)).toBeInTheDocument();
     expect(locateControls()).toHaveLength(6);
   });
 
-  it('says the model extracted nothing, rather than that the value was not found', () => {
+  it('says the model extracted nothing, rather than that the value was not found', async () => {
     renderSection();
 
-    // The four here all carry the pipeline's stringified None. Telling the reader
-    // to go looking for the value on the page would send them after something
-    // that was never extracted.
-    const reason = reasonControls()[0];
-    expect(reason.getAttribute('aria-label')).toBe('Why SubmitterName cannot be shown on the page');
+    // Clicked, not inspected. The label is identical in both states — "Why
+    // <field> cannot be shown on the page" — so an assertion on it cannot see
+    // which reason is given, and cannot see a control that opens nothing at all.
+    // The four fields here carry the pipeline's stringified None, and telling the
+    // reader to go looking on the page would send them after a value that was
+    // never extracted.
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+
+    expect(screen.getByText(/No value was extracted for this field/i)).toBeInTheDocument();
+  });
+
+  it('distinguishes a value that could not be found from one that was never extracted', async () => {
+    // The other reason, which has a different remedy: there IS a value, so the
+    // thing to check is the value against the document. Reached by giving a field
+    // a value and no geometry.
+    renderSection({
+      value: { ...INFERENCE_RESULT, SubmitterName: '24 AUG 11' },
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+
+    expect(screen.getByText(/could not be matched to anything on the page/i)).toBeInTheDocument();
+  });
+
+  it('does not also locate the field when the explanation is opened', async () => {
+    // The row itself carries a click handler, so the explanation has to stop the
+    // click reaching it — while still reaching the popover. Getting that wrong in
+    // either direction is silent: stop it too early and the control does nothing,
+    // too late and asking why a field cannot be shown moves the page image.
+    const onFieldFocus = vi.fn();
+    renderSection({ onFieldFocus });
+
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+
+    expect(screen.getByText(/No value was extracted for this field/i)).toBeInTheDocument();
+    expect(onFieldFocus).not.toHaveBeenCalled();
   });
 
   it('omits the count where there is no per-field data to count', () => {
@@ -122,6 +154,26 @@ describe('a section that can only partly be shown on the page', () => {
     renderSection({ explainabilityInfo: null });
 
     expect(screen.queryByText(/can be shown on the page/)).not.toBeInTheDocument();
+  });
+
+  it("says the count is the section's once a filter is hiding rows", () => {
+    // The count is of the section; the rows are a subset of it. Left unqualified,
+    // "6 of 10" sits above two rows and is the same two-facts-no-way-to-choose
+    // problem the caption exists to remove.
+    renderSection({ filterMode: 'confidence-alerts' });
+
+    expect(screen.getByText(/6 of 10 fields can be shown on the page in this section/)).toBeInTheDocument();
+  });
+
+  it('blames the document, not each field, when nothing carries a box', async () => {
+    // geometry.mode: off, or labels predating geometry. The per-field reasons are
+    // all wrong here in the same way, so the slot says so once per row instead.
+    const noBoxes = [Object.fromEntries(Object.keys(INFERENCE_RESULT).map((k) => [k, { confidence: 0.9 }]))];
+    renderSection({ explainabilityInfo: noBoxes });
+
+    expect(screen.getByText(/this document carries no bounding boxes/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Why FormId cannot be shown on the page/i }));
+    expect(screen.getByText(/No bounding boxes were produced for this document/)).toBeInTheDocument();
   });
 
   it('does not caption a nested group, which would read as the whole section', () => {

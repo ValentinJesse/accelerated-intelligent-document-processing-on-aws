@@ -4,7 +4,7 @@
 import React, { useState, useMemo } from 'react';
 import { Table, Box, Input, StatusIndicator, Toggle, SpaceBetween, Button } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
-import FieldGeometryAffordance from '../document-viewer/FieldGeometryAffordance';
+import FieldGeometryAffordance from '../common/FieldGeometryAffordance';
 
 interface FlatField {
   path: (string | number)[];
@@ -307,6 +307,21 @@ const FieldComparisonTable = ({
     return items;
   }, [expectedData, predictedData, explainabilityInfo, corrections, showMismatchesOnly]);
 
+  /**
+   * Whether this evaluation carries any boxes at all.
+   *
+   * Decided across the table rather than per row, because with none anywhere the
+   * cause is the configuration (`extraction.geometry.mode`) and the same on every
+   * row — so a per-field explanation would tell the reader to check each value
+   * against the page for something no amount of checking would reveal.
+   *
+   * `showMismatchesOnly` filters `comparisonData`, so this reads the rows in hand;
+   * a filter that hid every located field would make the table say boxes were
+   * never produced. That is the narrow cost of not having the unfiltered set here,
+   * and it is bounded: the rows on screen are the rows being explained.
+   */
+  const anyFieldLocatable = comparisonData.some((item) => item.geometry);
+
   // Start editing a field
   const handleStartEdit = (pathString: string, source: string, currentValue: unknown) => {
     setEditingField(pathString);
@@ -483,12 +498,19 @@ const FieldComparisonTable = ({
          whose prediction is empty is the one thing the reader needs to know
          ([#1327]). The predicted value is what decides between the two reasons —
          a box comes from matching what the model extracted, so an empty
-         prediction cannot be located whatever the baseline says. */
+         prediction cannot be located whatever the baseline says.
+
+         `predictedValue`, deliberately, not `displayPredicted`: geometry is a
+         property of what extraction produced, not of what a reviewer has since
+         corrected. The consequence is worth knowing — a corrected row can display
+         a value and still explain that nothing was extracted — and it is the
+         honest reading, because the box that does not exist is the model's. */
       cell: (item: ComparisonItem) => (
         <FieldGeometryAffordance
           fieldKey={item.fieldName}
           value={item.predictedValue}
           geometry={item.geometry}
+          geometryAvailable={anyFieldLocatable}
           onLocate={() => handleRowClick(item)}
         />
       ),

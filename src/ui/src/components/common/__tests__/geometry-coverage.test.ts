@@ -20,6 +20,9 @@ import { describe, expect, it } from 'vitest';
 
 import { classifyFieldGeometry, describeFieldGeometry, isAbsentValue, summariseGeometryCoverage } from '../geometry-coverage';
 
+/** The geometry shape the viewer can draw: a box and the page it is on. */
+const box = () => [{ boundingBox: { left: 0.1, top: 0.2, width: 0.3, height: 0.04 }, page: 1 }];
+
 /** A located field: confidence and a geometry entry. */
 const located = (confidence = 0.9) => ({
   confidence,
@@ -46,7 +49,17 @@ describe('isAbsentValue', () => {
     // the value could not be found on the page.
     expect(isAbsentValue('None')).toBe(true);
     expect(isAbsentValue('none')).toBe(true);
-    expect(isAbsentValue('N/A')).toBe(true);
+    expect(isAbsentValue('null')).toBe(true);
+  });
+
+  it('does not guess at sentinels with no producer', () => {
+    // A single hyphen is an ordinary extracted cell value and "NA" is a real
+    // value in several document vocabularies. Treating them as absent would make
+    // the row claim nothing was extracted while displaying the value that was.
+    expect(isAbsentValue('-')).toBe(false);
+    expect(isAbsentValue('--')).toBe(false);
+    expect(isAbsentValue('NA')).toBe(false);
+    expect(isAbsentValue('N/A')).toBe(false);
   });
 
   it('does not treat a real value as absent, including falsy ones', () => {
@@ -84,16 +97,34 @@ describe('classifyFieldGeometry', () => {
   });
 });
 
+describe('classifyFieldGeometry when the document has no geometry at all', () => {
+  it('blames the document rather than the field', () => {
+    // With geometry.mode: off, or on labels predating geometry, no row can be
+    // located and the cause is identical on every one. Reporting each field's own
+    // value would send the reader checking values against the page for a
+    // configuration condition no checking would reveal.
+    expect(classifyFieldGeometry('24 AUG 11', false, false)).toBe('none-produced');
+    expect(classifyFieldGeometry('', false, false)).toBe('none-produced');
+  });
+
+  it('still reports a field that does have a box', () => {
+    // Belt and braces: a located field is located whatever the document-level
+    // flag says, so a wrong flag cannot hide a working control.
+    expect(classifyFieldGeometry('x', true, false)).toBe('located');
+  });
+});
+
 describe('describeFieldGeometry', () => {
   it('names the cause rather than restating the absence', () => {
     expect(describeFieldGeometry('no-value')).toMatch(/No value was extracted/);
     expect(describeFieldGeometry('unmatched')).toMatch(/could not be matched to anything on the page/);
+    expect(describeFieldGeometry('none-produced')).toMatch(/No bounding boxes were produced for this document/);
   });
 
   it('gives every state a sentence', () => {
     // A state with no wording renders an empty tooltip, which reads as a bug in
     // the viewer rather than an explanation.
-    (['located', 'no-value', 'unmatched'] as const).forEach((state) => {
+    (['located', 'no-value', 'unmatched', 'none-produced'] as const).forEach((state) => {
       expect(describeFieldGeometry(state).length).toBeGreaterThan(10);
     });
   });
@@ -129,10 +160,17 @@ describe('summariseGeometryCoverage', () => {
     expect(summariseGeometryCoverage(explainability)).toEqual({ located: 4, total: 5 });
   });
 
-  it('counts a field whose geometry array is present but empty as unlocated', () => {
-    // An empty array is not a box. Counting it would overstate the coverage
-    // against the controls, which require an entry to point at.
+  it('counts only geometry the viewer can actually draw', () => {
+    // One definition of "has a box", shared with the per-field control: the
+    // renderer builds a highlight only from an entry carrying both boundingBox
+    // and page. Counting an entry missing either would report a field as
+    // locatable whose row offers no way to locate it.
     expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [] } }])).toEqual({ located: 0, total: 1 });
+    expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [{ page: 1 }] } }])).toEqual({ located: 0, total: 1 });
+    expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [{ boundingBox: { left: 0 } }] } }])).toEqual({
+      located: 0,
+      total: 1,
+    });
   });
 
   it('reports nothing rather than zero-of-zero when there is no explainability at all', () => {
@@ -146,7 +184,7 @@ describe('summariseGeometryCoverage', () => {
   it('does not mistake a confidence-bearing leaf for a container', () => {
     // A leaf carrying both `confidence` and nested-looking keys is still one
     // field; recursing into it would double-count.
-    expect(summariseGeometryCoverage([{ Field: { confidence: 0.9, geometry: [{ page: 1 }], extra: { confidence: 0.1 } } }])).toEqual({
+    expect(summariseGeometryCoverage([{ Field: { confidence: 0.9, geometry: box(), extra: { confidence: 0.1 } } }])).toEqual({
       located: 1,
       total: 1,
     });
