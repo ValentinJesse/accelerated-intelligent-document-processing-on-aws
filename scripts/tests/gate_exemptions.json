@@ -178,7 +178,7 @@
       "issues": [
         1256
       ],
-      "reason": "Discovered by name: the fragment `SKIP` is in the discovery vocabulary, and it matching here is the mechanism working rather than a false positive -- a variable that removes a tree from a coverage producer is exactly the shape this registry governs, whatever its intent. The judgement is bounded to one member because the variable holds one: `--skip idp_common`. Why it is JUDGEMENT rather than a computed premise: the fact that would have to be computed is 'an earlier step in the same CI job already wrote this tree's report', and that is a property of the ORDER of steps in two CI configuration files, not of a path or a file on disk, so none of the predicates in gate_premises.py can express it and a new one would have to parse and order both configs to answer for a single member. What makes the entry safe without that is the ratchet, and it is stronger than the premise would have been: `check-coverage-debt-cicd` passes `--require-all-trees`, whose required set is derived from `TREES` inside `check_coverage_debt.py` rather than written out anywhere a skip could be mirrored. So a tree named here and produced by nobody is not quietly unmeasured -- it is named in a refusal and the gate exits 2. TestRequireAllTreesIsDerivedFromTheRegistry in scripts/tests/test_coverage_debt.py asserts that closure, including against a tree invented by the test so the derivation cannot be satisfied by hardcoding today's nine names, and test_the_cicd_producer_skips_exactly_the_tree_CI_already_measured in the same file pins the membership of this variable to exactly `idp_common` and pins that the recipe still invokes the producer -- deleting the recipe body is a mutation this registry entry alone would not catch and that assertion does. The residual a reviewer should check is the one thing neither asserts: that the earlier CI step really still writes that report. It is not unprotected, it is protected one layer out -- if that step stops writing it, `--require-all-trees` fails naming `idp_common`, which is the loud direction."
+      "reason": "Discovered by name: the fragment `SKIP` is in the discovery vocabulary, and it matching here is the mechanism working rather than a false positive -- a variable that removes a tree from a coverage producer is exactly the shape this registry governs, whatever its intent. The judgement is bounded to one member because the variable holds one: `--skip idp_common`. Why it is JUDGEMENT rather than a computed premise: the fact that would have to be computed is 'an earlier step in the same CI job already wrote this tree's report', and that is a property of the ORDER of steps in two CI configuration files, not of a path or a file on disk, so none of the predicates in gate_premises.py can express it and a new one would have to parse and order both configs to answer for a single member. What makes the entry safe without that is the ratchet, and it is stronger than the premise would have been: `check-coverage-debt-cicd` passes `--require-all-trees`, whose required set is derived from `TREES` inside `check_coverage_debt.py` rather than written out anywhere a skip could be mirrored. So a tree named here and produced by nobody is not quietly unmeasured -- it is named in a refusal and the gate exits 2. TestRequireAllTreesIsDerivedFromTheRegistry in scripts/tests/test_coverage_debt.py asserts that closure, including against a tree invented by the test so the derivation cannot be satisfied by hardcoding today's names, and test_the_cicd_producer_skips_exactly_the_tree_CI_already_measured in the same file pins the membership of this variable to exactly `idp_common` and pins that the recipe still invokes the producer -- deleting the recipe body is a mutation this registry entry alone would not catch and that assertion does. The residual a reviewer should check is the one thing neither asserts: that the earlier CI step really still writes that report. It is not unprotected, it is protected one layer out -- if that step stops writing it, `--require-all-trees` fails naming `idp_common`, which is the loud direction."
     },
     "Makefile::CFN_LINT_IGNORE": {
       "kind": "exemption",
@@ -841,7 +841,8 @@
       "reason": "Roots known not to run in the shared gate. Each member carries its own reason in the constant, which is the authority -- this field records the judgement the reasons need rather than re-listing them, because an enumeration here goes stale the moment a member is added or paid off. Two judgements need recording. First, `scripts` is the member whose reason is narrowest relative to the path it names: it is a mis-collection of ONE file, the live RBAC harness's test_email helper, so both consuming gates match it exactly rather than as a prefix -- inherited, it would exempt the four gate suites beneath it. Second, a reason blaming ONE failing test is the most perishable kind there is, because the day it is fixed the reason is false and the file's already-passing tests stay outside the gate. No member makes that claim today, so the check is a DETECTOR rather than a per-member computation: test_run_all_tests_registry.py reads the reasons and requires any that blames a single test or assertion to be registered with a pytest node id, at which point three checks compute it -- the node must resolve to exactly one collected test, it must still fail, and its file must pass without it, so fixing, renaming or deleting it all invalidate the entry. The remaining reasons are dependency availability, an absence of collectable tests, a source tree whose modules are named test_*, and operator-run scripts. No single predicate is the premise for a set that heterogeneous.",
       "crossReferences": [
         "lib/idp_common_pkg/pytest.ini::norecursedirs",
-        "scripts/run_all_tests.py::RUN_ROOTS"
+        "scripts/run_all_tests.py::RUN_ROOTS",
+        "scripts/tests/test_coverage_debt.py::HANDLER_DIRECTORIES_EXEMPT_FROM_THE_COVERAGE_BASELINE"
       ],
       "predicateConsidered": {
         "collects_zero_tests": "It DOES apply to the subset whose reason makes that claim, and it is now applied: test_run_all_tests_registry.py runs the collector per member for every QUARANTINE reason matching that wording. It is recorded here rather than as this entry's premise because the constant's members are heterogeneous -- an unavailable dependency, a mis-collection, a source tree, an absence of tests -- so no single predicate is the premise for the constant. The 'one failing test' wording has its own detector, described in the reason above."
@@ -1309,7 +1310,7 @@
       "reason": "The absence the docstring argues for is JUDGEMENT, which is not a predicate: it is the recorded admission that there is no predicate, and the registry handles it as a separate branch that additionally requires a reason. Putting it in this table would let an entry name it as though something were computed. Registered as a non-exemption so that reading is recorded rather than re-derived by the next person to hit this line. Ratchet: scripts/tests/test_gate_exemption_registry.py::test_entry_is_well_formed resolves every entry's premise against PREDICATES | {JUDGEMENT} and fails on an unknown name, so the set of nameable premises is closed and a member cannot be REMOVED while an entry names it.",
       "ratchet": "universe-closure",
       "ratchetEvidence": "scripts/tests/test_gate_exemption_registry.py",
-      "ratchetGap": "Closure runs one way only: nothing fails for a DEAD member. Two of the five -- collects_zero_tests and file_absent_or_untracked -- are named by zero entries' `premise` fields today, so nothing in this registry rests on either, and this table can carry a predicate no registry entry uses. (That is a weaker statement than 'nothing calls them': collects_zero_tests is called by scripts/tests/test_run_all_tests_registry.py, and the CLAUDE.md rule about an uncalled predicate bites on one an ENTRY names -- enforced by test_a_computable_premise_is_actually_computed -- not on an unnamed table member.) For reference, the live premise distribution is JUDGEMENT x137, not_a_nested_stack_of_parent x4, built_separately_from_main_stack x2, installer_manifest_pins_parameter x1. Note also that the ratchetEvidence above is the meta-test itself, and the marker the evidence check greps for is in that file's own RATCHET_EVIDENCE_MARKERS table, so for THIS entry the marker is self-satisfying: read the named test, not the marker."
+      "ratchetGap": "Closure runs one way only: nothing fails for a DEAD member. This table can therefore carry a predicate no registry entry names, and file_absent_or_untracked is in that state today -- nothing in this registry rests on it. (That is a weaker statement than 'nothing calls it': the CLAUDE.md rule about an uncalled predicate bites on one an ENTRY names -- enforced by test_a_computable_premise_is_actually_computed -- not on an unnamed table member.) No premise distribution is quoted here on purpose: the figure that was written down went stale inside one release cycle, so derive it from this file if you need it. Note also that the ratchetEvidence above is the meta-test itself, and the marker the evidence check greps for is in that file's own RATCHET_EVIDENCE_MARKERS table, so for THIS entry the marker is self-satisfying: read the named test, not the marker."
     },
     "scripts/tests/repo_files.py::FALLBACK_PRUNE_DIRS": {
       "kind": "prune",
@@ -2390,7 +2391,70 @@
       "reason": "One member: idp_common/agents/analytics/assets, which holds SQL and prompt data files that happen to sit under a package directory rather than importable modules, so coverage.py reports nothing for them and there is no percentage to ratchet. Deliberately short, and meant to stay short: the honest way to have a module at 0% is to RECORD it at 0% and let the ratchet hold it there, not to exempt it from the baseline. JUDGEMENT rather than a gate_premises predicate because 'coverage.py emits no measurement for this path' is a property of the report, which the owning gate already reads -- a predicate would re-derive it from somewhere less authoritative.",
       "ratchetEvidence": "scripts/tests/test_coverage_debt.py",
       "crossReferences": [
-        "scripts/coverage_debt.json::coverage_debt.json"
+        "scripts/coverage_debt.json::coverage_debt.json",
+        "scripts/tests/test_coverage_debt.py::HANDLER_DIRECTORIES_EXEMPT_FROM_THE_COVERAGE_BASELINE"
+      ]
+    },
+    "scripts/check_coverage_debt.py::TREES": {
+      "kind": "enforced-universe",
+      "memberKind": "coverage tree name",
+      "turnsOff": "nothing. It is the ENFORCED set -- every tree the coverage ratchet measures and requires. Discovered by the prose of its attached comment, which argues for the derived exemption the two fan-out entries rest on; registered so that reading is recorded rather than mistaken for a carve-out.",
+      "premise": [
+        "JUDGEMENT"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": [
+        "scripts/check_coverage_debt.py",
+        "scripts/tests/test_coverage_debt.py"
+      ],
+      "reason": "The authored half is which trees exist, and three closures sit under it rather than one. First, the required set for the CI form of the gate is derived from this tuple INSIDE the script, so neither Makefile nor CI config holds a second copy and a tree added here is required by name without an edit anywhere else; a tree with no report is then refused by name rather than counted as checked. Second, every entry here must have a recorded baseline and must discover at least one source file, so an entry whose paths stopped matching fails instead of recording nothing and reporting success -- which is what the first version of the generator did. Third, for the two fan-out entries the universe they cover is itself derived: the handler prefixes come from the tree, and a prefix no entry here names fails, so this tuple cannot leave a whole family of handler directories measured by nothing. What it cannot answer is whether a tree that is neither a lib/ package, a feature-platform service nor a Lambda handler prefix has been left out; that is the judgement, and it is why the docstring records the figures the six previously unmeasured trees turned out to have.",
+      "issues": [
+        1190,
+        1256,
+        1227
+      ]
+    },
+    "scripts/tests/test_coverage_debt.py::HANDLER_DIRECTORIES_EXEMPT_FROM_THE_COVERAGE_BASELINE": {
+      "kind": "exemption",
+      "memberKind": "path",
+      "turnsOff": "the coverage ratchet's per-file baseline, for one Lambda handler directory: no source file under it is recorded in scripts/coverage_debt.json, so none of them carries a floor and every one of them may fall to nothing with the gate green. It does NOT remove the directory from the ratchet's universe -- it is derived into this set, counted, and asserted about per member.",
+      "premise": [
+        "collects_zero_tests"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": [
+        "scripts/tests/test_coverage_debt.py",
+        "scripts/check_coverage_debt.py"
+      ],
+      "issues": [
+        1227,
+        1221,
+        1442
+      ],
+      "reason": "Membership is DERIVED and nothing is listed: check_coverage_debt.handler_directories() attributes every tracked .py to the directory under a src/lambda segment, and a directory holding code and no test file lands here. So writing the first test for one of these moves it into the fan-out's measured roots with no edit anywhere, and adding a handler with no test moves it in here -- which is the property the alternative, registering handler directories one coverage Tree at a time, cannot have. collects_zero_tests is named as the premise and evaluated against every member by test_the_exempt_directory_really_collects_no_test, which matters because the derivation and the premise are different instruments: the derivation asks git whether a test file is present and the predicate asks pytest whether anything collects, so a file named *_test.py -- collected by pytest, not recognised as a test by the gate's own _looks_like_test -- makes them disagree and fails loudly instead of exempting a directory that has a suite. TWO ratchets, both required when the narrower of the two options for #1227 was chosen, and only one of them fits the single-valued field above. Universe closure: test_every_handler_directory_is_accounted_for partitions every handler directory into the coverage baseline, this set, or the test-root quarantine, and a directory in none of the three fails BY NAME -- which is what makes a newly added handler unable to join an unmeasured set quietly, and what would have caught the original defect, since two directories taken to 99% were held by nothing. Count pinning: EXEMPT_HANDLER_DIRECTORY_COUNT in the same file pins the size and is compared for equality rather than as an upper bound, so a 46th untested handler fails rather than being absorbed, and paying one off is a visible one-line edit in the same change. Closure is deliberately NOT derived from the same partition on both sides: the enforced half is read out of the committed baseline, so the assertion can fail, where comparing two views of one derivation would pass whatever the baseline held. The third bucket is consumed rather than authored -- one directory's suite cannot be collected here because an optional dependency is absent, and scripts/run_all_tests.py already records that per directory with its reason, so this gate reads that registry instead of growing a second copy of the same judgement.",
+      "crossReferences": [
+        "scripts/check_coverage_debt.py::NOT_MEASURED",
+        "scripts/run_all_tests.py::QUARANTINE",
+        "scripts/tests/test_coverage_debt.py::COVERAGE_UNREACHABLE_FILES_EXEMPT"
+      ]
+    },
+    "scripts/tests/test_coverage_debt.py::COVERAGE_UNREACHABLE_FILES_EXEMPT": {
+      "kind": "exemption",
+      "memberKind": "path",
+      "turnsOff": "the coverage ratchet's per-file baseline for ONE source file inside a handler directory the fan-out does measure: the file carries no floor, so its coverage is ratcheted at nothing while every sibling in the same directory is held. It does not remove the file from the gate's universe -- the per-file closure derives the unfloored files on every run and compares them against this map as an exact set.",
+      "premise": [
+        "not_reachable_by_a_package_walk"
+      ],
+      "ratchet": "universe-closure",
+      "ratchetEvidence": [
+        "scripts/tests/test_coverage_debt.py"
+      ],
+      "issues": [
+        1227
+      ],
+      "reason": "coverage.py's file discovery walks the measured source and recurses into a subdirectory only if that directory is an importable package, so a module below a non-package directory reaches the coverage data only when something imports it -- and a file absent from the report can be given no floor at all. That is a property of the one path, it is computed per member by the predicate named above (bound to the fan-out root the file sits under, because the walk DOES reach a file sitting directly in the measured source whether or not that directory is a package, and a version asking about the parent alone answers 'unreachable' for every handler module in this repository), and it was measured in both directions rather than read off coverage.py: dropping an __init__.py into the directory puts the file in the report at 0.00%. THE RATCHET IS UNIVERSE CLOSURE OVER FILES, which is also why the entry is keyed by path rather than counted. The gate derives the unfloored source files under every measured fan-out root on each run and compares them against this map as an exact set, so a member in neither the baseline nor here fails by name. The first version pinned the cardinality, and a cardinality pin passes when the audited file is replaced -- demonstrated, by deleting this file and planting an unreachable module under a different root, which left a different source file shipping unmeasured with the gate green. The comparison is now an exact set, so BOTH directions fail: an unaccounted file, and a stale entry whose file has gained a floor or been deleted, which would otherwise pre-exempt whatever next occupies the path. The predicate deliberately does not claim that nothing imports the file -- a module below a non-package directory that something does import is discovered and measurable, so the exemption would be unsound -- and the gate supplies that half by deriving membership from the files with no recorded floor rather than from the filesystem. The remedy for the one member is in the tree rather than here: make the directory a package, or have a test import the module.",
+      "crossReferences": [
+        "scripts/tests/test_coverage_debt.py::HANDLER_DIRECTORIES_EXEMPT_FROM_THE_COVERAGE_BASELINE"
       ]
     },
     "scripts/coverage_debt.json::coverage_debt.json": {
