@@ -149,8 +149,8 @@ The capacity calculation system provides sophisticated analysis through GraphQL 
 > RPM across every model in `BEDROCK_MODEL_RPM_QUOTA_CODES`**, not just the ones the
 > plan calls, so an overstated value cannot bind a minimum.
 >
-> ⚠️ **Note that reduction is wider than the TPM one, and the difference is not
-> cosmetic.** The token limit *is* narrowed to the plan's step models, so a model
+> ⚠️ **Note that this reduction is over a wider set than the TPM one, and the
+> difference is not cosmetic.** The token limit *is* narrowed to the plan's step models, so a model
 > the pipeline never calls cannot constrain it. The request limit is not, so a
 > genuinely **low** RPM quota for a model you do not use still binds the RPM row and
 > can send you to request an increase you do not need. Check which model the row

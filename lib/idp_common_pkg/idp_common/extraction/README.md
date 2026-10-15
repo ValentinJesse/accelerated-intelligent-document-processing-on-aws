@@ -600,10 +600,9 @@ prompt is a fourth block and a third copy is a fifth
 
 Each model has a **minimum cacheable prefix**, and below it a cache point silently
 does nothing. ⚠️ **The numbers are deliberately not repeated here** — ask
-`idp_common.bedrock.prompt_cache.min_cacheable_prefix_tokens(model_id)`. That table
-is already written in five places that a test
-(`benchmarks/tests/test_cache_minimum_parity.py`) exists to keep in agreement, and
-this file was a sixth that the test does not know about and that had gone stale. It is
+`idp_common.bedrock.prompt_cache.min_cacheable_prefix_tokens(model_id)`. Repeating
+them here would be a sixth copy, and `benchmarks/tests/test_cache_minimum_parity.py`
+only keeps five in agreement. The table is also
 not monotonic across generations and not a property of the family: the two Haikus sit
 at opposite ends of it (4.5 at 4,096, 5.5 at 512) and the two Sonnets a tier apart
 (Sonnet 5 at 1,024, Sonnet 5.5 at 512), so a number carried over from a sibling is

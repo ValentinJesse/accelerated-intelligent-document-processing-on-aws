@@ -111,6 +111,15 @@ GOV_ARN = (
 #: plus ``global.``) and is in the sweep for that reason: it is not reachable from the
 #: picklists, which offer ``us.``/``eu.``/``global.`` only, but it is reachable through
 #: a custom configuration or the CLI, where a user copies the id off the model card.
+#:
+#: ⚠️ What that buys is the CAPABILITY GATES below — sampling parameters, effort,
+#: forcing, thinking, document blocks, the vision tier. Prompt caching is a separate
+#: question with a different answer, and the answer is the same for every model in
+#: this repository: ``CACHEPOINT_SUPPORTED_MODELS`` holds ``us.``/``eu.``/``global.``
+#: forms only, so an ``au.``-prefixed id configured by the route above loses explicit
+#: caching with no error and no log line. That is repo-wide and predates this model,
+#: so widening the seeding loop over ``_REGION_PREFIXES`` is its own change; the
+#: cachePoint tests here sweep ``us``/``eu``/``global`` to match what ships.
 ALL_FORMS = [
     BASE,
     "eu.anthropic.claude-sonnet-5-5",
