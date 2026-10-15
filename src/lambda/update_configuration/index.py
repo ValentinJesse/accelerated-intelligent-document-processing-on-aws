@@ -129,6 +129,13 @@ MODEL_MAPPINGS = {
     # system_defaults/base-extraction.yaml.
     "us.anthropic.claude-sonnet-5": "eu.anthropic.claude-sonnet-5",
     "us.anthropic.claude-sonnet-5:1m": "eu.anthropic.claude-sonnet-5:1m",
+    # Sonnet 5.5 maps to its own EU geo profile, so this row is safe in BOTH
+    # directions — get_model_mapping walks this dict backwards for a US target, and
+    # the reverse of this row returns the US Sonnet 5.5 profile rather than moving a
+    # user onto a different model (the hazard documented at the bottom of this dict).
+    # There is no ":1m" pair to add: 1M is this model's default window and
+    # "us.anthropic.claude-sonnet-5-5:1m" is not an id Bedrock accepts.
+    "us.anthropic.claude-sonnet-5-5": "eu.anthropic.claude-sonnet-5-5",
     # Opus 4 is end-of-life and Opus 4.1 is LEGACY; neither has an EU profile, so
     # both are rescue rows. Opus 4.5 is the Opus-class EU model, which keeps a
     # stranded Opus configuration on an Opus rather than silently demoting it to
