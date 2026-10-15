@@ -593,6 +593,15 @@ class TestThePicklists:
                 f"{var} must name us.anthropic.claude-sonnet-5-5 explicitly"
             )
             assert codes.get("global.anthropic.claude-sonnet-5-5") == "L-31AB82D0"
+            # The eu. profile shares the us. code, and that is correct rather than a
+            # stand-in: Service Quotas codes are global identifiers whose VALUE is
+            # per-region, L-94A31E46 is the same code in us-east-1, eu-west-1 and
+            # eu-central-1 (checked in all three, 2026-10-14), and
+            # calculate_capacity builds its client with no region override so an EU
+            # stack reads the EU value. Without this row an EU deployment configured
+            # on the eu. profile raises — the model is in every eu. picklist and is
+            # the target of the new MODEL_MAPPINGS row.
+            assert codes.get("eu.anthropic.claude-sonnet-5-5") == "L-94A31E46"
             # Non-vacuity: Sonnet 5's own entries are still there and still
             # different, so the two models are not collapsed onto one code.
             assert codes["us.anthropic.claude-sonnet-5"] == "L-D4FBCF4E"

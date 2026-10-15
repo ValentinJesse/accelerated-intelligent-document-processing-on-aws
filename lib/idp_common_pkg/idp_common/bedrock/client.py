@@ -353,6 +353,7 @@ def thinking_disable_payload(model_id: str) -> Optional[Dict[str, str]]:
         return None
     return _THINKING_DISABLE_PAYLOAD_OVERRIDES.get(base, {"type": "disabled"})
 
+
 # Effort levels accepted by Claude models. There are now THREE vocabularies on
 # this file's paths and no two are the same — see GROK_EFFORT_LEVELS and
 # ASTRA_EFFORT_LEVELS. Relative to Claude's set: the OpenAI Responses models
