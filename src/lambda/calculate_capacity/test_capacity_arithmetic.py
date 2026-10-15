@@ -809,8 +809,9 @@ def test_the_request_limit_is_also_the_most_constrained_model(monkeypatch):
 def test_only_the_models_the_plan_calls_constrain_its_throughput(monkeypatch, capsys):
     """The reduction is over the plan's step models, not the whole account mapping.
 
-    `BEDROCK_MODEL_QUOTA_CODES` lists every model the stack supports — fourteen on
-    a default deployment — so reducing over all of them answers a question nobody
+    `BEDROCK_MODEL_QUOTA_CODES` lists the models the stack has quota codes for, a
+    figure deliberately not quoted here since it moves whenever a model is added —
+    so reducing over all of them answers a question nobody
     asked: it reports the limit of whichever model the account is least
     provisioned for, whether or not the pipeline ever calls it. That is the mirror
     image of the account-wide maximum this replaced, understating instead of

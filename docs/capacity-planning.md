@@ -135,6 +135,27 @@ The capacity calculation system provides sophisticated analysis through GraphQL 
 - Status indicators: ✅ Sufficient, ⚠️ Increase Needed
 - Direct "Request Increase" buttons linking to AWS Service Quotas console
 
+> ⚠️ **The RPM row is approximate for the Claude Sonnet models, and reads as
+> authoritative.** AWS publishes no requests-per-minute quota for Claude Sonnet 5
+> or Claude Sonnet 5.5, so `BEDROCK_MODEL_RPM_QUOTA_CODES` records their
+> *tokens*-per-minute code for the RPM lookup. The consequence is a row that looks
+> like every other one: a six-million "RPM quota", an affirmative ✅, and a
+> "Request Increase" link that opens the TPM quota's console page. **The TPM rows
+> are exact; treat the RPM row for either Sonnet as a placeholder rather than a
+> measurement**, and read the TPM table when deciding whether to request an
+> increase.
+>
+> This does not distort the capacity figure itself. The plan reduces over the
+> *minimum* RPM across the models it calls, so an overstated value cannot bind —
+> the error is a confidently wrong row, not a wrong throughput.
+>
+> ⚠️ Separately: the quota maps cover a **subset** of the selectable models. A step
+> model with no entry in them fails Capacity Planning outright with
+> `ValueError: TPM quota not available for model <id>` rather than omitting a row,
+> and the message names the variable to add it to. Claude Opus 5, Opus 5.5, Sonnet
+> 4.6, Fable 5, Haiku 5.5, the `openai.gpt-5.x` models and most `eu.` profiles are
+> currently absent.
+
 **Latency Bar Color Coding**:
 - **Green** (P50, P75): When all model quotas are within limits
 - **Blue** (P90, P95, P99): When all model quotas are within limits
