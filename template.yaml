@@ -10450,6 +10450,14 @@ Resources:
                     ],
                     [
                       ".",
+                      "ConcurrencyCounterUpdateFailed",
+                      {
+                        "stat": "Sum",
+                        "label": "Hand-backs lost (the counter write raised; each one leaks a slot)"
+                      }
+                    ],
+                    [
+                      ".",
                       "ConcurrencyDecrementSuppressed",
                       {
                         "stat": "Sum",
