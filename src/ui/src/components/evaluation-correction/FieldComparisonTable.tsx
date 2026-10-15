@@ -4,6 +4,7 @@
 import React, { useState, useMemo } from 'react';
 import { Table, Box, Input, StatusIndicator, Toggle, SpaceBetween, Button } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
+import FieldGeometryAffordance from '../document-viewer/FieldGeometryAffordance';
 
 interface FlatField {
   path: (string | number)[];
@@ -474,20 +475,24 @@ const FieldComparisonTable = ({
     },
     {
       id: 'actions',
-      header: 'Actions',
+      header: 'On page',
+      /* The shared affordance, so this table answers the same question the field
+         editors do and in the same way. It replaces a control that was
+         `disabled={!item.geometry}` and otherwise silent: a greyed-out button
+         states that locating is unavailable without saying why, which on a row
+         whose prediction is empty is the one thing the reader needs to know
+         ([#1327]). The predicted value is what decides between the two reasons —
+         a box comes from matching what the model extracted, so an empty
+         prediction cannot be located whatever the baseline says. */
       cell: (item: ComparisonItem) => (
-        <Button
-          variant="icon"
-          iconName="zoom-to-fit"
-          onClick={(e) => {
-            e.stopPropagation();
-            handleRowClick(item);
-          }}
-          disabled={!item.geometry}
-          ariaLabel="Focus on field in document"
+        <FieldGeometryAffordance
+          fieldKey={item.fieldName}
+          value={item.predictedValue}
+          geometry={item.geometry}
+          onLocate={() => handleRowClick(item)}
         />
       ),
-      width: 80,
+      width: 90,
     },
   ];
 

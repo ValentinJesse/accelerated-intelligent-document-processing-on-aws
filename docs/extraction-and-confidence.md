@@ -1588,12 +1588,17 @@ group attributes and list items recursively.
 
 `extraction.geometry.mode` controls where field bounding boxes come from:
 
-| `geometry.mode` | Source of boxes | Notes |
+A box locates an **extracted value** on the page, so a field the model returned
+nothing for is never located — under any mode. That accounts for most missing
+boxes in practice, and the viewers now say so per field (see
+[What the viewers show](#what-the-viewers-show)).
+
+| `geometry.mode` | Source of boxes | When to choose it |
 |---|---|---|
-| **`ocr_only`** *(default)* | Real OCR lines only | Model is **not** asked for boxes; cheapest and most accurate |
-| **`llm_grounded`** | LLM estimates, grounded in OCR | Model emits boxes; service replaces them with real OCR boxes where the value matches |
-| **`llm`** | LLM estimates as-is | Escape hatch; no grounding |
-| **`off`** | None | No geometry produced |
+| **`ocr_only`** *(default)* | Real OCR lines only | Almost always. The model is **not** asked for boxes, so no added prompt tokens, and OCR boxes beat LLM-estimated ones |
+| **`llm_grounded`** | LLM estimates, corrected against OCR | When values are not present verbatim in the OCR text — reformatted dates, figures read off a chart — so `ocr_only` matches too little |
+| **`llm`** | LLM estimates as-is | ⚠️ **Discouraged.** Same prompt and cost as `llm_grounded`, then skips the correction, so it is never the better of the two. Retained for existing configurations |
+| **`off`** | None | No geometry produced; the viewers stop offering to show fields on the page |
 
 ```yaml
 extraction:
@@ -1606,6 +1611,32 @@ extraction:
 > **v0.6 rename.** The LLM-box modes were previously `llm_with_ocr_grounding` /
 > `llm_only`, and the legacy `assessment.ground_geometry_in_ocr: false` maps to
 > `llm`. Old configs are migrated on read.
+
+### What the viewers show
+
+Wherever extracted fields are displayed — the document viewer, the human-review
+editor, Test Studio's ground-truth editor and the evaluation-correction table —
+each field carries one of two controls, so you can tell before clicking whether
+that field can be located:
+
+| control | meaning |
+|---|---|
+| 🔍 **Show _field_ on the page** | The field has a box. Activating it highlights the value on the page image. |
+| ⓘ **Why _field_ cannot be shown on the page** | No box. The explanation distinguishes the two causes, which have different remedies. |
+
+The two causes:
+
+- **No value was extracted.** There is nothing to locate. This is the common case,
+  and it is not a geometry problem — if the field should have a value, the thing to
+  look at is the extraction prompt or the document.
+- **A value that could not be matched to anything on the page.** Under `ocr_only`
+  this means the value is not present verbatim in the OCR text, which happens when
+  extraction canonicalizes it (a reformatted date) or infers it from elsewhere.
+  `llm_grounded` is the mode that addresses this class.
+
+A section also states its coverage up front — *"6 of 10 fields can be shown on the
+page"* — so the split is visible without hovering every row. The count and the
+controls are derived from the same per-field data, so they cannot disagree.
 
 ### `ocr_only` (default) — OCR grounding via `pageData.json`
 

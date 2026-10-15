@@ -19,6 +19,8 @@ import {
 } from '@cloudscape-design/components';
 import { ConsoleLogger } from 'aws-amplify/utils';
 import { getFieldConfidenceInfo } from '../common/confidence-alerts-utils';
+import FieldGeometryAffordance from './FieldGeometryAffordance';
+import { summariseGeometryCoverage } from './geometry-coverage';
 import type { BoxProps } from '@cloudscape-design/components';
 
 // Extended Box props to allow native HTML attributes that Cloudscape passes through at runtime
@@ -130,6 +132,15 @@ const FormFieldRenderer = memo<Record<string, any>>(
     // Calculate path key for collapse state using displayPath
     const pathKey = [...displayPath, fieldKey].join('.');
     const isCollapsed = collapsedPaths.has(pathKey);
+
+    /**
+     * How many of this section's fields can be shown on the page.
+     *
+     * Computed at every level and rendered only at the root, which is cheap (one
+     * walk of `explainability_info`, no React work) and keeps the count out of
+     * the recursive render path, where it would be recomputed per field.
+     */
+    const coverage = summariseGeometryCoverage(explainabilityInfo);
 
     // Helper to check if a value has confidence alerts (recursively)
     const hasConfidenceAlertInTree = (
@@ -655,22 +666,10 @@ const FormFieldRenderer = memo<Record<string, any>>(
                         ✏️
                       </ExtBox>
                     )}
-                    {/* The only keyboard-reachable way to ask "where did this come
-                        from?", and the only visible sign that asking is possible.
-                        The whole field was a click target before, with no
-                        affordance: invisible to sighted users, unreachable to AT
-                        ones. */}
-                    {geometry && (
-                      <Button
-                        variant="inline-icon"
-                        iconName="search"
-                        ariaLabel={`Show ${fieldKey} on the page`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleClick();
-                        }}
-                      />
-                    )}
+                    {/* The only visible sign of whether this field can be shown on the
+                        page, and the only keyboard-reachable way to ask. The reasoning
+                        lives in the component, which all four value branches share. */}
+                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
                   </SpaceBetween>
                   <div
                     style={{
@@ -881,22 +880,10 @@ const FormFieldRenderer = memo<Record<string, any>>(
                         ✏️
                       </ExtBox>
                     )}
-                    {/* The only keyboard-reachable way to ask "where did this come
-                        from?", and the only visible sign that asking is possible.
-                        The whole field was a click target before, with no
-                        affordance: invisible to sighted users, unreachable to AT
-                        ones. */}
-                    {geometry && (
-                      <Button
-                        variant="inline-icon"
-                        iconName="search"
-                        ariaLabel={`Show ${fieldKey} on the page`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleClick();
-                        }}
-                      />
-                    )}
+                    {/* The only visible sign of whether this field can be shown on the
+                        page, and the only keyboard-reachable way to ask. The reasoning
+                        lives in the component, which all four value branches share. */}
+                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
                   </SpaceBetween>
                   <div
                     style={{
@@ -1117,22 +1104,10 @@ const FormFieldRenderer = memo<Record<string, any>>(
                         ✏️
                       </ExtBox>
                     )}
-                    {/* The only keyboard-reachable way to ask "where did this come
-                        from?", and the only visible sign that asking is possible.
-                        The whole field was a click target before, with no
-                        affordance: invisible to sighted users, unreachable to AT
-                        ones. */}
-                    {geometry && (
-                      <Button
-                        variant="inline-icon"
-                        iconName="search"
-                        ariaLabel={`Show ${fieldKey} on the page`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleClick();
-                        }}
-                      />
-                    )}
+                    {/* The only visible sign of whether this field can be shown on the
+                        page, and the only keyboard-reachable way to ask. The reasoning
+                        lives in the component, which all four value branches share. */}
+                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
                   </SpaceBetween>
                   <div
                     style={{
@@ -1351,6 +1326,21 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   {groupEvalResult.reason && ` - ${groupEvalResult.reason}`}
                 </ExtBox>
               )}
+              {/* How much of this section can be shown on the page, at the root only.
+                  Stated up front because the alternative is learning it by clicking:
+                  the per-field controls answer for one field each, and a reader
+                  wanting to know what to expect had to hover every row.
+
+                  Rendered only where there is per-field data to count. With none at
+                  all, "0 of 0 located" would assert a coverage figure for a section
+                  that was never assessed, which is a different thing from one whose
+                  fields could not be located. */}
+              {path.length === 0 && coverage.total > 0 && (
+                <ExtBox fontSize="body-s" color="text-body-secondary">
+                  {`${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} can be shown on the page`}
+                  {coverage.located < coverage.total && ' — the rest carry no value, or no match was found for it'}
+                </ExtBox>
+              )}
             </ExtBox>
             {!isCollapsed && (
               <ExtBox padding={{ left: 'l' }}>
@@ -1553,22 +1543,10 @@ const FormFieldRenderer = memo<Record<string, any>>(
                         ✏️
                       </ExtBox>
                     )}
-                    {/* The only keyboard-reachable way to ask "where did this come
-                        from?", and the only visible sign that asking is possible.
-                        The whole field was a click target before, with no
-                        affordance: invisible to sighted users, unreachable to AT
-                        ones. */}
-                    {geometry && (
-                      <Button
-                        variant="inline-icon"
-                        iconName="search"
-                        ariaLabel={`Show ${fieldKey} on the page`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleClick();
-                        }}
-                      />
-                    )}
+                    {/* The only visible sign of whether this field can be shown on the
+                        page, and the only keyboard-reachable way to ask. The reasoning
+                        lives in the component, which all four value branches share. */}
+                    <FieldGeometryAffordance fieldKey={fieldKey} value={value} geometry={geometry} onLocate={handleClick} />
                   </SpaceBetween>
                   <div
                     style={{
