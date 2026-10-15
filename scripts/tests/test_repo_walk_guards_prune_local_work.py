@@ -72,6 +72,7 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
+import gate_premises
 import pytest
 import repo_files
 
@@ -371,15 +372,18 @@ def test_discovery_survives_a_checkout_under_a_local_work_dir(
 @pytest.mark.unit
 @pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
 def test_a_tree_copy_directory_is_gitignored(directory: str, creator: str) -> None:
-    """The premise the git route rests on, asserted rather than assumed."""
-    probe = f"{directory}/base/src/lambda/queue_processor/index.py"
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--", probe],
-        capture_output=True,
-    )
-    assert result.returncode == 0, (
-        f"{directory}/ is not gitignored, but {creator} writes a whole copy of this "
-        f"tree into it. `repo_files.{TRACKED_HELPER}` lists `--others`, so every "
+    """The premise the git route rests on, computed rather than assumed.
+
+    Through ``gate_premises.vcs_ignored_build_output`` rather than a local
+    ``check-ignore`` call, because that predicate measures the half a bare probe
+    misses — that git tracks nothing *under* the path, which is what makes the
+    exclusion free — and it probes with a trailing slash, so a ``foo/`` rule is
+    not reported as absent merely because the directory is not on disk.
+    """
+    holds, detail = gate_premises.vcs_ignored_build_output(directory)
+    assert holds, (
+        f"{directory}/: {detail}. {creator} writes a whole copy of this tree "
+        f"there, and `repo_files.{TRACKED_HELPER}` lists `--others`, so every "
         f"repo-wide gate that discovers through it then reads that second copy as "
         f"part of the branch — including the pre-change state of files the branch "
         f"fixes. Add `{directory}/` to .gitignore."
