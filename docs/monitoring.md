@@ -136,9 +136,15 @@ visible, all on the **Workflow Concurrency Counter** widget:
   running. Sampled only when an increment is *refused*, i.e. when drift is
   actually blocking work.
 - **`ConcurrencyCounterUnderflow`** — a decrement that was refused because the
-  counter was already at zero. Nothing else reports this: the counter and the
-  document both end up correct, so without this metric a duplicate release is
-  invisible.
+  counter was not above zero. Nothing else reports this: the counter and the
+  document both end up correct, so without this metric a release of a slot that
+  was never held is invisible. ⚠️ **Two functions publish it, so a search of one
+  log group is not an answer.** The **workflow tracker** publishes it from the
+  terminal-event decrement and logs `Concurrency counter was already 0`; the
+  **queue processor** publishes it from a compensating hand-back — after a
+  duplicate message, or a `StartExecution` that failed — and logs `Counter
+  decrement refused`. Both are floored on the same condition, so both can trip
+  it, and the alarm below does not distinguish them.
 - **`ConcurrencyDecrementSuppressed`** — a terminal event whose slot had already
   been released, recognised by its `dec#<executionArn>` marker and skipped. This
   is the guard working, not a fault, so it has **no alarm**: EventBridge
@@ -157,9 +163,11 @@ Four alarms publish to `AlertsTopic`:
   dead-letter queue. This fires on the *cause*: the tracker owns the decrement,
   so an event it could not process is a slot that was never released, and it
   alarms on the first message rather than waiting for drift to accumulate.
-- **`ConcurrencyCounterUnderflowAlarm`** — any refused decrement. The floor
-  already prevented the damage, so this is a *correctness* signal: something
-  released a slot twice, and the reason is worth finding.
+- **`ConcurrencyCounterUnderflowAlarm`** — any refused decrement, from either
+  publisher. The floor already prevented the damage, so this is a *correctness*
+  signal: something released a slot it did not hold, and the reason is worth
+  finding. Check **both** log groups for the two fragments above — a duplicate
+  terminal event and a duplicate SQS message produce the same metric.
 - **`ConcurrencyCounterNegativeAlarm`** — the counter observed below zero. This
   should be unreachable now that the decrement is floored; if it fires, the
   counter is being written by something that bypasses the floor.
@@ -789,7 +797,7 @@ on.
 | `SlowExecutionsAlarm` | Average execution time exceeds the threshold over 5 min | `AlertsTopic` | `ExecutionTimeThresholdMs` (default `300000`, i.e. 300 s) |
 | `WorkflowTimeoutsAlarm` | Any execution ended `TIMED_OUT` by the execution-level bound in 5 min | `AlertsTopic` | Threshold is fixed (≥ 1); the bound itself is `WorkflowExecutionTimeoutSeconds` (default `21600`, i.e. 6 hours) |
 | `ConcurrencyCounterDriftAlarm` | Concurrency drift > 0 sustained for 15 min | `AlertsTopic` | — |
-| `ConcurrencyCounterUnderflowAlarm` | Any decrement refused because the counter was already 0 — a slot released twice | `AlertsTopic` | — |
+| `ConcurrencyCounterUnderflowAlarm` | Any decrement refused because the counter was not above 0 — a slot released that was not held, either a terminal event processed twice (workflow tracker) or a compensating hand-back with nothing to hand back (queue processor) | `AlertsTopic` | — |
 | `ConcurrencyCounterNegativeAlarm` | Concurrency counter observed below 0 in 5 min — the ceiling is being exceeded | `AlertsTopic` | — |
 | `DocumentQueueDLQAlarm` | Any message in the document DLQ — a document that failed every retry | `AlertsTopic` | — |
 | `QueueSenderDLQAlarm` | Any message in the queue-sender DLQ — an upload that was never enqueued | `AlertsTopic` | — |
