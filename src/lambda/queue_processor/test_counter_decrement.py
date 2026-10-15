@@ -276,7 +276,7 @@ class TestTheDecrementHasAFloor:
             assert index_module.update_counter(increment=False) is False
 
         assert "Concurrency limit reached" not in caplog.text
-        assert "already 0" in caplog.text
+        assert "not above" in caplog.text
 
     def test_the_increment_still_says_limit_reached(self, index_module, caplog):
         _set_active(index_module, MAX_CONCURRENT)
@@ -285,6 +285,51 @@ class TestTheDecrementHasAFloor:
             assert index_module.update_counter(increment=True) is False
 
         assert "Concurrency limit reached" in caplog.text
+
+    def test_a_refused_decrement_emits_the_underflow_metric(self, index_module):
+        """A log line is not a signal. The tracker's identical condition publishes
+        ``ConcurrencyCounterUnderflow``, which ``ConcurrencyCounterUnderflowAlarm``
+        fires on at the first occurrence — and this path could not occur at all
+        before the floor existed, so without the metric the one new refusal in the
+        system would be visible only to a log search."""
+        _set_active(index_module, 0)
+        published = []
+        index_module.boto3 = MagicMock()
+        index_module.boto3.client.return_value.put_metric_data = lambda **kwargs: (
+            published.append(kwargs)
+        )
+
+        assert index_module.update_counter(increment=False) is False
+
+        assert len(published) == 1
+        datum = published[0]["MetricData"][0]
+        assert datum["MetricName"] == "ConcurrencyCounterUnderflow"
+        assert (datum["Value"], datum["Unit"]) == (1, "Count")
+        assert published[0]["Namespace"] == "TestStack"
+
+    def test_a_successful_decrement_emits_no_underflow_metric(self, index_module):
+        _set_active(index_module, 2)
+        published = []
+        index_module.boto3 = MagicMock()
+        index_module.boto3.client.return_value.put_metric_data = lambda **kwargs: (
+            published.append(kwargs)
+        )
+
+        assert index_module.update_counter(increment=False) is True
+
+        assert published == []
+
+    def test_a_failed_metric_never_changes_the_decrement(self, index_module):
+        """Telemetry is never allowed to affect the write it reports on."""
+        _set_active(index_module, 0)
+        index_module.boto3 = MagicMock()
+        index_module.boto3.client.return_value.put_metric_data.side_effect = (
+            RuntimeError("cloudwatch down")
+        )
+
+        assert index_module.update_counter(increment=False) is False
+
+        assert _active(index_module) == 0
 
 
 class TestTheIncrementStillHasItsCeiling:

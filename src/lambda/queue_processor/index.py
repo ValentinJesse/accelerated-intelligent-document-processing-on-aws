@@ -304,12 +304,21 @@ def update_counter(increment: bool = True) -> bool:
                 if increment:
                     logger.warning("Concurrency limit reached")
                 else:
+                    # "not above zero" rather than "already 0": the condition
+                    # also fails on a counter that is NEGATIVE (from a release
+                    # before this floor existed, or from the tracker's path) and
+                    # on an absent item or attribute. All three mean the same
+                    # thing to the reader — there is no slot here to release.
                     logger.warning(
-                        "Counter decrement refused: active_count is already 0, so "
-                        "the slot this hand-back would release is not held. "
-                        "Leaving it rather than driving the counter negative, "
-                        "which would admit work above MaxConcurrentWorkflows."
+                        "Counter decrement refused: active_count is not above "
+                        "zero, so the slot this hand-back would release is not "
+                        "held. Leaving it rather than driving the counter "
+                        "negative, which would admit work above "
+                        "MaxConcurrentWorkflows. Investigate duplicate delivery "
+                        "of this message, or a counter edited out from under the "
+                        "stack."
                     )
+                    _emit_counter_underflow_metric()
                 return False
             if code == "TransactionConflictException":
                 last_conflict = e
@@ -834,6 +843,36 @@ def _emit_counter_active_metric(active: int) -> None:
         )
     except Exception as e:  # never let telemetry break message processing
         logger.warning(f"Could not emit concurrency counter metric: {e}")
+
+
+def _emit_counter_underflow_metric() -> None:
+    """Record that a hand-back was refused because the counter held no slot.
+
+    The same metric name the workflow tracker publishes for the same condition on
+    its own decrement, so ``ConcurrencyCounterUnderflowAlarm`` fires whichever
+    function trips the floor — the alarm's description names both log lines. A
+    separate metric would mean a second alarm, and the operator question is
+    identical either way: a slot was released that nobody held, so either a
+    terminal event or a message was processed twice, or the counter was edited
+    out from under the stack.
+
+    Without this the condition is invisible outside a log search, and it is a
+    condition that could not occur before the floor existed. Never allowed to
+    affect the decrement it reports on.
+    """
+    try:
+        boto3.client("cloudwatch").put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[
+                {
+                    "MetricName": "ConcurrencyCounterUnderflow",
+                    "Value": 1,
+                    "Unit": "Count",
+                }
+            ],
+        )
+    except Exception as e:  # never let telemetry break message processing
+        logger.warning(f"Could not emit ConcurrencyCounterUnderflow metric: {e}")
 
 
 def _emit_circuit_breaker_check_failure(classification: str) -> None:
