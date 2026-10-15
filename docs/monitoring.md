@@ -167,7 +167,14 @@ Four alarms publish to `AlertsTopic`:
   publisher. The floor already prevented the damage, so this is a *correctness*
   signal: something released a slot it did not hold, and the reason is worth
   finding. Check **both** log groups for the two fragments above — a duplicate
-  terminal event and a duplicate SQS message produce the same metric.
+  terminal event and a duplicate SQS message produce the same metric. One of the
+  three causes is benign and worth ruling out first: a downward reconciliation
+  landing between a queue-processor increment and its hand-back makes that
+  hand-back a double release, because the correction is computed from the
+  executions actually running and so excludes the slot about to be handed back.
+  Look for a `RECONCILED` line in the QueueProcessor logs immediately before. It
+  needs the stack to be at its ceiling (reconciliation runs only on a refused
+  increment), so it is rare, and nothing is wrong afterwards.
 - **`ConcurrencyCounterNegativeAlarm`** — the counter observed below zero. This
   should be unreachable now that the decrement is floored; if it fires, the
   counter is being written by something that bypasses the floor.
@@ -189,6 +196,18 @@ different directions:
   on the value observed, and never to a value below zero. So a negative counter is
   corrected within one admitted document rather than needing the queue to be at
   its ceiling first.
+
+**The one case none of this covers**, stated so a green dashboard is not
+over-read: the same reconciliation race one unit higher. If the counter is at 2
+rather than 1 when the hand-back lands, the write succeeds and leaves the counter
+one *below* the truth, which over-admits by one slot. Nothing reports that —
+`ConcurrencyCounterNegativeAlarm` needs a value below zero,
+`ConcurrencyCounterDrift` is claimed-minus-running and alarms upward only, and
+reconciliation itself never raises the counter except from a negative. Unlike the
+tracker's decrement, a compensating hand-back carries no `dec#<executionArn>`
+marker, so a repeat release cannot be recognised as a repeat; it is only *refused*
+when the counter happens to be at zero already. The residual is bounded at one
+slot per occurrence and self-corrects on the next completion that does decrement.
 
 The repair publishes the pre-repair **negative** value — not the value the counter
 reads after the increment — before it writes, so `ConcurrencyCounterNegativeAlarm`

@@ -94,8 +94,25 @@ def _run_all_tests_module():
     spec.loader.exec_module(module)
     return module
 
+
 #: Gitignored directories that can hold a whole copy of this tree.
 LOCAL_WORK_DIRS = ("scratch", ".claude")
+
+#: Directories into which this repository's **own tooling** writes a whole second
+#: copy of the tree, each paired with the file that creates it.
+#:
+#: These are the case the git route does not cover for free. Discovering through
+#: ``repo_files.tracked_paths`` is stronger than any name list — but only because
+#: every such copy is gitignored, and ``tracked_paths`` lists ``--others``, so
+#: *untracked* is not enough. A tree copy in a directory nobody ignored is read as
+#: part of the branch by all nine gates that discover through it.
+#:
+#: ``.ai-review/base/`` is the live example and the reason this is pinned: the
+#: advisory reviewer checks out the whole merge-base tree there, so inside a review
+#: worktree a repo-wide gate sees the state *before* the branch alongside the state
+#: after it, and a defect the branch FIXES is reported against it. The creating file
+#: is named so a rename there fails here rather than leaving a dead ignore rule.
+TREE_COPY_DIRS = ((".ai-review", "scripts/sdlc/ai_mr_review.py"),)
 
 #: Gates that walk the repo and must therefore prune local work. Each entry is a
 #: filename in this directory. A gate added later that calls `rglob` on the repo
@@ -198,8 +215,7 @@ def test_the_tracked_helpers_fallback_walk_prunes_local_work(
         "fallback walk — the thing under test — would not run at all"
     )
     found = {
-        p.relative_to(root).as_posix()
-        for p in repo_files.tracked_paths(root, "*.py")
+        p.relative_to(root).as_posix() for p in repo_files.tracked_paths(root, "*.py")
     }
 
     assert "svc/handler.py" in found, (
@@ -349,6 +365,74 @@ def test_discovery_survives_a_checkout_under_a_local_work_dir(
         f"Discovering through git is not enough on its own here — an un-ignored "
         f"`scratch/` in a checkout is listed by `git ls-files --others` — so keep the "
         f"relative-path prune set as a second filter."
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
+def test_a_tree_copy_directory_is_gitignored(directory: str, creator: str) -> None:
+    """The premise the git route rests on, asserted rather than assumed."""
+    probe = f"{directory}/base/src/lambda/queue_processor/index.py"
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--", probe],
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"{directory}/ is not gitignored, but {creator} writes a whole copy of this "
+        f"tree into it. `repo_files.{TRACKED_HELPER}` lists `--others`, so every "
+        f"repo-wide gate that discovers through it then reads that second copy as "
+        f"part of the branch — including the pre-change state of files the branch "
+        f"fixes. Add `{directory}/` to .gitignore."
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
+def test_the_file_that_writes_the_tree_copy_still_names_it(
+    directory: str, creator: str
+) -> None:
+    """A ratchet on the entry above: an ignore rule for a directory nothing writes
+    any more is dead, and a dead one pre-ignores whatever next takes the name."""
+    path = REPO_ROOT / creator
+    assert path.exists(), f"{creator} is registered here but does not exist"
+    assert directory in path.read_text(encoding="utf-8"), (
+        f"{creator} no longer mentions {directory!r}, so either it was renamed — in "
+        f"which case the .gitignore rule now protects nothing and the new name is "
+        f"unprotected — or the copy is no longer written and both this entry and "
+        f"the ignore rule should go."
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory, creator", TREE_COPY_DIRS)
+def test_tracked_discovery_does_not_list_a_tree_copy(
+    directory: str, creator: str
+) -> None:
+    """The behavioural half: a real file under the directory, in this checkout.
+
+    The two assertions above read configuration. This one drives the helper the
+    nine gates actually call, because that is the thing whose answer matters, and
+    it is the assertion that fails on the state this was written for.
+    """
+    probe = REPO_ROOT / directory / "base" / "scripts" / "probe_tree_copy.py"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("x = 1\n", encoding="utf-8")
+    try:
+        found = repo_files.tracked_paths(REPO_ROOT, "*.py")
+    finally:
+        probe.unlink()
+        for parent in list(probe.parents):
+            if parent == REPO_ROOT:
+                break
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+
+    assert probe not in found, (
+        f"repo_files.{TRACKED_HELPER} listed a file under {directory}/, which "
+        f"{creator} fills with a whole copy of this tree. Every repo-wide gate "
+        f"discovering through it is then asserting over two trees at once."
     )
 
 

@@ -233,6 +233,15 @@ def update_counter(increment: bool = True) -> bool:
     Each supplies only the expression value its own condition references — see
     the comment below, which is the defect that made that worth spelling out.
 
+    ⚠️ **The guard for THIS function is ``test_counter_decrement.py``, not the
+    whole-tree gate.** ``scripts/tests/test_dynamodb_unused_expression_values.py``
+    reports the defect class for every DynamoDB request in the repository, but it
+    deliberately does not read a value added by subscript — which is exactly how
+    the two branches below now add theirs, so this call site is outside its reach
+    by construction. The behavioural suite drives both directions against a real
+    expression engine instead. Do not read a green run of that gate as cover for
+    an edit here.
+
     Args:
         increment: Whether to increment (True) or decrement (False) the counter
 
