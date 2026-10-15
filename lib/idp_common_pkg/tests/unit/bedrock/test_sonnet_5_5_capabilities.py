@@ -449,11 +449,32 @@ class TestPricing:
         fixes those rows: when they drop to 2.2e-6 this test fails and points at the
         prose that needs removing, instead of the discrepancy quietly disappearing
         from a document nobody re-reads.
+
+        ⚠️ This assertion is about the RATIO between two models, so it fires on a
+        change to **either** side — which is the point, but it means a failure here
+        is not evidence that Sonnet 5.5's own rows drifted. Those are pinned
+        absolutely in ``test_the_regional_rates`` above, so check that first: if it
+        passes and this fails, somebody corrected the Sonnet 5 rows and the work is
+        to delete prose, not to change a price. The failure message says so, because
+        the name of this test alone points at the wrong model.
         """
         five_five = self._units("bedrock/us.anthropic.claude-sonnet-5-5")
         five = self._units("bedrock/us.anthropic.claude-sonnet-5")
-        assert five["inputTokens"] / five_five["inputTokens"] == pytest.approx(1.5)
-        assert five["outputTokens"] / five_five["outputTokens"] == pytest.approx(1.5)
+        hint = (
+            "The Sonnet 5 rows no longer read 1.50x Sonnet 5.5's. If "
+            "test_the_regional_rates still passes, Sonnet 5.5 is fine and the Sonnet "
+            "5 rows have been CORRECTED — in which case delete this test and the "
+            "⚠️ paragraphs it guards: the pricing.yaml note on "
+            "bedrock/us.anthropic.claude-sonnet-5-5, the CHANGELOG's '~33% cheaper' "
+            "sentence, and the benchmarking index row's price note. If "
+            "test_the_regional_rates also fails, the new rows are what drifted."
+        )
+        assert five["inputTokens"] / five_five["inputTokens"] == pytest.approx(1.5), (
+            hint
+        )
+        assert five["outputTokens"] / five_five["outputTokens"] == pytest.approx(1.5), (
+            hint
+        )
 
     def test_no_1m_pricing_entry_exists(self):
         """There is no ``:1m`` id for this model, so an entry would be a rate keyed on
@@ -481,10 +502,36 @@ class TestThePicklists:
         return (root / "patterns" / "unified" / "template.yaml").read_text()
 
     @pytest.mark.parametrize("prefix", ["us", "eu", "global"])
-    def test_it_is_in_the_configschema_enums(self, prefix):
-        """17 of the 18 model enums in the ConfigSchema, one id per region prefix."""
+    def test_it_is_in_the_same_enums_as_opus_5_5(self, prefix):
+        """Every model enum in the ConfigSchema bar the cluster-analysis one.
+
+        Asserted as **parity with Opus 5.5** rather than against a literal count, and
+        the choice matters in both directions. Opus 5.5 is the right yardstick
+        because it is the only other model with exactly this shape — offered
+        everywhere except ``analysis_model_id``, for exactly the same reason (both
+        reject a forced ``toolChoice``). A literal would red-line on the next
+        legitimate enum addition, which is a failure that teaches a maintainer to
+        edit the number; parity keeps catching the defect that matters — a model
+        added to some picklists and not others — and survives a new enum, since a
+        new enum gets both models or neither.
+        """
         text = self._template_text()
-        assert text.count(f'"{prefix}.anthropic.claude-sonnet-5-5"') == 17
+        mine = text.count(f'"{prefix}.anthropic.claude-sonnet-5-5"')
+        opus = text.count(f'"{prefix}.anthropic.claude-opus-5-5"')
+        assert mine == opus, (
+            f"{prefix}. Sonnet 5.5 appears in {mine} enum positions and Opus 5.5 in "
+            f"{opus}. The two are offered in the same set of picklists — everywhere "
+            "except discovery.multi_document.analysis_model_id — so a difference "
+            "means one of them was added to an enum the other was not, which is how "
+            "a model ends up selectable for one service and not its neighbour."
+        )
+        # Non-vacuity: parity would also hold at zero, which is the one way this
+        # assertion could pass while the model is in no picklist at all.
+        assert mine > 1, (
+            f"only {mine} enum position(s) for {prefix}. Sonnet 5.5 — parity with "
+            "Opus 5.5 is satisfied but neither model is actually offered, so this "
+            "check is vacuous."
+        )
 
     def test_it_is_absent_from_the_cluster_analysis_enum(self):
         """The 18th, and the exception that the forcing rejection forces.
