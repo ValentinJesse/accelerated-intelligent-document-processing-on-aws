@@ -327,9 +327,7 @@ def update_counter(increment: bool = True) -> bool:
                         "of this message, or a counter edited out from under the "
                         "stack."
                     )
-                    _emit_concurrency_event_metric(
-                        "ConcurrencyCounterUnderflow"
-                    )
+                    _emit_concurrency_event_metric("ConcurrencyCounterUnderflow")
                 return False
             if code == "TransactionConflictException":
                 last_conflict = e
@@ -869,11 +867,12 @@ def _emit_concurrency_event_metric(metric_name: str) -> None:
     either way: a slot was released that nobody held.
 
     ``ConcurrencyCounterUpdateFailed`` — the counter write RAISED, and the caller
-    swallowed it. That handling is what turned #1358 from an error into a silent
-    leak: a ``ValidationException`` on every decrement produced one log line and
-    no datapoint, so nothing moved that anyone was watching. The refusal case
-    above is now visible; this makes the raising case visible too, which is the
-    shape of the next variant rather than of this one.
+    logged it and carried on. #1358 was not unlogged — both call sites log at
+    ERROR with a traceback — it was UNALARMED: a ``ValidationException`` on every
+    decrement produced a log line and no datapoint, so nothing anyone watches
+    moved while the counter climbed. The refusal case above is now visible; this
+    makes the raising case visible too, which is the shape of the next variant
+    rather than of this one.
 
     Never allowed to affect the write it reports on.
     """
@@ -1568,9 +1567,10 @@ def process_message(record: Dict[str, Any]) -> Tuple[bool, str]:
                         f"Failed to decrement counter: {counter_error}", exc_info=True
                     )
                     # Swallowing this is right — the execution exists and the
-                    # message must be acked — but swallowing it SILENTLY is what
-                    # made #1358 a leak rather than an error. The metric is the
-                    # only thing that moves here.
+                    # message must be acked. What #1358 lacked was not the log
+                    # line above (ERROR, with a traceback) but a DATAPOINT: no
+                    # metric moved while the counter climbed, so nothing anyone
+                    # watches showed the leak.
                     _emit_concurrency_event_metric("ConcurrencyCounterUpdateFailed")
                 ack_message(receipt_handle)
                 return True, message_id

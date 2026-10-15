@@ -469,7 +469,10 @@ def test_tracked_discovery_does_not_list_a_tree_copy(
     try:
         found = repo_files.tracked_paths(REPO_ROOT, "*.py")
     finally:
-        probe.unlink()
+        # missing_ok: two concurrent runs of this suite in one checkout would
+        # otherwise have the second's `finally` raise FileNotFoundError and error
+        # a test that had already passed.
+        probe.unlink(missing_ok=True)
         for parent in list(probe.parents):
             if parent == REPO_ROOT:
                 break

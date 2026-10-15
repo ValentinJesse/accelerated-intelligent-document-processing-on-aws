@@ -350,9 +350,9 @@ class TestASwallowedFailureStillMoves:
 
     Both callers in ``process_message`` catch a failed decrement, log it and carry
     on, which is right — the execution exists, or the message is being retried. It
-    is also exactly what made #1358 a silent slot leak rather than an error: a
-    ``ValidationException`` on every decrement produced one log line and no
-    datapoint. The floor's refusal is now visible via
+    is also what left #1358 UNALARMED rather than unlogged: both call sites log at
+    ERROR with a traceback, but a ``ValidationException`` on every decrement
+    produced no datapoint, so nothing anyone watches moved. The floor's refusal is now visible via
     ``ConcurrencyCounterUnderflow``; this covers the write that RAISES.
     """
 

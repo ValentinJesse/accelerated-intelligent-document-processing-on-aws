@@ -158,9 +158,11 @@ visible, all on the **Workflow Concurrency Counter** widget:
   be written at all, because the `UpdateItem` **raised**. Distinct from
   `ConcurrencyCounterUnderflow`, which is the write DynamoDB *refused*: this one
   is the write that errored. The queue processor logs the exception and carries
-  on by design — the execution exists, or the message is being retried — and that
-  is exactly what made issue #1358 a silent slot leak instead of an error, so
-  this metric is the only thing that moves. Each datapoint is one leaked slot.
+  on by design — the execution exists, or the message is being retried. It does
+  log, at ERROR with a traceback: grep the QueueProcessor log group for
+  `Failed to decrement counter`. What issue #1358 lacked was not the log line but
+  a **datapoint**, so nothing an operator was watching moved while the counter
+  climbed. Each datapoint here is one leaked slot.
 
 These alarms publish to `AlertsTopic`:
 
@@ -840,7 +842,7 @@ on.
 | `WorkflowTimeoutsAlarm` | Any execution ended `TIMED_OUT` by the execution-level bound in 5 min | `AlertsTopic` | Threshold is fixed (≥ 1); the bound itself is `WorkflowExecutionTimeoutSeconds` (default `21600`, i.e. 6 hours) |
 | `ConcurrencyCounterDriftAlarm` | Concurrency drift > 0 sustained for 15 min | `AlertsTopic` | — |
 | `ConcurrencyCounterUnderflowAlarm` | Any decrement refused because the counter was not above 0 — a slot released that was not held, either a terminal event processed twice (workflow tracker) or a compensating hand-back with nothing to hand back (queue processor) | `AlertsTopic` | — |
-| `ConcurrencyDecrementFailedAlarm` | Any compensating hand-back whose counter write **raised** rather than being refused — logged and continued by design, so each occurrence is one silently leaked slot | `AlertsTopic` | — |
+| `ConcurrencyDecrementFailedAlarm` | Any compensating hand-back whose counter write **raised** rather than being refused — logged at ERROR (`Failed to decrement counter`) and continued by design, so each occurrence is one leaked slot that until now moved no metric | `AlertsTopic` | — |
 | `ConcurrencyCounterNegativeAlarm` | Concurrency counter observed below 0 in 5 min — the ceiling is being exceeded | `AlertsTopic` | — |
 | `DocumentQueueDLQAlarm` | Any message in the document DLQ — a document that failed every retry | `AlertsTopic` | — |
 | `QueueSenderDLQAlarm` | Any message in the queue-sender DLQ — an upload that was never enqueued | `AlertsTopic` | — |
