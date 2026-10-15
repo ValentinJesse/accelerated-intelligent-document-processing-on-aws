@@ -11801,7 +11801,11 @@ Resources:
           # (Opus 5, Opus 5.5, Sonnet 4.6, Fable 5, Haiku 5.5, every openai.gpt-5.x
           # id and every eu. id are all absent), so that failure is reachable today
           # for models other than the ones listed here — tracked separately rather
-          # than closed here.
+          # than closed here. `eu.anthropic.claude-sonnet-5-5` is one more instance
+          # of that `eu.` gap and is named because it is the id a reader of this
+          # change will look for: the us. and global. profiles below cover a US or
+          # global deployment, and an EU stack configured on the eu. profile still
+          # raises.
           #
           # ⚠️ Claude Sonnet 5.5 is in BOTH maps on purpose, and it is the one id
           # where omitting it from the RPM map is WORSE than it looks. The RPM

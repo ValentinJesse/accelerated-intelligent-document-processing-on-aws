@@ -46,7 +46,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #: non-monotonicity this table exists to display: one family name, the smallest tier
 #: and the largest.
 TIERS = [
-    (512, "Opus 5, Opus 5.5, Fable 5, Haiku 5.5"),
+    (512, "Opus 5, Opus 5.5, Fable 5, Haiku 5.5, Sonnet 5.5"),
+    # Note Sonnet 5.5 is on the row ABOVE and Sonnet 5 on this one: the two Sonnets
+    # are a tier apart, so reading "Sonnet 5" here as covering both understates the
+    # newer model's caching by 2x.
     (1024, "Sonnet 5, Sonnet 4.6, Opus 4.8"),
     (2048, "Opus 4.7"),
     (4096, "Opus 4.6, Opus 4.5, Haiku 4.5"),
