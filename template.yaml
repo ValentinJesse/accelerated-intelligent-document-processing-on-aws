@@ -9482,7 +9482,7 @@ Resources:
   ConcurrencyCounterUnderflowAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: !Sub "Alert when ${AWS::StackName} tried to release a concurrency slot that was not held (the counter was not above 0). TWO functions publish this metric, so check both: the WorkflowTracker, on the terminal-event decrement, for 'Concurrency counter was already 0'; and the QueueProcessor, on a compensating hand-back after a duplicate message or a failed StartExecution, for 'Counter decrement refused'. The decrement is refused rather than driving the counter negative, so admission control is intact. Three causes: a terminal event or an SQS message processed twice; the counter edited out from under the stack; or a RECONCILED line just before, which is benign and needs no action. See docs/monitoring.md for how to tell them apart."
+      AlarmDescription: !Sub "Alert when ${AWS::StackName} tried to release a concurrency slot that was not held (the counter was not above 0). TWO functions publish this metric, so check both: the WorkflowTracker, on the terminal-event decrement, for 'Concurrency counter was already 0'; and the QueueProcessor, on a compensating hand-back after a duplicate message or a failed StartExecution, for 'Counter decrement refused'. The decrement is refused rather than driving the counter negative, so admission control is intact. Causes: a terminal event or an SQS message processed twice; the counter item edited out or never initialised, which stops admission entirely; or a RECONCILED line just before, which is benign and needs no action. See docs/monitoring.md for how to tell them apart."
       MetricName: ConcurrencyCounterUnderflow
       Namespace: !Ref AWS::StackName
       Statistic: Sum

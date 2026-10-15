@@ -167,8 +167,8 @@ Four alarms publish to `AlertsTopic`:
   publisher. The floor already prevented the damage, so this is a *correctness*
   signal: something released a slot it did not hold, and the reason is worth
   finding. Check **both** log groups for the two fragments above — a duplicate
-  terminal event and a duplicate SQS message produce the same metric. One of the
-  three causes is benign and worth ruling out first: a downward reconciliation
+  terminal event and a duplicate SQS message produce the same metric. One cause is
+  benign and worth ruling out first: a downward reconciliation
   landing between a queue-processor increment and its hand-back makes that
   hand-back a double release, because the correction is computed from the
   executions actually running and so excludes the slot about to be handed back.

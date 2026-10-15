@@ -64,9 +64,12 @@ Not read, each a deliberate miss rather than an invented finding:
   rather than appearing in the dict literal. Conditionally supplied values are
   how the #1358 fix is written, and the conservative direction here is to miss a
   defect rather than to report a correct call as broken — so note that the call
-  site this gate was written for is itself outside its reach. Issue #1461 tracks
-  closing that; until then ``update_counter``'s guard is
-  ``src/lambda/queue_processor/test_counter_decrement.py``.
+  site this gate was written for is itself outside its reach. **What this gate is
+  worth here is therefore the OTHER call sites**, every one of which it reads;
+  ``update_counter``'s own guard is
+  ``src/lambda/queue_processor/test_counter_decrement.py``, which drives both
+  directions against a real expression engine. Issue #1461 tracks closing the
+  gap.
 * The **mirror** defect — an expression referencing a placeholder that is never
   supplied, which DynamoDB also refuses (``An expression attribute value used in
   expression is not defined``). Detecting it needs the conditionally-supplied
