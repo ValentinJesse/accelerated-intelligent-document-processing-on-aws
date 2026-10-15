@@ -602,7 +602,7 @@ pricing:
         price: "3.3E-7"
       - name: cacheWriteInputTokens
         price: "4.125E-6"
-
+  
   # Claude Sonnet 5.5. Rates are the US regional / geo-CRIS band, read from the AWS
   # price list offer file for AmazonBedrockFoundationModels version 20261012084008
   # (retrieved 2026-10-14): $2.20 input / $11.00 output / $0.11 cache read / $2.75
@@ -1166,7 +1166,7 @@ pricing:
         price: "3.3E-7"
       - name: cacheWriteInputTokens
         price: "4.125E-6"
-
+  
   # Claude Sonnet 5.5, EU regional / geo-CRIS band. Identical to the us. band in the
   # price list (offer 20261012084008, retrieved 2026-10-14) — $2.20 / $11.00 / $0.11
   # / $2.75 — which is the normal shape for this file: only the global. band differs.
@@ -1495,7 +1495,7 @@ pricing:
         price: "3.0E-7"
       - name: cacheWriteInputTokens
         price: "3.75E-6"
-
+  
   # Claude Sonnet 5.5, global. band — the 1/1.1 of the us./eu. rates this file's
   # header describes: $2.00 input / $10.00 output / $0.10 cache read / $2.50
   # 5-minute cache write per 1M tokens (offer 20261012084008, retrieved

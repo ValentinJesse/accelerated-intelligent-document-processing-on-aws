@@ -11839,6 +11839,11 @@ Resources:
           # ca-central-1 (2026-10-14). ca-west-1 is UNMEASURED: this account cannot
           # reach it, and the same call fails identically there for the pre-existing
           # Sonnet 5 code L-D4FBCF4E, so nothing about these rows is special to it.
+          # That gap sits inside one the repository already records rather than
+          # beside it: docs/canada-region-model-support.md states that ca-west-1 gets
+          # ca-central-1's handling and has not been validated, and lists four
+          # picklist ids that a live check on 2026-10-13 found uncallable there. A
+          # ca-west-1 deployment is the configuration to verify these codes from.
           #
           # TPM codes read live from Service Quotas in us-east-1 on 2026-10-14:
           # L-94A31E46 "Cross-region model inference tokens per minute for Anthropic
