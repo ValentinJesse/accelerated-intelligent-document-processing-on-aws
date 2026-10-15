@@ -1724,6 +1724,22 @@ permanent, and in the state file, which is resumable.
 - ⚠️ **A turn that ends with nothing tracked ends the run**, and it looks exactly
   like a turn that ended because the work was done. Five and a half hours were lost
   to one of these. Name the live child before ending a turn.
+- ⚠️ **Evidence files go in a sibling directory, not inside the worktree — and this
+  repository's gates make that a correctness matter rather than tidiness.** Several
+  gates discover their inputs **by content**, not by filename, and an untracked file
+  is still a file: `scripts/discover_templates.sh` finds anything declaring
+  `AWSTemplateFormatVersion`, so a byte-identical copy of `template.yaml` kept under
+  the worktree as a restore-point took template discovery from 31 to **32** and
+  produced **seven red tests in suites the PR never touched** — three
+  well-architected counting tests, two log-group tests, the markdown-link gate and
+  the exemption-registry discovery test. Being untracked does not help, because
+  discovery reads the filesystem; only being **gitignored** or **outside the tree**
+  does, and `.logs/` is neither. ⚠️ **Note this cuts against the `/tmp` rule** — the
+  reason not to use `/tmp` is that it is a tmpfs competing with the test processes for
+  RAM, so the answer is a sibling path on real disk (`$HOME/wt/<runId>/m<pr>-logs`),
+  not a path inside the checkout. Say this in the brief, because the failure
+  signature is indistinguishable from a PR defect and the agent that hit it was
+  following its instructions literally.
 
 ---
 
