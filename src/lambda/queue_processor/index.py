@@ -238,18 +238,26 @@ def update_counter(increment: bool = True) -> bool:
         ClientError: If DynamoDB operation fails
     """
     logger.info(f"Updating counter: increment={increment}, max={MAX_CONCURRENT}")
-    update_args = {
+    update_args: Dict[str, Any] = {
         "Key": {"counter_id": COUNTER_ID},
         "UpdateExpression": "ADD active_count :inc",
-        "ExpressionAttributeValues": {
-            ":inc": 1 if increment else -1,
-            ":max": MAX_CONCURRENT,
-        },
+        "ExpressionAttributeValues": {":inc": 1 if increment else -1},
         "ReturnValues": "UPDATED_NEW",
     }
 
+    # ``:max`` is supplied ONLY on the path that references it. DynamoDB rejects
+    # an UpdateItem carrying an expression value no expression mentions, with
+    # ``ValidationException: Value provided in ExpressionAttributeValues unused
+    # in expressions``. Supplying it unconditionally therefore made every
+    # DECREMENT fail — the increment path was fine, because its
+    # ``ConditionExpression`` referenced it — so both compensating decrements in
+    # ``process_message`` leaked a slot each time they ran, and a repeatedly
+    # redelivered message could walk the counter up to ``MAX_CONCURRENT`` and
+    # block admission entirely until ``reconcile_counter`` or an operator
+    # corrected it (issue #1358).
     if increment:
         update_args["ConditionExpression"] = "active_count < :max"
+        update_args["ExpressionAttributeValues"][":max"] = MAX_CONCURRENT
 
     last_conflict: Optional[ClientError] = None
     for attempt in range(1, COUNTER_CONFLICT_MAX_ATTEMPTS + 1):
