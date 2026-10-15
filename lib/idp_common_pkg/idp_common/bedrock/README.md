@@ -128,6 +128,11 @@ Opus 5.5 families (including the `:1m` variants) and the Nova models — for exa
 - `us.amazon.nova-lite-v1:0`
 - `us.amazon.nova-pro-v1:0`
 
+The Canada geo profile `ca.amazon.nova-lite-v1:0` is on the list as well,
+measured in ca-central-1 (2026-10-12): a 7,530-token system prompt followed by a
+`cachePoint` reported `cacheWriteInputTokens=7530`, and an identical second call
+`cacheReadInputTokens=7530`.
+
 OpenAI GPT-5.x models are deliberately absent: they are served via the
 bedrock-mantle Responses API and handle caching in `openai_responses.py`.
 

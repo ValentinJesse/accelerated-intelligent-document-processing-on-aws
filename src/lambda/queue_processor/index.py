@@ -59,6 +59,20 @@ CB_STATE_ERROR_TRANSIENT = "ERROR_TRANSIENT"
 CB_STATE_ERROR_TERMINAL = "ERROR_TERMINAL"
 DOCUMENT_QUEUE_URL = os.environ.get("DOCUMENT_QUEUE_URL", "")
 RECOVERY_TIMEOUT_SECONDS = int(os.environ.get("RECOVERY_TIMEOUT_SECONDS", "300"))
+# How many workflows HALF_OPEN admits per window, and how long that window is.
+# A half-open breaker is supposed to admit a BOUNDED number of probes and keep
+# everything else out; these two numbers are that bound. See
+# ``_claim_half_open_probe`` for why the budget is per rolling window rather
+# than per half-open episode, and ``check_circuit_breaker`` for why these values.
+HALF_OPEN_PROBE_BUDGET = 5
+HALF_OPEN_PROBE_WINDOW_SECONDS = 60
+#: Attributes ``_claim_half_open_probe`` maintains on the breaker item. Only
+#: this function reads or writes them; the manager's
+#: ``update_circuit_breaker_state`` writes named attributes only, so it never
+#: clobbers them, and the API resolver projects an explicit field list, so they
+#: are inert to the UI.
+HALF_OPEN_PROBE_COUNT_ATTR = "half_open_probes"
+HALF_OPEN_PROBE_WINDOW_ATTR = "half_open_probe_window"
 # How long a suspected counter leak must persist across two independent samples
 # before it is corrected. Must comfortably exceed the window between an
 # increment and its execution becoming visible to ListExecutions, since during
@@ -808,6 +822,149 @@ def _emit_circuit_breaker_check_failure(classification: str) -> None:
         logger.warning(f"Could not emit circuit breaker check-failure metric: {e}")
 
 
+def _probe_window(now: Optional[float] = None) -> int:
+    """The rolling window a probe claimed at ``now`` belongs to.
+
+    An integer bucket rather than a timestamp, so the comparison in the
+    conditional writes below is a cheap ``<`` on a number that only ever
+    increases.
+    """
+    return int((time.time() if now is None else now) // HALF_OPEN_PROBE_WINDOW_SECONDS)
+
+
+def _take_probe_slot(window: int) -> bool:
+    """Claim a slot in a window another invocation already opened.
+
+    The whole decision is the ``ConditionExpression``: DynamoDB evaluates it
+    and applies the increment as one serialized operation on the item, so N
+    concurrent invocations cannot all read "0 slots used" and all proceed. The
+    ``#state`` term is part of that — a probe cannot be claimed against a
+    breaker that re-OPENED or CLOSED between the read above and this write.
+
+    Returns:
+        True if this invocation now owns a probe slot. False means the
+        condition did not hold, which this function deliberately does not try
+        to attribute: slots exhausted, a different window, or the state moved
+        are all "no slot for you".
+    """
+    try:
+        concurrency_table.update_item(
+            Key={"counter_id": CIRCUIT_BREAKER_ID},
+            UpdateExpression=(
+                f"SET {HALF_OPEN_PROBE_COUNT_ATTR} = "
+                f"{HALF_OPEN_PROBE_COUNT_ATTR} + :one"
+            ),
+            ConditionExpression=(
+                "#state = :half_open"
+                f" AND {HALF_OPEN_PROBE_WINDOW_ATTR} = :window"
+                f" AND {HALF_OPEN_PROBE_COUNT_ATTR} < :budget"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":one": 1,
+                ":half_open": CB_STATE_HALF_OPEN,
+                ":window": window,
+                ":budget": HALF_OPEN_PROBE_BUDGET,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        # Anything else (throttle, access denied, table gone) is for
+        # check_circuit_breaker's classifier to judge, exactly as a failed
+        # state read is.
+        raise
+
+
+def _open_probe_window(window: int) -> bool:
+    """Claim the FIRST slot of a window nobody has opened yet.
+
+    The condition is ``<`` and not ``<>`` on purpose. The window number is
+    monotonic, so a laggard invocation — a cold start whose clock is behind, a
+    message that sat in the queue — must never be able to pull the window
+    *backwards*, which would hand out a second full budget inside one window.
+    An older recorded window (left over from a previous half-open episode, or
+    from before the breaker last closed) is replaced, which is what makes the
+    budget replenish without anything having to clean up after itself.
+
+    Returns:
+        True if this invocation opened the window and owns its first slot.
+    """
+    try:
+        concurrency_table.update_item(
+            Key={"counter_id": CIRCUIT_BREAKER_ID},
+            UpdateExpression=(
+                f"SET {HALF_OPEN_PROBE_COUNT_ATTR} = :one,"
+                f" {HALF_OPEN_PROBE_WINDOW_ATTR} = :window"
+            ),
+            ConditionExpression=(
+                "#state = :half_open"
+                f" AND (attribute_not_exists({HALF_OPEN_PROBE_WINDOW_ATTR})"
+                f" OR {HALF_OPEN_PROBE_WINDOW_ATTR} < :window)"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":one": 1,
+                ":half_open": CB_STATE_HALF_OPEN,
+                ":window": window,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _claim_half_open_probe() -> bool:
+    """Try to claim one of HALF_OPEN's bounded probe slots.
+
+    **The budget is per rolling window, not per half-open episode**, and that
+    is the load-bearing design choice rather than an approximation of one. The
+    trickle a window budget allows is what detects recovery: the first probe
+    that completes successfully closes the breaker
+    (``workflow_tracker.notify_circuit_breaker``), and nothing in this state
+    reports a probe *failure*, so the only way to find out that the service is
+    back is to keep trying. A per-episode budget stops the trying — once spent
+    with no success, nothing further is admitted for the rest of the episode —
+    and a window budget keeps it going at a fixed, bounded rate for as long as
+    the breaker is half-open.
+
+    How bad "the rest of the episode" is depends on what ends an episode, and
+    that is why this reads as a trade rather than a deadlock: the manager's
+    ``handle_half_open_timeout`` returns an episode that no probe closed to
+    OPEN (issue #1437), so an episode is bounded in time. Without that bound a
+    spent per-episode budget would have refused every document indefinitely,
+    with the service free to recover and nothing left to notice. A per-episode
+    budget is therefore a viable alternative now, and switching to one is a
+    separate decision: this one needs no coordination with the episode length,
+    and the two numbers below replenish without anything cleaning up after an
+    episode.
+
+    Three writes at most, and only in HALF_OPEN:
+
+    1. Take a slot in a window that is already open.
+    2. If there is no such window, open this one and take its first slot.
+    3. If *that* lost the race, retry (1) — the winner of (2) only consumed
+       one slot, so a budget above 1 still has room and refusing here would
+       throttle below the configured budget.
+
+    Returns:
+        True if a slot was claimed and the workflow may start.
+
+    Raises:
+        ClientError / BotoCoreError: anything that is not a conditional-check
+            failure, for ``check_circuit_breaker`` to classify.
+    """
+    window = _probe_window()
+    return (
+        _take_probe_slot(window)
+        or _open_probe_window(window)
+        or _take_probe_slot(window)
+    )
+
+
 def check_circuit_breaker() -> tuple[bool, str]:
     """
     Check if the circuit breaker allows new workflows.
@@ -875,6 +1032,38 @@ def check_circuit_breaker() -> tuple[bool, str]:
     specific to *this read* — a permissions boundary or scoped-down policy that
     allows ``UpdateItem`` and not ``GetItem``, say.
 
+    **HALF_OPEN admits a bounded number of probes** (issue #934, item 4b), not
+    everything. It used to return ``True`` unconditionally with a log line
+    calling the traffic "probe traffic", which made the state a no-op gate: the
+    breaker spent a whole outage admitting 100% of documents into the failing
+    dependency, which is the opposite of what it exists for. HALF_OPEN is also
+    bounded in *time* by the manager's ``handle_half_open_timeout``, which
+    returns an episode that no probe closed to OPEN (issue #1437), so it is a
+    window the breaker passes through rather than a state it rests in — which
+    is what makes a bounded trickle the right admission rate for it.
+
+    ``HALF_OPEN_PROBE_BUDGET`` workflows per ``HALF_OPEN_PROBE_WINDOW_SECONDS``
+    are admitted and the rest are refused, claimed atomically — see
+    ``_claim_half_open_probe``, including why the budget is per window rather
+    than per half-open episode.
+
+    **Why 5 per 60 s.** One probe per window would be enough to *detect*
+    recovery, because a single successful workflow closes the breaker, but it
+    makes that detection hostage to one document: a probe that fails for its
+    own reasons (a malformed PDF, an extraction error) would cost a whole
+    window. Five gives recovery several independent chances a minute while
+    still bounding admitted work to roughly 5 documents a minute against a
+    default ``MaxConcurrentWorkflows`` of 100 continuously in flight. The cost
+    of the bound is paid only while the breaker is half-open, and only until
+    one probe completes — on the order of one document's latency — after which
+    the breaker closes and the cap is gone.
+
+    A refused probe is NOT given extended visibility the way an ``OPEN``
+    refusal is. The next window is at most ``HALF_OPEN_PROBE_WINDOW_SECONDS``
+    away, which the queue's 60 s visibility timeout already matches, and
+    pushing refusals to ``RECOVERY_TIMEOUT_SECONDS`` would throttle probes far
+    below the budget and slow recovery detection to that interval.
+
     Nothing here runs on a default deployment: ``CircuitBreakerEnabled``
     defaults to ``"false"``, which makes ``CIRCUIT_BREAKER_ENABLED`` false and
     returns before the table is touched at all.
@@ -905,8 +1094,20 @@ def check_circuit_breaker() -> tuple[bool, str]:
             logger.warning("Circuit breaker is OPEN - blocking new workflows")
             return False, state
         elif state == CB_STATE_HALF_OPEN:
-            logger.info("Circuit breaker is HALF_OPEN - allowing probe traffic")
-            return True, state
+            if _claim_half_open_probe():
+                logger.info(
+                    f"Circuit breaker is HALF_OPEN - admitting this workflow as one "
+                    f"of at most {HALF_OPEN_PROBE_BUDGET} probes per "
+                    f"{HALF_OPEN_PROBE_WINDOW_SECONDS}s"
+                )
+                return True, state
+            logger.warning(
+                f"Circuit breaker is HALF_OPEN and its probe budget "
+                f"({HALF_OPEN_PROBE_BUDGET} per {HALF_OPEN_PROBE_WINDOW_SECONDS}s) "
+                f"is spent - blocking this workflow; the message returns to "
+                f"DocumentQueue and retries"
+            )
+            return False, state
 
         return True, state
 

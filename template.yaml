@@ -368,6 +368,7 @@ Parameters:
       - "eu.amazon.nova-2-lite-v1:0:priority"
       - "eu.amazon.nova-2-lite-v1:0:flex"
       - "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "ca.amazon.nova-lite-v1:0"
       - "qwen.qwen3-vl-235b-a22b"
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -383,7 +384,7 @@ Parameters:
       - "amazon.nova-lite-v1:0"
       - "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-    Description: Model to use for optional Document Knowledge Base. Model access MUST be enabled in Amazon Bedrock. Note - not every listed model is available in all EU regions. GovCloud deployments must use one of the GovCloud-verified entries above (amazon.nova-pro-v1:0, amazon.nova-lite-v1:0, or us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0) — the commercial default is overridden automatically by the --govcloud template transform.
+    Description: Model to use for optional Document Knowledge Base. Model access MUST be enabled in Amazon Bedrock. Note - not every listed model is available in all EU regions. Canada deployments left at the default use ca.amazon.nova-lite-v1:0 automatically, because the default has no inference profile there; an explicit choice is passed through unchanged and must be callable from the stack's region. GovCloud deployments must use one of the GovCloud-verified entries above (amazon.nova-pro-v1:0, amazon.nova-lite-v1:0, or us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0) — the commercial default is overridden automatically by the --govcloud template transform.
 
   # Optional - Post processing Lambda hook
   PostProcessingLambdaHookFunctionArn:
@@ -479,8 +480,19 @@ Parameters:
   MaxConcurrentWorkflows:
     Type: Number
     Default: 100
-    Description: Maximum number of concurrent workflow executions allowed
+    Description: >-
+      Maximum number of concurrent workflow executions allowed. The queue
+      processor admits a document only while the concurrency counter is below
+      this value, so it is the deployment's throughput ceiling and, because the
+      dominant cost here is per-document inference, its spend-rate ceiling too.
+      The upper bound of 10000 is a typo guard, not a capacity opinion: it is two
+      orders of magnitude above the default and far above what the pipeline can
+      sustain in a default account (each workflow holds several concurrent Lambda
+      invocations, and the account-level Lambda concurrency limit starts at
+      1000), so it rejects a slipped digit at submit time while leaving every
+      realistic value available.
     MinValue: 1
+    MaxValue: 10000
 
   DataRetentionInDays:
     Type: Number
@@ -1315,6 +1327,15 @@ Conditions:
   ShouldCreateDocumentKnowledgeBase:
     !Equals [ !Ref DocumentKnowledgeBase, "BEDROCK_KNOWLEDGE_BASE (Create)" ]
   ShouldUseDocumentKnowledgeBase: !Condition ShouldCreateDocumentKnowledgeBase
+  # Canada stacks left at the KnowledgeBaseModelId default pass the Canada geo
+  # profile of Nova Lite to the API stack: the default, us.amazon.nova-pro-v1:0,
+  # has no inference profile in Canada, so RetrieveAndGenerate fails there. An
+  # explicit choice is passed through unchanged.
+  UseCanadaKnowledgeBaseModel: !And
+    - !Or
+      - !Equals [ !Ref "AWS::Region", "ca-central-1" ]
+      - !Equals [ !Ref "AWS::Region", "ca-west-1" ]
+    - !Equals [ !Ref KnowledgeBaseModelId, "us.amazon.nova-pro-v1:0" ]
   DocumentSectionsCrawlerScheduleEnabled:
     !Not [ !Equals [ !Ref DocumentSectionsCrawlerFrequency, "Manual" ] ]
   HasPermissionsBoundary: !Not [ !Equals [ !Ref PermissionsBoundaryArn, "" ] ]
@@ -3045,7 +3066,10 @@ Resources:
         HasGuardrailConfig: !If [HasGuardrailConfig, "true", "false"]
         BedrockGuardrailId: !Ref BedrockGuardrailId
         BedrockGuardrailVersion: !Ref BedrockGuardrailVersion
-        KnowledgeBaseModelId: !Ref KnowledgeBaseModelId
+        KnowledgeBaseModelId: !If
+          - UseCanadaKnowledgeBaseModel
+          - "ca.amazon.nova-lite-v1:0"
+          - !Ref KnowledgeBaseModelId
         ShouldCreateEvaluationBaselineBucket: !If [ShouldCreateEvaluationBaselineBucket, "true", "false"]
         ShouldCreateReportingBucket: !If [ShouldCreateReportingBucket, "true", "false"]
                 
@@ -11768,8 +11792,8 @@ Resources:
           # Token calculation
           MIN_TOKENS_PER_REQUEST: "500"
           # Bedrock model quota codes (TPM and RPM)
-          BEDROCK_MODEL_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-7C42E72A","us.amazon.nova-pro-v1:0":"L-C0326783","us.amazon.nova-2-lite-v1:0":"L-C6F5908D","global.amazon.nova-2-lite-v1:0":"L-C6F5908D","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","us.anthropic.claude-sonnet-4-20250514-v1:0":"L-59759B4A","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-BD85BFCD","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9"}'
-          BEDROCK_MODEL_RPM_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-89F8391A","us.amazon.nova-pro-v1:0":"L-ED46B8C5","us.amazon.nova-2-lite-v1:0":"L-F06F1187","global.amazon.nova-2-lite-v1:0":"L-F06F1187","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","us.anthropic.claude-sonnet-4-20250514-v1:0":"L-559DCC33","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-7EC72A47","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42"}'
+          BEDROCK_MODEL_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-7C42E72A","us.amazon.nova-pro-v1:0":"L-C0326783","us.amazon.nova-2-lite-v1:0":"L-C6F5908D","global.amazon.nova-2-lite-v1:0":"L-C6F5908D","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-BD85BFCD","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-58BE175A","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-F4DDD3EB","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-7007E9C9"}'
+          BEDROCK_MODEL_RPM_QUOTA_CODES: '{"us.anthropic.claude-sonnet-5":"L-D4FBCF4E","global.anthropic.claude-sonnet-5":"L-DD84E5CA","us.amazon.nova-lite-v1:0":"L-89F8391A","us.amazon.nova-pro-v1:0":"L-ED46B8C5","us.amazon.nova-2-lite-v1:0":"L-F06F1187","global.amazon.nova-2-lite-v1:0":"L-F06F1187","us.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","us.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","us.anthropic.claude-opus-4-1-20250805-v1:0":"L-7EC72A47","us.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42","global.anthropic.claude-haiku-4-5-20251001-v1:0":"L-CCA5DF70","global.anthropic.claude-sonnet-4-5-20250929-v1:0":"L-4A6BFAB1","global.anthropic.claude-opus-4-5-20251101-v1:0":"L-27989F42"}'
       Policies:
         - Statement:
             - Effect: Allow
@@ -13254,17 +13278,28 @@ Resources:
         # `page.ImageUri` (Output), `FileViewer` defaults to `presignVia: 'client'`
         # against `settings.InputBucket`, and `presignForExport` signs client-side
         # for exactly those two and routes every other bucket to the resolver.
-        # Narrowing those is the document-bucket half of this, which needs the read
-        # path redesigned rather than the grant trimmed
+        # Removing the buckets themselves is the document-bucket half of this, which
+        # needs the read path redesigned rather than the grant trimmed
         # ([#1033](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1033)).
+        #
+        # What it grants on them is object read and nothing else: `s3:GetObject` and
+        # `s3:GetObjectVersion` authorize on a key the caller already holds.
+        # `s3:ListBucket` was granted here too and is not any more — it produces keys
+        # rather than needing one, so it widens "read a document you hold a key for"
+        # into "read every document", and on this role that reach belongs to every
+        # signed-in user with no resolver in the path to bound either half. It had no
+        # consumer: the browser issues no list request, since its only S3 dependency
+        # is `@aws-sdk/s3-request-presigner` and a presigned GET does not list. The
+        # Resource list is object ARNs only for the same reason — see the note on it
+        # below. `scripts/tests/test_browser_s3_grants.py` keeps the verb off.
         #
         # It does NOT name the Configuration bucket, and must not. That bucket holds
         # `config_revisions/<profile>/<nnnnnn>.json.gz` — every configuration
         # profile's full revision history, prompts and few-shot examples included —
         # and which profiles a user may see is their `allowedConfigVersions`, a
-        # per-user boundary no IAM grant on this shared role can express. Granted
-        # here it was also `s3:ListBucket`, so the profile names did not have to be
-        # known in advance.
+        # per-user boundary no IAM grant on this shared role can express. While it was
+        # named here the grant still carried `s3:ListBucket`, so the profile names did
+        # not have to be known in advance either.
         #
         # No UI code path reads it. What that rests on is the **call sites**, not on
         # the bucket name being unavailable: the browser holds no S3 API client at all
@@ -13294,11 +13329,12 @@ Resources:
                   # page images. Without it, versioned image loads get
                   # AccessDenied and render blank.
                   - "s3:GetObjectVersion"
-                  - "s3:ListBucket"
+                # Object ARNs only. Both actions above act on an object, so a bare
+                # bucket ARN authorizes nothing — it was here for s3:ListBucket, a
+                # bucket-level action, and is removed with it rather than left to read
+                # as a grant that does something.
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}"
                   - !Sub "arn:${AWS::Partition}:s3:::${OutputBucket}/*"
-                  - !Sub "arn:${AWS::Partition}:s3:::${InputBucket}"
                   - !Sub "arn:${AWS::Partition}:s3:::${InputBucket}/*"
               - Effect: Allow
                 Action:

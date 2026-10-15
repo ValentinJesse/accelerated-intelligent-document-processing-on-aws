@@ -286,6 +286,10 @@ export default defineConfig({
               label: "EU Region Model Support",
               slug: "eu-region-model-support",
             },
+            {
+              label: "Canada (Central) Model Support",
+              slug: "canada-region-model-support",
+            },
             { label: "OpenAI Models", slug: "openai-models" },
             { label: "xAI Grok Models", slug: "grok-models" },
           ],

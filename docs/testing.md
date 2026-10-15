@@ -336,10 +336,10 @@ path-filtered, and `Test Results` is a check run an action creates behind an `if
 so none of them reports on every PR and requiring one would leave a check pending
 forever and block every merge.
 
-Three details are worth knowing about what it reads. Eight of the ten shared gates
+Three details are worth knowing about what it reads. Ten of the twelve shared gates
 live in `developer-tests.yml` and the other two — the SRT scan and the dependency
 audit — in `security-checks.yml`; because a context is a *job*, and those two
-workflows hold four and two jobs respectively, the ten gates produce six
+workflows hold four and two jobs respectively, the twelve gates produce six
 requireable contexts. ⚠️ **Requiring only the lint context is therefore weaker than
 it looks**: the test suites are their own contexts, so all six have to be required
 for a red test run to block a merge. It reads **both** enforcement mechanisms,
@@ -387,6 +387,20 @@ make ui-build       # lint + typecheck + production Vite build
 
 Both CIs run the Vitest suite. Nothing in this layer opens a browser — that is
 layer 6's UX review, and it is the only tier in the repo that does.
+
+**If you are splitting a local run across lanes, note that these two share
+`src/ui/node_modules` with `make lint-cicd`.** Both reinstall that directory with
+`npm ci`, which deletes it before rebuilding it, and so do the three UI targets
+`lint-cicd` performs itself (`ui-lint`, `ui-build-only`, `codegen-check`) — so
+"lint in one lane, UI tests in another" is two lanes writing one directory, which
+is how three gates once went red with three unrelated-looking missing-module
+errors. Every one of those targets now takes an exclusive lock on that directory,
+so the second lane waits rather than racing; it tells you it is waiting, and it
+gives up with an error after a bounded wait instead of hanging. The cost in a
+single serial run is one `flock` and no output. Neither CI is affected either way:
+both split these gates across separate runners with separate checkouts, so nothing
+there contends. See the comment above the UI section of the `Makefile` and
+`scripts/ui_deps_lock.sh`.
 
 ## 4. Security scanning (SAST and SCA)
 

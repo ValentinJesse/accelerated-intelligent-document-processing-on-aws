@@ -331,23 +331,307 @@ def generate_stack_name():
     return f"idp-{timestamp}"
 
 
-def cleanup_stale_bda_blueprints():
-    """Delete BDA projects, blueprint versions, and blueprints whose stacks are no longer active"""
-    print("🧹 Cleaning up stale BDA blueprints...")
-    try:
-        bda_client = boto3.client("bedrock-data-automation")
-        cf_client = boto3.client("cloudformation")
+# ---------------------------------------------------------------------------
+# Step 0 startup sweeps: the shared outcome vocabulary
+#
+# Every `cleanup_stale_*` reaper in this module reaps resources leaked by PRIOR
+# runs, and all six of them used to answer the same question the same wrong way.
+# Each had a single top-level `except Exception` whose body was one `print`,
+# returned no value, and was called from `main()` as a bare statement — so a run
+# whose enumeration was refused considered ZERO targets, established nothing
+# about the account, and ended green, indistinguishable from a run that
+# enumerated and found nothing to reap. One `⚠️` line on an otherwise-green
+# nightly is not read, which is why that went unnoticed for months (#1391).
+#
+# #1433 removed the shape from the bucket sweep. This is the same removal for
+# the rest of the class (#1434).
+#
+# Three states, and the third is load-bearing:
+#   * `[]`     — the sweep demonstrably ran: it enumerated its targets and
+#                considered every one of them. "Nothing to reap" is this state.
+#   * `[...]`  — it did not. Either the enumeration failed outright, or iteration
+#                gave out part-way and the targets past that point were never
+#                looked at. Partial is not clean.
+#   * `None`   — the caller does not have the result. Distinct because folding it
+#                into `[]` reproduces the defect one level up: a table that
+#                reports a sweep fine because nothing told it otherwise.
+#
+# What is NOT a finding: one resource that would not delete. That is legitimately
+# best effort — the loop names it, the rest are still reaped, the next run tries
+# again — and one stuck resource must not cost a night's deploy.
+#
+# None of them raises, and that contract is deliberate rather than inherited:
+# these are Step 0, so raising would abandon the deploy, the suite and the
+# teardown before any of them produced a signal. The outcome reaches the verdict
+# through `main()`'s consolidated status table instead of through control flow.
+#
+# The transient class is handled in the client rather than at the decision point:
+# every sweep's clients carry `_THROTTLE_RETRY_CONFIG` (adaptive, 10 attempts),
+# so `SlowDown`/`Throttling`/5xx is retried and what reaches a handler is a
+# durable condition — a denied call, expired credentials, a region or account the
+# role cannot read. That is the premise every fail-closed handler below decides
+# on, and it is derived rather than asserted in prose: the per-client check in
+# `tests/test_startup_sweep_outcomes.py` walks the call graph out from
+# STARTUP_SWEEPS, asserts one case per client construction in that closure, and
+# names any built without the config — so a new one added under a sweep fails
+# there instead of making this paragraph false again (#1445). Read the count off
+# that walk rather than from here: several clients were missing it when the check
+# was written, including the retention-marker read and the ownership probe both
+# the bucket and policy sweeps enumerate through, and a number in this comment
+# would start going stale on the next client added.
+#
+# The retention-marker WRITE (`retain_failed_stack`) is covered by the same check
+# through a stated root rather than a call edge, because the sweeps read what it
+# writes: a throttle there tears down the stack a failed run asked to keep.
+#
+# That premise is what a handler may decide ON; it is not a licence to treat
+# every unanswerable condition as the permissive answer. Where a call did not
+# answer, the item is left alone and reported in its own counter — the age gates
+# (`_listing_age_seconds`) and the retention-marker read (`_retention_markers`)
+# both do this, and the second splits by WHICH call failed, since a marker whose
+# body cannot be parsed is genuinely one nobody can understand while a marker
+# whose read was refused says nothing either way (#1445).
+# ---------------------------------------------------------------------------
 
-        active_statuses = {
-            "CREATE_IN_PROGRESS",
-            "CREATE_COMPLETE",
-            "UPDATE_IN_PROGRESS",
-            "UPDATE_COMPLETE",
-            "UPDATE_ROLLBACK_COMPLETE",
-            "UPDATE_ROLLBACK_IN_PROGRESS",
-            "IMPORT_IN_PROGRESS",
-            "IMPORT_COMPLETE",
-        }
+#: Opens every Step 0 sweep finding, so the outcome is readable by something
+#: other than a reader noticing an emoji in a six-figure-line build log.
+#:
+#: Spelled with no word from exemption_discovery.NAME_VOCABULARY — it is the
+#: opposite of a carve-out, and a registry entry could say nothing useful
+#: about it.
+SWEEP_NOT_COMPLETED = "SWEEP NOT COMPLETED:"
+
+#: The name #1433 gave this marker while the bucket sweep was the only one
+#: returning an outcome. Kept so that change's assertions keep naming what they
+#: were written against, now that all six share the one marker.
+STALE_BUCKET_SWEEP_FINDING = SWEEP_NOT_COMPLETED
+
+
+def _sweep_finding(detail):
+    """A Step 0 sweep's "I did not complete" outcome: printed, and returned."""
+    finding = f"{SWEEP_NOT_COMPLETED} {detail}"
+    print(f"❌ {finding}")
+    return [finding]
+
+
+#: One Step 0 sweep. `func` is its name in this module, `label` the label its row
+#: carries in the consolidated status table, `fails_run` whether a sweep that did
+#: not complete ends the run red, and `why` the reason for that one decision.
+StartupSweep = namedtuple("StartupSweep", "func label fails_run why")
+
+#: The Step 0 sweeps. `fails_run` is a judgement **per member** carrying its own
+#: `why`, because the consequence of an inert sweep differs by an order of
+#: magnitude across these and one reason covering all six would be false for at
+#: least one of them. Read by `main()`, by `build_consolidated_summary` and by
+#: the tests, so a sweep this module grows later is either wired into the verdict
+#: or fails rather than passing quietly.
+STARTUP_SWEEPS = (
+    StartupSweep(
+        func="cleanup_stale_bda_blueprints",
+        label="Stale BDA blueprint sweep",
+        fails_run=False,
+        why=(
+            "Reported in the table, not fatal. An inert sweep here leaves idp- "
+            "Bedrock Data Automation blueprints and projects behind, and whether "
+            "that reaches an account quota has not been measured here. Ending a "
+            "night's run red on a consequence nobody has established would "
+            "assert a severity this repository cannot support, so it gets the "
+            "row — which is what #1391 was actually about, a log line nobody "
+            "read — and not the exit code. Measuring a quota is what would flip "
+            "this, in this one place. The decision survives this sweep's second "
+            "finding source unchanged: a prefix whose liveness cannot be read is "
+            "left in place (#1440), so what that costs is the same unmeasured "
+            "leak the rest of this reason is about."
+        ),
+    ),
+    StartupSweep(
+        func="cleanup_stale_apigw_test_vpcs",
+        label="Stale apigw test VPC sweep",
+        fails_run=True,
+        why=(
+            "Fatal. The ceiling is five VPCs per region and this sweep is the "
+            "only thing that removes the `*-apigw-vpc` stacks a failed manual "
+            "VPC test leaves behind, so an inert sweep walks the account into a "
+            "bound that fails every VPC-requiring deploy — and VPC teardown has "
+            "its own orphaned-ENI mode, so what it leaves gets harder to remove "
+            "the longer it sits. The limit is stated in this reaper's own stuck- "
+            "stack message, so the consequence is in the tree rather than "
+            "assumed."
+        ),
+    ),
+    StartupSweep(
+        func="cleanup_stale_idp_stacks",
+        label="Stale idp- stack sweep",
+        fails_run=True,
+        why=(
+            "Fatal, and the most serious of the six. A leaked stack holds every "
+            "resource inside it, so an inert sweep leaks buckets, tables, roles, "
+            "log groups and ENIs transitively — one leaked run costs ~122 IAM "
+            "roles against the account's RolesPerAccount quota, and this "
+            "reaper's docstring records the time that accumulated far enough to "
+            "fail every deploy in the account. Nothing else converges those: a "
+            "run whose own teardown was interrupted is exactly the run that "
+            "cannot clean up after itself."
+        ),
+    ),
+    StartupSweep(
+        func="cleanup_stale_idp_buckets",
+        label="Stale idp- bucket sweep",
+        fails_run=True,
+        why=(
+            "Fatal; the decision #1433 took and the reason this registry exists. "
+            "This is the only thing that removes the test buckets CloudFormation "
+            "cannot, because a non-empty bucket survives its own stack's "
+            "deletion, so an inert sweep reaps nothing on every run and the cost "
+            "accrues against an account nobody is watching."
+        ),
+    ),
+    StartupSweep(
+        func="cleanup_stale_idp_policies",
+        label="Orphaned idp- IAM policy sweep",
+        fails_run=True,
+        why=(
+            "Fatal, on terms `main()` has already settled for this same resource "
+            "class: a leaked IAM pre-stack or managed policy fails the run when "
+            "the teardown verification finds one, and an inert sweep is how the "
+            "ones a PRIOR run leaked stay leaked. Both names it reaps outlive "
+            "their run permanently — no stack owns either, so the stack sweep "
+            "cannot see them and nothing else will ever take them."
+        ),
+    ),
+    StartupSweep(
+        func="cleanup_stale_ci_diagnostics",
+        label="CI diagnostics expiry",
+        fails_run=False,
+        why=(
+            "Reported in the table, not fatal, and this is the member a blanket "
+            "'a leak reaches a quota' reason would be wrong about. The cost of "
+            "an inert expiry is S3 storage for evidence bundles past their "
+            "30-day window and nothing else: no quota, no deploy, no test. "
+            "Ending a run red over that is disproportionate, and a red mark whose "
+            "cause is month-old diagnostics objects is how a reader learns to "
+            "stop reading the verdict — the failure mode #1391 was."
+        ),
+    ),
+)
+
+
+def _report_sweep_not_completed(func, findings):
+    """Print, and return, the one-line reason a Step 0 sweep failed the run.
+
+    The print is unconditional while the returned reason is a candidate: `main()`
+    keeps the first reason it has, so a real deploy failure is never masked, but
+    a sweep that did not complete says so in the log either way.
+
+    The sweep is named from STARTUP_SWEEPS rather than passed in, so the reason a
+    reader is sent after cannot drift from the row they will look at.
+    """
+    label = next((s.label for s in STARTUP_SWEEPS if s.func == func), func)
+    reason = f"{label} did not complete: {'; '.join(findings)}"
+    print(f"❌ {reason}")
+    return reason
+
+
+def _first_failure_reason(existing, candidate):
+    """Keep the run's FIRST one-line root cause; a later one is a candidate only.
+
+    A function rather than an inline `existing or candidate`, because this is the
+    one decision in the verdict that a mutation sample could not kill: inverting
+    it mis-attributes the 💥 line and the failure email without changing whether
+    the run fails, so nothing short of running `main()` end to end notices. Named
+    here, it is one site with a direct test instead of one per caller with none.
+    """
+    return existing or candidate
+
+
+#: The CloudFormation error code for a stack that is not there. `DescribeStacks`
+#: models no error shapes at all, so botocore raises a generic `ClientError` and
+#: the code has to be read off the payload — which is also what makes a gone
+#: stack indistinguishable from a throttle or a denial at the bare `except`. The
+#: API reference states this code: "If the stack doesn't exist, a
+#: ValidationError is returned."
+_STACK_GONE_ERROR_CODE = "ValidationError"
+
+#: ...and the message fragment that says a `ValidationError` is about the
+#: stack's EXISTENCE rather than about the request. `ValidationError` is
+#: CloudFormation's catch-all 400 — a malformed stack name arrives under it, and
+#: so does `Parameters: [X] do not exist in the template` on a neighbouring
+#: operation — so the code by itself does not establish absence on a path that
+#: deletes. Two other call sites here already draw the line in the same place:
+#: `_iam_stack_presence` below, and the feature launch-URL resolver in
+#: `feature-platform/main-stack-extensions/lambdas/get_feature_launch_url`.
+#:
+#: The cost of requiring the message is worth stating in the direction it falls:
+#: were CloudFormation to reword it, every prefix would read as unanswered, so
+#: the sweep would reap nothing AND report a finding every run. Inert and loud,
+#: rather than over-eager and quiet.
+_STACK_GONE_MESSAGE = "does not exist"
+
+
+def _run_stack_liveness(cf_client, stack_name, active_statuses):
+    """(active, detail) for a run's stack — True, False, or None for unanswered.
+
+    `None` is the state this function exists to produce, and a caller that
+    deletes on the answer has to read it as "leave this one alone".
+    `describe_stacks` raises `ClientError` both for a stack that genuinely is
+    not there, which really does mean the run is over, and for `Throttling`,
+    `ThrottlingException`, `RequestLimitExceeded`, `AccessDenied`, expired
+    credentials and anything else. Only the first says the run is over, and a
+    handler that collapses the two reaches for the one answer that permits
+    deleting an in-flight run's resources — at precisely the moment that answer
+    is most likely to be wrong, since a `DescribeStacks` is throttled when
+    several runs are in flight (#1440).
+
+    So absence is established positively, by the error code AND the message, and
+    every other outcome answers None — an unrecognised code included, because
+    the safe branch is the one an unfamiliar condition has to take. `detail` is
+    the reason, for the caller to put in its finding.
+    """
+    try:
+        resp = cf_client.describe_stacks(StackName=stack_name)
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == _STACK_GONE_ERROR_CODE and _STACK_GONE_MESSAGE in str(e):
+            return False, ""
+        return None, f"{code or type(e).__name__}: {e}"
+
+    stacks = resp.get("Stacks") or []
+    if not stacks:
+        # Asked about a named stack, DescribeStacks either answers with it or
+        # raises, so an empty list is a response this code cannot read rather
+        # than an absence it can act on.
+        return None, "DescribeStacks answered with no stack and no error"
+    return stacks[0].get("StackStatus", "") in active_statuses, ""
+
+
+def cleanup_stale_bda_blueprints():
+    """Delete BDA projects, blueprint versions, and blueprints whose stacks are no longer active.
+
+    TWO enumerations — `list_blueprints` and `list_data_automation_projects` —
+    and either failing leaves nothing to sweep, so both sit in one block and both
+    produce a finding. Returns the Step 0 sweep outcome described at
+    STARTUP_SWEEPS: an empty list only if both listings answered and every idp-
+    blueprint and project in them was considered. Never raises.
+
+    "Considered" includes the per-prefix liveness question, which is the second
+    way this sweep can fail to complete: a prefix whose `DescribeStacks` could
+    not be answered is left in place AND reported, rather than read as a run that
+    is over. See `_run_stack_liveness` for why that direction is the only safe
+    one on a path that deletes (#1440).
+
+    One blueprint or project that would not delete stays best effort and is NOT a
+    finding — the loops below name it and the next run takes it.
+    """
+    print("🧹 Cleaning up stale BDA blueprints...")
+
+    # Enumeration, in its own block: everything below is about the blueprints and
+    # projects these two listings returned, so a failure here means there is no
+    # sweep to report on.
+    try:
+        bda_client = boto3.client(
+            "bedrock-data-automation", config=_THROTTLE_RETRY_CONFIG
+        )
+        cf_client = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
 
         # Collect all idp- blueprints and projects
         paginator = bda_client.get_paginator("list_blueprints")
@@ -365,30 +649,59 @@ def cleanup_stale_bda_blueprints():
             arn = p.get("projectArn", "")
             if name.startswith("idp-"):
                 projects.append((name, arn))
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "could not enumerate the account's BDA blueprints and projects, so 0 "
+            "of an unknown number of stale idp- ones were considered and none "
+            f"was deleted: {e}"
+        )
+
+    try:
+        active_statuses = {
+            "CREATE_IN_PROGRESS",
+            "CREATE_COMPLETE",
+            "UPDATE_IN_PROGRESS",
+            "UPDATE_COMPLETE",
+            "UPDATE_ROLLBACK_COMPLETE",
+            "UPDATE_ROLLBACK_IN_PROGRESS",
+            "IMPORT_IN_PROGRESS",
+            "IMPORT_COMPLETE",
+        }
 
         if not blueprints and not projects:
             print("✅ No stale BDA resources found")
-            return
+            return []
 
-        # Check stack status for each unique stack prefix
+        # Check stack status for each unique stack prefix. THREE answers rather
+        # than two — live, established gone, and unanswered — and only the middle
+        # one may lead to a delete. See _run_stack_liveness.
         stack_cache = {}
+        liveness_unanswered = {}
         for name, _ in blueprints + projects:
             parts = name.split("-")
             if len(parts) >= 3:
                 prefix = f"{parts[0]}-{parts[1]}-{parts[2]}"
                 if prefix not in stack_cache:
-                    try:
-                        resp = cf_client.describe_stacks(StackName=prefix)
-                        status = resp["Stacks"][0]["StackStatus"]
-                        stack_cache[prefix] = status in active_statuses
-                    except cf_client.exceptions.ClientError:
-                        stack_cache[prefix] = False
+                    active, detail = _run_stack_liveness(
+                        cf_client, prefix, active_statuses
+                    )
+                    stack_cache[prefix] = active
+                    if active is None:
+                        liveness_unanswered[prefix] = detail
 
         def _is_stale(name):
+            """Stale only where the run's stack is POSITIVELY established gone.
+
+            `is False` rather than a falsy test: the cache's third value is None
+            for a prefix whose liveness could not be read, `not None` is True,
+            and that hands an unanswerable question the one answer that deletes
+            an in-flight run's blueprints (#1440). A prefix missing from the
+            cache answers None here too, for the same reason.
+            """
             parts = name.split("-")
-            if len(parts) >= 3:
-                return not stack_cache.get(f"{parts[0]}-{parts[1]}-{parts[2]}", False)
-            return False
+            if len(parts) < 3:
+                return False
+            return stack_cache.get(f"{parts[0]}-{parts[1]}-{parts[2]}") is False
 
         # Step 1: Delete projects first (blueprints are referenced by projects)
         deleted_projects = 0
@@ -422,11 +735,37 @@ def cleanup_stale_bda_blueprints():
                     print(f"  ⚠️ Failed to delete blueprint {name}: {e}")
                     time.sleep(0.5)
 
+        live = sum(1 for active in stack_cache.values() if active)
         print(
-            f"✅ Cleaned up {deleted_projects} projects, {deleted_bps} blueprints (skipped active stacks)"
+            f"✅ Cleaned up {deleted_projects} projects, {deleted_bps} blueprints "
+            f"(skipped {live} live run(s), {len(liveness_unanswered)} unanswered)"
         )
-    except Exception as e:
-        print(f"⚠️ BDA blueprint cleanup failed: {e}")
+        if liveness_unanswered:
+            # Not an enumeration failure and not a stuck delete: the listings
+            # answered and nothing was refused, but for these prefixes the
+            # question "is this run still going?" has no answer, so their
+            # blueprints and projects were left where they are. A sweep that
+            # could not establish liveness for part of what it listed has not
+            # completed, and saying so is the whole of what this costs.
+            detail = "; ".join(
+                f"{prefix} ({why})"
+                for prefix, why in sorted(liveness_unanswered.items())
+            )
+            return _sweep_finding(
+                f"could not establish whether the run behind "
+                f"{len(liveness_unanswered)} of the idp- blueprint/project "
+                f"prefix(es) it listed is still in flight, so those were left in "
+                f"place rather than reaped: {detail}"
+            )
+        return []
+    except Exception as e:  # noqa: BLE001
+        # Not a per-resource delete failure — those are caught in the loops above
+        # and never arrive here. This is the selection or iteration itself giving
+        # out, which leaves everything after it unconsidered.
+        return _sweep_finding(
+            "the BDA sweep gave out part-way through the blueprints and projects "
+            f"it listed, so an unknown number were never considered: {e}"
+        )
 
 
 def publish_templates():
@@ -712,63 +1051,248 @@ def create_iam_resources(stack_name, shared_boundary=False):
         return None, None
 
 
+def _aws_error_code(exc):
+    """The AWS error code carried by a botocore ClientError, or "" otherwise.
+
+    Read off the response payload rather than caught by exception class, because
+    the class is minted per client instance (`iam_client.exceptions.*`), so a
+    helper handed a client cannot name it and a `WaiterError` carries no class
+    of ours at all. Both of those were how a failed delete reached a caller that
+    then printed success.
+    """
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        return str(response.get("Error", {}).get("Code", ""))
+    return ""
+
+
+def _policy_attachment_detail(iam_client, policy_arn):
+    """ " (attached to: ...)" for a policy IAM refuses to delete, or "".
+
+    Best effort and purely explanatory: the finding stands whether or not this
+    resolves, so every failure here is swallowed.
+    """
+    try:
+        attached = iam_client.list_entities_for_policy(PolicyArn=policy_arn)
+    except Exception:  # noqa: BLE001
+        return ""
+    names = [
+        role.get("RoleName", "") for role in attached.get("PolicyRoles", []) if role
+    ]
+    names += [
+        user.get("UserName", "") for user in attached.get("PolicyUsers", []) if user
+    ]
+    names = [name for name in names if name]
+    if not names:
+        return ""
+    shown = ", ".join(sorted(names)[:5])
+    return f" (attached to: {shown})"
+
+
+def _delete_managed_policy(iam_client, policy_arn):
+    """Delete one customer-managed policy. Returns (gone, detail).
+
+    `gone` is True when the policy is no longer there, which includes the case
+    where it never was. Non-default versions are pruned first because
+    DeletePolicy refuses while any exist, and a CloudFormation-managed policy
+    that outlived its stack usually has some — pruning is opportunistic, and
+    DeletePolicy remains the only authority on whether the policy is gone.
+    """
+    try:
+        for version in iam_client.list_policy_versions(PolicyArn=policy_arn).get(
+            "Versions", []
+        ):
+            if not version.get("IsDefaultVersion"):
+                iam_client.delete_policy_version(
+                    PolicyArn=policy_arn, VersionId=version["VersionId"]
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        iam_client.delete_policy(PolicyArn=policy_arn)
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == "NoSuchEntity":
+            return True, "not present"
+        if code == "DeleteConflict":
+            return (
+                False,
+                f"still in use{_policy_attachment_detail(iam_client, policy_arn)}",
+            )
+        return False, str(e)
+
+
+def _stack_scoped_policies(iam_client, stack_name):
+    """{PolicyName: Arn} for customer-managed policies named `<stack_name>[-*]`.
+
+    Covers both of the names a run creates — `<stack_name>-PermissionsBoundary`,
+    made outside CloudFormation, and `<stack_name>-iam-PassRolePolicy`, made by
+    the pre-stack — without having to know either in advance.
+
+    Raises on an API error. The caller turns that into a finding: a sweep that
+    could not enumerate its targets has not established that there are none.
+    """
+    found = {}
+    paginator = iam_client.get_paginator("list_policies")
+    for page in paginator.paginate(Scope="Local"):
+        for policy in page.get("Policies", []):
+            name = policy.get("PolicyName", "")
+            if name == stack_name or name.startswith(f"{stack_name}-"):
+                found[name] = policy.get("Arn", "")
+    return found
+
+
+def _iam_stack_presence(cf_client, iam_stack_name):
+    """(present, detail) for the service-role pre-stack.
+
+    present is True, False, or None for "could not be determined" — which the
+    caller must treat as a finding rather than as an absence.
+    """
+    try:
+        stacks = cf_client.describe_stacks(StackName=iam_stack_name).get("Stacks", [])
+    except Exception as e:  # noqa: BLE001
+        if "does not exist" in str(e):
+            return False, ""
+        return None, f"could not read stack {iam_stack_name}: {e}"
+    if not stacks:
+        return False, ""
+    status = stacks[0].get("StackStatus", "UNKNOWN")
+    if status == "DELETE_COMPLETE":
+        return False, ""
+    return True, f"stack {iam_stack_name} still present ({status})"
+
+
+def verify_iam_resources_gone(stack_name):
+    """Assert this run's IAM pre-stack and stack-scoped policies are really gone.
+
+    Returns a list of finding strings; an EMPTY list is the only thing that
+    means verified-gone. This is the check #1391 asks for: after a run, no
+    `<stack_name>-iam` stack and no `<stack_name>-*` managed policy may remain.
+
+    Read entirely from the account — `describe_stacks` and `list_policies` —
+    never from a flag the cleanup set about itself. A cleanup that announced
+    itself and did nothing is the defect; "the cleanup function ran" is the same
+    claim one level up, and three runs' worth of orphaned policies accumulated
+    behind it.
+
+    An API error is a `UNVERIFIED:` finding, not a pass. A check that cannot
+    enumerate its targets has not found them absent — the shape that left the
+    stale-bucket sweep permanently inert behind a warning.
+    """
+    findings = []
+
+    try:
+        cf_client = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
+        present, detail = _iam_stack_presence(cf_client, f"{stack_name}-iam")
+        if present is None:
+            findings.append(f"UNVERIFIED: {detail}")
+        elif present:
+            findings.append(f"LEFT BEHIND: {detail}")
+    except Exception as e:  # noqa: BLE001
+        findings.append(f"UNVERIFIED: could not check {stack_name}-iam: {e}")
+
+    try:
+        iam_client = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
+        for name, arn in sorted(_stack_scoped_policies(iam_client, stack_name).items()):
+            findings.append(
+                f"LEFT BEHIND: managed policy {name}"
+                f"{_policy_attachment_detail(iam_client, arn)}"
+            )
+    except Exception as e:  # noqa: BLE001
+        findings.append(
+            f"UNVERIFIED: could not list {stack_name}-* managed policies: {e}"
+        )
+
+    for finding in findings:
+        print(f"[{stack_name}] ❌ IAM teardown — {finding}")
+    if not findings:
+        print(
+            f"[{stack_name}] ✅ Verified gone: {stack_name}-iam stack and every "
+            f"{stack_name}-* managed policy"
+        )
+    return findings
+
+
 def cleanup_iam_resources(stack_name):
-    """Delete the IAM stack, then this stack's own permissions boundary policy.
+    """Delete the IAM pre-stack and this run's permissions boundary, then verify.
+
+    Returns verify_iam_resources_gone's findings: an EMPTY list means the
+    account demonstrably carries nothing named for this run.
 
     Order matters: the boundary is attached to every role the IDP stack created,
     and IAM refuses to delete a policy still in use as a boundary, so the IDP
     stack (deleted by our caller, cleanup_stack) and then the service-role stack
     must go first.
 
-    Only `<stack_name>-PermissionsBoundary` is deleted. The shared probe boundary
-    (SHARED_BOUNDARY_POLICY_NAME) never matches that name and so survives, which
-    is what lets concurrent probes share it.
+    The two deletes sit in separate blocks and neither can skip the other or the
+    verification. They shared one `try` before, under an inner
+    `except ClientError` that does not catch a `WaiterError` — so a stack-delete
+    wait that timed out skipped the boundary-policy delete entirely, leaving
+    `⚠️ Failed to delete IAM stack` as the only trace of a policy leaked against
+    a per-account quota.
+
+    Only `<stack_name>-PermissionsBoundary` is deleted here. The shared probe
+    boundary (SHARED_BOUNDARY_POLICY_NAME) never matches that name and so
+    survives, which is what lets concurrent probes share it. Any OTHER
+    `<stack_name>-*` policy the verification finds is reported rather than
+    deleted: those belong to CloudFormation, and deleting one out from under a
+    stack that outlived its delete attempt would trade a leak for drift.
+    `cleanup_stale_idp_policies` takes them once their run has no stacks left.
     """
     print(f"[{stack_name}] Cleaning up IAM stack...")
 
+    iam_stack_name = f"{stack_name}-iam"
     try:
-        # Clean up IAM CloudFormation stack (adaptive retry: concurrent teardown
-        # of primary + probe IAM stacks also bursts CFN/IAM mutating calls).
+        # Adaptive retry: concurrent teardown of primary + probe IAM stacks
+        # also bursts CFN/IAM mutating calls.
         cf_client = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
-        iam_stack_name = f"{stack_name}-iam"
         try:
             cf_client.delete_stack(StackName=iam_stack_name)
-
-            # Wait for stack deletion to complete
             waiter = cf_client.get_waiter("stack_delete_complete")
             waiter.wait(
                 StackName=iam_stack_name, WaiterConfig={"MaxAttempts": 30, "Delay": 10}
             )
-
             print(f"[{stack_name}] ✅ Deleted IAM stack: {iam_stack_name}")
-        except cf_client.exceptions.ClientError as e:
+        except Exception as e:  # noqa: BLE001
             if "does not exist" in str(e):
                 print(f"[{stack_name}] ℹ️ IAM stack not found: {iam_stack_name}")
             else:
                 print(f"[{stack_name}] ⚠️ Failed to delete IAM stack: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[{stack_name}] ⚠️ Could not reach CloudFormation for {iam_stack_name}: {e}"
+        )
 
-        # The per-stack boundary policy is created outside CloudFormation, so
-        # nothing deletes it implicitly. Left behind it is a slow leak against
-        # the account's 1500-managed-policy quota, one policy per CI run.
+    # The per-stack boundary policy is created outside CloudFormation, so
+    # nothing deletes it implicitly. Left behind it is a slow leak against the
+    # account's managed-policy quota, one policy per CI run, and the failure it
+    # eventually produces lands on an unrelated deploy.
+    boundary_name = f"{stack_name}-PermissionsBoundary"
+    try:
         iam_client = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
         account_id = boto3.client("sts").get_caller_identity()["Account"]
-        boundary_name = f"{stack_name}-PermissionsBoundary"
         boundary_arn = f"arn:aws:iam::{account_id}:policy/{boundary_name}"
-        try:
-            iam_client.delete_policy(PolicyArn=boundary_arn)
-            print(f"[{stack_name}] ✅ Deleted permissions boundary: {boundary_name}")
-        except iam_client.exceptions.NoSuchEntityException:
-            print(f"[{stack_name}] ℹ️ Permissions boundary not found: {boundary_name}")
-        except iam_client.exceptions.DeleteConflictException:
-            # Still attached as a boundary somewhere — a role the IDP stack
-            # delete left behind. Warn; the stale-stack reaper picks up the rest.
+        gone, detail = _delete_managed_policy(iam_client, boundary_arn)
+        if gone:
+            suffix = f" ({detail})" if detail else ""
             print(
-                f"[{stack_name}] ⚠️ Permissions boundary still in use, not deleted: "
-                f"{boundary_name}"
+                f"[{stack_name}] ✅ Deleted permissions boundary: "
+                f"{boundary_name}{suffix}"
             )
+        else:
+            print(
+                f"[{stack_name}] ⚠️ Permissions boundary not deleted: "
+                f"{boundary_name} — {detail}"
+            )
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[{stack_name}] ⚠️ Could not delete permissions boundary "
+            f"{boundary_name}: {e}"
+        )
 
-    except Exception as e:
-        print(f"[{stack_name}] ❌ Failed to cleanup IAM stack: {e}")
+    return verify_iam_resources_gone(stack_name)
 
 
 def test_step3_default_config(stack_name):
@@ -3648,7 +4172,11 @@ def deploy_and_test_stack(stack_name, admin_email, template_url, progress_cb=Non
                     "redeploying a fresh stack once..."
                 )
                 # Reclaim the rolled-back stack + IAM so the retry starts clean
-                # (same stack name; cleanup is idempotent/best-effort).
+                # (same stack name; cleanup is idempotent/best-effort). The
+                # teardown findings are printed but deliberately not carried:
+                # the next attempt recreates both resources under the same
+                # names, so the verdict belongs to the teardown that follows
+                # the LAST attempt, which main() reads.
                 cleanup_stack({"stack_name": stack_name})
                 deploy_result["retried_transient_logs_race"] = True
                 continue
@@ -5101,7 +5629,17 @@ def cancel_bedrock_ingestion_jobs(stack_name):
 
 
 def cleanup_stack(result):
-    """Clean up stack"""
+    """Delete this run's IDP stack, then its IAM pre-stack and boundary policy.
+
+    Returns cleanup_iam_resources' findings: an EMPTY list means the teardown
+    was verified, anything else names what is still standing.
+
+    The IAM cleanup runs whatever happened to the IDP stack above. It used to
+    sit inside the same `try`, so an exception from the stack delete — or from
+    the ingestion-job cancel before it — returned through `⚠️ Cleanup task
+    failed` with the pre-stack and the boundary policy untouched and nothing
+    downstream ever looking again.
+    """
     stack_name = result.get("stack_name")
     print(f"🧹 Starting cleanup for stack: {stack_name}")
     try:
@@ -5131,11 +5669,47 @@ def cleanup_stack(result):
         )
 
         print(f"[{stack_name}] ✅ Cleanup completed")
-
-        # Clean up CodeBuild-specific IAM resources
-        cleanup_iam_resources(stack_name)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"⚠️ Cleanup task failed: {e}")
+
+    # Clean up CodeBuild-specific IAM resources -- outside the block above on
+    # purpose, so a failure there cannot skip it.
+    return cleanup_iam_resources(stack_name)
+
+
+def teardown_primary_stack(result, stack_name):
+    """Tear this run's resources down, or retain them deliberately and say so.
+
+    Returns {"retained": bool, "findings": [str, ...]}. An empty `findings` on
+    a non-retained run means the teardown was *verified*, not merely attempted.
+
+    The two exits were asymmetric in a way that leaked (#1391). Retention is
+    opt-OUT (IDP_KEEP_FAILED_STACK, default on), so a failing run kept its stack
+    for inspection and skipped cleanup_stack **entirely** — leaving its `-iam`
+    pre-stack at CREATE_COMPLETE and its `-PermissionsBoundary` policy standing.
+    The startup stack reaper later removed the stacks, but nothing had ever
+    removed the policy, so every retained failure leaked one managed policy
+    permanently against a per-account quota.
+
+    Retaining those two *with* the stack is still right: the retained stack's
+    roles carry that boundary, and deleting the stack later needs that service
+    role, so tearing either down now would leave something that can no longer be
+    deleted cleanly. What changed is that the retention is reported as the
+    deferral it is, and `cleanup_stale_idp_policies` reaps the policy once the
+    run has no stacks left.
+    """
+    if not result.get("success") and retain_failed_stack(stack_name):
+        print(f"[{stack_name}] ⏸️  teardown skipped — stack retained for inspection")
+        print(
+            f"[{stack_name}]     kept with it: {stack_name}-iam and "
+            f"{stack_name}-PermissionsBoundary — the retained stack's roles carry "
+            "that boundary and its deletion needs that service role. Reaped by "
+            "cleanup_stale_idp_stacks / cleanup_stale_idp_policies once the "
+            "retention marker expires."
+        )
+        return {"retained": True, "findings": []}
+
+    return {"retained": False, "findings": cleanup_stack(result)}
 
 
 # ---------------------------------------------------------------------------
@@ -5197,7 +5771,7 @@ def _force_delete_vpc_stack_enis(vpc_stack_name):
     deleted = 0
     denied = False
     try:
-        cf = boto3.client("cloudformation")
+        cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
         outputs = {
             o["OutputKey"]: o["OutputValue"]
             for o in cf.describe_stacks(StackName=vpc_stack_name)["Stacks"][0].get(
@@ -5207,7 +5781,7 @@ def _force_delete_vpc_stack_enis(vpc_stack_name):
         vpc_id = outputs.get("VpcId", "")
         if not vpc_id:
             return 0, False
-        ec2 = boto3.client("ec2")
+        ec2 = boto3.client("ec2", config=_THROTTLE_RETRY_CONFIG)
         enis = ec2.describe_network_interfaces(
             Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
         ).get("NetworkInterfaces", [])
@@ -5282,7 +5856,7 @@ def delete_apigw_test_vpc(vpc_stack_name):
     Best effort — never raises.
     """
     print(f"[{vpc_stack_name}] Deleting test VPC...")
-    cf = boto3.client("cloudformation")
+    cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
 
     def _attempt():
         cf.delete_stack(StackName=vpc_stack_name)
@@ -5379,6 +5953,50 @@ def delete_apigw_test_vpc(vpc_stack_name):
         return False
 
 
+def _listing_age_seconds(created, now):
+    """Age in seconds of a listing's creation timestamp, or None if unestablishable.
+
+    The one age computation behind every age gate in this module, so they cannot
+    answer the same question differently — four siblings deciding it
+    independently and reaching opposite answers is what #1445 was about.
+
+    None is returned for an absent value, one that is not a datetime, and one
+    that is naive (no tzinfo) — subtracting a naive datetime from an aware `now`
+    raises, which inside a reaper's blanket `except` abandons the whole sweep
+    rather than skipping one item.
+
+    ⚠️ Every caller must read None as "the age gate cannot be satisfied", never
+    as old enough. An age that cannot be established is not the same claim as
+    being old enough to delete, and an API answer that cannot establish
+    something is not evidence for it — these gates are the last thing between a
+    listing and a delete call against a shared CI account.
+    """
+    if not isinstance(created, datetime) or created.tzinfo is None:
+        return None
+    return (now - created).total_seconds()
+
+
+def _report_age_unestablishable(names, consequence):
+    """Name every item a sweep left alone because its age was not establishable.
+
+    One site for every age gate here, so what they say about the same decision
+    cannot drift, with the `consequence` naming what the sweep in question would
+    have done. Named rather than only counted: this should not happen, and a
+    silent skip leaves the resource accumulating with nothing saying which one.
+
+    Reported in its own counter rather than folded into the too-young one,
+    because "younger than the gate" and "age unknown" are different facts and
+    only the second needs looking at. Silent when the list is empty — a sweep
+    that reports something on every green deploy trains the reader to ignore the
+    row, which is the failure #1391 was.
+    """
+    for name in sorted(names):
+        print(
+            f"  ⚠️ {name}: age not establishable from the listing — NOT reaped "
+            f"({consequence})"
+        )
+
+
 # Only reap *-apigw-vpc stacks older than this. A manual/local PRIVATE-VPC
 # test can legitimately be running concurrently with a CI job; a young stack
 # may be that in-flight test, so the age gate prevents this reaper from
@@ -5396,16 +6014,34 @@ def cleanup_stale_apigw_test_vpcs():
 
     Age-gated (APIGW_VPC_STALE_AGE_SECONDS): a manual VPC test could be running
     concurrently, so only stacks older than the threshold are deleted — never a
-    possibly-in-flight one. Best effort — never raises.
+    possibly-in-flight one. The gate fails CLOSED and its skip is reported in
+    its own counter: a stack whose `CreationTime` the listing did not carry has
+    an age that cannot be established, which is not the same claim as being old
+    enough to delete (#1445).
+
+    ONE enumeration, `list_stacks`, and it is what selection reads, so a failure
+    there means no `*-apigw-vpc` stack was considered. Returns the Step 0 sweep
+    outcome described at STARTUP_SWEEPS: an empty list only if the listing
+    answered and every candidate in it was considered. Never raises.
+
+    A stack this reaper could not delete stays best effort and is NOT a finding —
+    `delete_apigw_test_vpc` returns False, the stuck one is named below, and the
+    next run tries again.
     """
     print("🧹 Cleaning up stale apigw test VPC stacks...")
+
+    # Enumeration and selection in one block: `list_stacks` is paginated, so the
+    # iteration IS the enumeration and a page that never arrives is
+    # indistinguishable from one that was never asked for. Either way the stacks
+    # past that point were not considered, which is the same claim.
     try:
-        cf = boto3.client("cloudformation")
+        cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
         # Compare CreationTime against server-side "now" (a stack's own
         # DeletionTime is unavailable pre-delete, and Date.now-style local
         # clocks can skew); use a timezone-aware now from the newest stack's tz.
         now = datetime.now(tz=timezone.utc)
         stale, skipped_young = [], 0
+        age_unestablishable = []
         paginator = cf.get_paginator("list_stacks")
         for page in paginator.paginate(
             StackStatusFilter=[
@@ -5422,9 +6058,14 @@ def cleanup_stale_apigw_test_vpcs():
                 name = s.get("StackName", "")
                 if not (name.startswith("idp-") and name.endswith("-apigw-vpc")):
                     continue
-                created = s.get("CreationTime")
-                age = (now - created).total_seconds() if created else None
-                if age is None or age >= APIGW_VPC_STALE_AGE_SECONDS:
+                age = _listing_age_seconds(s.get("CreationTime"), now)
+                if age is None:
+                    # Fails CLOSED, like every other guard in this layer: with no
+                    # age the gate cannot be satisfied, and this path deletes a
+                    # VPC that may be an in-flight manual test.
+                    age_unestablishable.append(name)
+                    continue
+                if age >= APIGW_VPC_STALE_AGE_SECONDS:
                     stale.append(name)
                 else:
                     skipped_young += 1
@@ -5432,13 +6073,25 @@ def cleanup_stale_apigw_test_vpcs():
                         f"[{name}] skipping — only {age / 60:.0f}m old "
                         f"(may be an in-flight manual VPC test)"
                     )
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "did not get through the account's CloudFormation stacks, so an "
+            "unknown number of stale *-apigw-vpc stacks were never considered "
+            f"and none was reaped: {e}"
+        )
 
+    try:
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes a VPC that "
+            "may still be in use",
+        )
         if not stale:
             print(
                 f"✅ No stale apigw test VPC stacks to reap "
                 f"({skipped_young} young stack(s) skipped)"
             )
-            return
+            return []
 
         # Count the two outcomes apart. Printing "Reaped N" for everything this
         # reaper merely *attempted* is how a stack that cannot be deleted reads
@@ -5457,8 +6110,15 @@ def cleanup_stale_apigw_test_vpcs():
                 f"{', '.join(stuck)}. Each still holds a VPC against the "
                 f"account's limit of 5 and needs a human."
             )
+        return []
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ Stale apigw VPC cleanup failed: {e}")
+        # Not a stuck stack — `delete_apigw_test_vpc` swallows those and returns
+        # False. This is the reaping loop itself giving out, leaving the stacks
+        # after it unattempted.
+        return _sweep_finding(
+            "the apigw test VPC sweep gave out part-way through the stale stacks "
+            f"it selected, so an unknown number were never attempted: {e}"
+        )
 
 
 def _diagnostics_bucket():
@@ -5554,8 +6214,33 @@ def collect_failure_evidence(stack_name, result):
 
 
 def _retention_markers(s3, bucket):
-    """Return {stack_name: keep_until_iso} for every retention marker present."""
-    markers = {}
+    """Return ({stack_name: keep_until_iso}, {stack_name: why the read failed}).
+
+    TWO failure classes, and they are different facts about a marker rather than
+    two spellings of one (#1445):
+
+      * the GetObject ANSWERED and what came back cannot be understood — not
+        JSON, or JSON with no `keep_until`. That is "a marker nobody can parse",
+        and it lands in the first dict with an empty value, which reads as
+        expired: a marker that cannot be understood must not protect its stack
+        forever, which is the leak the reaper exists to stop.
+      * the GetObject DID NOT answer — a denial, expired credentials, a retry
+        budget the client exhausted. That establishes nothing about what the
+        marker says, so it lands in the SECOND dict and the caller keeps the
+        stack. "Could not read it this run" converges on the next run, where the
+        same call is made again; expiring on it reaps a stack a failed run
+        deliberately asked to keep, however young, since the marker overrides
+        the age gate.
+
+    The split is structural — which call is inside which `try` — rather than a
+    test on an exception class, so it does not depend on botocore raising a
+    recognisable type for every durable condition. `_THROTTLE_RETRY_CONFIG` on
+    the caller's client has already absorbed the `SlowDown`/`Throttling`/5xx
+    class by the time anything arrives here, so the second dict holds the
+    durable conditions; those do not become readable by being retried once more
+    inside this loop, and nothing here reaps on them.
+    """
+    markers, unreadable = {}, {}
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=f"{RETENTION_S3_PREFIX}/"):
         for obj in page.get("Contents", []):
@@ -5564,14 +6249,20 @@ def _retention_markers(s3, bucket):
             if not name:
                 continue
             try:
-                body = json.loads(
-                    s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
-                )
-                markers[name] = body.get("keep_until", "")
+                raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            except Exception as e:  # noqa: BLE001
+                # The API did not answer. Nothing is established about what this
+                # marker says, so the caller must not act as though it said
+                # "expired".
+                unreadable[name] = str(e)
+                continue
+            try:
+                markers[name] = json.loads(raw.decode()).get("keep_until", "")
             except Exception:  # noqa: BLE001
-                # An unreadable marker must not protect a stack forever.
+                # The answer arrived and is unintelligible. An unreadable marker
+                # must not protect a stack forever.
                 markers[name] = ""
-    return markers
+    return markers, unreadable
 
 
 def retain_failed_stack(stack_name):
@@ -5607,20 +6298,30 @@ def retain_failed_stack(stack_name):
 
     hours = min(KEEP_FAILED_STACK_HOURS, KEEP_FAILED_STACK_MAX_HOURS)
     try:
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
+        readable, unreadable = _retention_markers(s3, bucket)
         live = {
             name: until
-            for name, until in _retention_markers(s3, bucket).items()
+            for name, until in readable.items()
             if _keep_until_in_future(until, now)
         }
-        if stack_name not in live and len(live) >= MAX_RETAINED_STACKS:
+        # A marker whose read FAILED counts against the ceiling, because the
+        # reaper keeps its stack for the same reason (#1445) — so the slot is
+        # genuinely occupied and the ~122 IAM roles behind it are genuinely
+        # held. Treating it as free would let the count drift below the number
+        # of stacks actually retained, which is the quota exhaustion this
+        # ceiling exists to bound. A marker that merely cannot be PARSED is
+        # already in `readable` with an empty value and does not hold a slot:
+        # the reaper reaps it.
+        held = {**{name: "could not be read" for name in unreadable}, **live}
+        if stack_name not in held and len(held) >= MAX_RETAINED_STACKS:
             print(
-                f"⚠️  {len(live)} stack(s) already retained "
+                f"⚠️  {len(held)} stack(s) already retained "
                 f"(ceiling {MAX_RETAINED_STACKS}) — tearing {stack_name} down "
                 "instead so the account's IAM role headroom is not consumed."
             )
-            for name, until in sorted(live.items()):
+            for name, until in sorted(held.items()):
                 print(f"     holding a slot: {name} until {until}")
             return False
 
@@ -5671,21 +6372,32 @@ def _keep_until_in_future(keep_until, now):
 
 
 def _expired_retention_markers(bucket, now):
-    """Return ({stack_name: until} still protected, [names whose marker expired])."""
-    s3 = boto3.client("s3")
+    """Return the three answers a retention marker can give, not two.
+
+    `({stack_name: until} still protected, [expired], {name: why unreadable})`.
+
+    The third is separate because it is a different claim: an expired marker
+    says the run's own deadline has passed, which positively licenses reaping
+    even a stack younger than the age gate, while a marker whose read did not
+    answer says nothing at all — see `_retention_markers` for the split. Folding
+    the third into the second is what let one failed GetObject reap a stack a
+    failed run asked to keep (#1445).
+    """
+    s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
+    readable, unreadable = _retention_markers(s3, bucket)
     protected, expired = {}, []
-    for name, until in _retention_markers(s3, bucket).items():
+    for name, until in readable.items():
         if _keep_until_in_future(until, now):
             protected[name] = until
         else:
             expired.append(name)
-    return protected, expired
+    return protected, expired, unreadable
 
 
 def _drop_retention_marker(bucket, stack_name):
     """Delete a retention marker once its stack has been reaped."""
     try:
-        boto3.client("s3").delete_object(
+        boto3.client("s3", config=_THROTTLE_RETRY_CONFIG).delete_object(
             Bucket=bucket, Key=f"{RETENTION_S3_PREFIX}/{stack_name}.json"
         )
     except Exception as e:  # noqa: BLE001
@@ -5709,31 +6421,66 @@ def cleanup_stale_ci_diagnostics():
     silently stops matching the code that depends on it. A startup reaper is the
     pattern the rest of this script already uses, and it is in version control.
 
-    Best effort -- never raises.
+    ONE enumeration, `list_objects_v2` over the diagnostics prefix. Returns the
+    Step 0 sweep outcome described at STARTUP_SWEEPS: an empty list only if the
+    listing answered and every object under the prefix was considered. Never
+    raises. Of the six sweeps this is the one whose finding does NOT fail the
+    run — see its `why` in STARTUP_SWEEPS.
+
+    The window fails CLOSED and its skip is reported in its own counter, the
+    same way as the age gates above: an object whose `LastModified` the
+    listing did not carry has an age that cannot be established, which is not
+    the same claim as being past the retention window (#1445).
+
+    An object that would not delete stays best effort and is NOT a finding.
     """
     bucket = _diagnostics_bucket()
     if not bucket:
-        return
+        # No bucket is named, so there is nothing to enumerate and no claim to
+        # make in either direction. `None`, not `[]`: this sweep did not run, and
+        # "did not run" reading as "ran and found nothing" is the conflation this
+        # return value exists to remove.
+        return None
     print("🧹 Expiring old CI diagnostics bundles...")
+
+    # Enumeration and selection in one block, for the same reason as the stack
+    # sweeps: the listing is paginated, so a page that never arrives and a page
+    # never asked for leave the same objects unconsidered.
     try:
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         stale = []
+        age_unestablishable = []
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(
             Bucket=bucket, Prefix=f"{DIAGNOSTICS_S3_PREFIX}/"
         ):
             for obj in page.get("Contents", []):
-                modified = obj.get("LastModified")
-                if (
-                    modified
-                    and (now - modified).total_seconds() > DIAGNOSTICS_RETENTION_SECONDS
-                ):
+                age = _listing_age_seconds(obj.get("LastModified"), now)
+                if age is None:
+                    # Already the closed direction before #1445 — an object with
+                    # no usable `LastModified` was never selected — but silently,
+                    # and a naive one abandoned the whole sweep. Through the
+                    # shared helper it is one skipped object, in the same counter
+                    # the other gates use.
+                    age_unestablishable.append(obj["Key"])
+                elif age > DIAGNOSTICS_RETENTION_SECONDS:
                     stale.append(obj["Key"])
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "did not get through the diagnostics prefix, so an unknown number of "
+            f"evidence bundles past their retention window were never expired: {e}"
+        )
 
+    try:
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the retention window cannot be applied, and this path deletes the "
+            "evidence bundle",
+        )
         if not stale:
             print("✅ No expired diagnostics bundles")
-            return
+            return []
         deleted = 0
         for key in stale:
             try:
@@ -5742,8 +6489,13 @@ def cleanup_stale_ci_diagnostics():
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠️ could not delete {key}: {e}")
         print(f"✅ Expired {deleted}/{len(stale)} diagnostics object(s)")
+        return []
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ Diagnostics expiry failed: {e}")
+        # Not a per-object delete failure — those are caught in the loop above.
+        return _sweep_finding(
+            "the diagnostics expiry gave out part-way through the objects it "
+            f"listed, so an unknown number were never expired: {e}"
+        )
 
 
 # Reap idp- test stacks (main, -iam, and probe stacks) older than this. A CI
@@ -5768,8 +6520,18 @@ def cleanup_stale_idp_stacks():
     Targets top-level idp- stacks (main deploy stacks, their `-iam` stacks, and
     the -apigw/-waf/-apigwpriv/-jobsapi probe stacks + their -iam stacks).
     Age-gated (IDP_STACK_STALE_AGE_SECONDS) so a concurrent pipeline's in-flight
-    run is never deleted. Best effort — never raises. Skips *-apigw-vpc (owned
+    run is never deleted. Never raises. Skips *-apigw-vpc (owned
     by cleanup_stale_apigw_test_vpcs) and the persistent pipeline stack.
+
+    ONE enumeration of targets, `list_stacks`. Returns the Step 0 sweep outcome
+    described at STARTUP_SWEEPS: an empty list only if the listing answered and
+    every top-level idp- stack in it was considered.
+
+    The retention-marker read is NOT part of that claim and keeps its own
+    handler. Its failure does not leave a stack unconsidered — the sweep still
+    enumerates and reaps — it narrows the PROTECTION the age gate is applied
+    with, which is a different fact and already reported where it happens. A
+    stack whose delete call fails stays best effort and is NOT a finding either.
 
     Retention markers are the one exception to the age gate, in both directions:
     a stack a failing run deliberately kept is skipped while its marker is in
@@ -5779,19 +6541,41 @@ def cleanup_stale_idp_stacks():
     would delete the service role and permissions boundary out from under the
     very stack being preserved, leaving something that can no longer be deleted
     cleanly.
+
+    THREE answers from a marker, not two, and the third keeps the stack (#1445):
+    a marker that cannot be PARSED expires, because one nobody can understand
+    must not pin a retention slot forever, while a marker whose read did not
+    ANSWER establishes nothing — that run's stacks are left in place and
+    reported in their own counter, and the next run makes the same call again.
+    The age gate fails closed on the same reasoning, in its own counter too: a
+    stack whose `CreationTime` the listing did not carry has an age that cannot
+    be established, which is not the same claim as being old enough to delete.
+    Neither is a sweep finding: every stack the listing returned was considered,
+    and ending a night's run red for a skipped item would make the row that
+    reports a genuinely inert sweep worth less.
     """
     print("🧹 Cleaning up stale idp- test stacks (IAM role leak guard)...")
+
+    # Enumeration and selection in one block: `list_stacks` is paginated, so the
+    # iteration IS the enumeration and a page that never arrives leaves the same
+    # stacks unconsidered as a listing that was refused outright.
     try:
-        cf = boto3.client("cloudformation")
+        cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         stale, skipped_young = [], 0
         skipped_retained = 0
+        age_unestablishable = []
+        #: {run_prefix: why} for a run whose marker read did not answer. Its own
+        #: counter rather than folded into `skipped_retained`, because "retained
+        #: on purpose" and "cannot tell whether it was retained" are different
+        #: facts and only the second needs looking at.
+        markers_unreadable = {}
 
         bucket = _diagnostics_bucket()
-        protected, expired = ({}, [])
+        protected, expired, unreadable = ({}, [], {})
         if bucket:
             try:
-                protected, expired = _expired_retention_markers(bucket, now)
+                protected, expired, unreadable = _expired_retention_markers(bucket, now)
             except Exception as e:  # noqa: BLE001
                 # Failing to read markers must not stop the reaper, but it must
                 # not silently un-protect a retained stack either: with no
@@ -5830,23 +6614,54 @@ def cleanup_stale_idp_stacks():
                 if run_prefix in protected:
                     skipped_retained += 1
                     continue
-                created = s.get("CreationTime")
-                age = (now - created).total_seconds() if created else None
+                # Before the age gate AND before the expiry override: the read
+                # of this run's marker did not answer, so whether the run asked
+                # for the stack to be kept is unknown. Keeping it costs a
+                # retention slot until the next run re-reads the marker, which
+                # is the same call and converges; reaping it destroys the
+                # evidence a failed run deliberately preserved (#1445).
+                if run_prefix in unreadable:
+                    markers_unreadable[run_prefix] = unreadable[run_prefix]
+                    continue
+                age = _listing_age_seconds(s.get("CreationTime"), now)
                 # An expired marker overrides the age gate: the run that wrote it
                 # asked for the stack to be kept until a deadline that has now
                 # passed, which is a stronger statement than "too young to be a
                 # leak" and is the only thing that frees up a retention slot.
                 if run_prefix in expired:
                     stale.append(name)
-                elif age is None or age >= IDP_STACK_STALE_AGE_SECONDS:
+                elif age is None:
+                    # Fails CLOSED, with its own counter: the listing carried no
+                    # usable `CreationTime`, so the age gate cannot be satisfied,
+                    # and this path deletes a run's stacks.
+                    age_unestablishable.append(name)
+                elif age >= IDP_STACK_STALE_AGE_SECONDS:
                     stale.append(name)
                 else:
                     skipped_young += 1
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "did not get through the account's CloudFormation stacks, so an "
+            "unknown number of stale idp- stacks were never considered and none "
+            f"was reaped — every one of them still holds its IAM roles: {e}"
+        )
 
+    try:
         if skipped_retained:
             print(f"  ({skipped_retained} retained idp- stack(s) skipped)")
         if skipped_young:
             print(f"  ({skipped_young} young idp- stack(s) skipped — may be in-flight)")
+        for run_prefix, why in sorted(markers_unreadable.items()):
+            print(
+                f"  ⚠️ {run_prefix}: retention marker could not be read ({why}) "
+                "— NOT reaped, since whether this run asked to keep its stacks "
+                "is unknown; the next run re-reads the marker"
+            )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes a run's "
+            "stacks and the IAM stack behind them",
+        )
         if not stale:
             print("✅ No stale idp- test stacks to reap")
             # Still drop expired markers: a marker whose stack is already gone
@@ -5855,7 +6670,7 @@ def cleanup_stale_idp_stacks():
             if bucket:
                 for name in expired:
                     _drop_retention_marker(bucket, name)
-            return
+            return []
 
         # Delete non-iam stacks first (they reference their -iam CFServiceRole /
         # boundary), then the -iam stacks — mirrors cleanup_stack ordering so a
@@ -5880,8 +6695,15 @@ def cleanup_stale_idp_stacks():
         if bucket:
             for name in expired:
                 _drop_retention_marker(bucket, name)
+        return []
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ Stale idp- stack cleanup failed: {e}")
+        # Not a per-stack delete failure — those are caught in the loop above.
+        # This is the reaping pass itself giving out, leaving the stacks after
+        # it unattempted.
+        return _sweep_finding(
+            "the idp- stack sweep gave out part-way through the stale stacks it "
+            f"selected, so an unknown number were never attempted: {e}"
+        )
 
 
 # Reap idp- test buckets older than this. Same rationale as the stack reaper:
@@ -5906,7 +6728,7 @@ def _live_idp_run_prefixes():
     every non-terminal and terminal-but-present state.
     """
     prefixes = set()
-    cf = boto3.client("cloudformation")
+    cf = boto3.client("cloudformation", config=_THROTTLE_RETRY_CONFIG)
     paginator = cf.get_paginator("list_stacks")
     # All statuses EXCEPT DELETE_COMPLETE (a completed delete means the stack is
     # gone, so its buckets — if any survived — are fair game).
@@ -5954,19 +6776,64 @@ def cleanup_stale_idp_buckets():
     Safety: a bucket is deleted only if BOTH
       * its run-prefix (idp-MMDD-HHMMSS) has NO surviving CloudFormation stack
         (so no in-flight/partly-deployed run owns it), AND
-      * it is older than IDP_BUCKET_STALE_AGE_SECONDS (backstop for a brand-new
-        bucket whose stack hasn't registered yet).
-    Best effort — never raises.
+      * its age is KNOWN and exceeds IDP_BUCKET_STALE_AGE_SECONDS (a backstop
+        for a brand-new bucket whose stack hasn't registered yet).
+
+    Both fail CLOSED, the age one included (#1445): a bucket whose
+    `CreationDate` the listing did not carry has an age that cannot be
+    established, which is not the same claim as being old enough to delete, and
+    this path empties the bucket before deleting it. It is reported in its own
+    counter rather than folded into the too-young one, because "younger than the
+    gate" and "age unknown" are different facts and only the second needs
+    looking at.
+
+    Returns a list of finding strings; an EMPTY list means the sweep demonstrably
+    ran — it enumerated the account and considered every `idp-` bucket in it.
+    "Nothing to reap" is an empty list; "could not look" is not. The caller folds
+    a non-empty list into the run verdict (see main), because the harm here is
+    cumulative and invisible: a sweep that cannot enumerate its targets reaps
+    nothing every night, and a warning on an otherwise-green run is what let it
+    go unnoticed for months (#1391).
+
+    Best effort — **never raises**, and that contract is deliberate rather than
+    inherited. This is Step 0: raising here would abandon the deploy, the test
+    suite and the teardown before any of them ran, trading a leak that converges
+    on the next run for a lost night's signal on the first S3 throttle. The
+    failure is made visible in the verdict instead of in control flow.
+
+    Two kinds of failure, which used to share one `except` and must not:
+      * **Enumeration** — `_live_idp_run_prefixes` or `list_buckets`. Zero
+        targets were considered, so nothing about the account was established.
+        A finding.
+      * **One bucket's delete** — legitimately best effort. One stuck bucket
+        (BucketNotEmpty, a replication hold) must not fail a deploy, the loop
+        names it, and the next run tries again. NOT a finding.
     """
     print("🧹 Cleaning up stale idp- test buckets (S3 leak guard)...")
+
+    # Enumeration, in its own block: everything below is about buckets this
+    # listing returned, so a failure here means there is no sweep to report on.
+    # _THROTTLE_RETRY_CONFIG (adaptive, 10 attempts) rides out the transient
+    # SlowDown/Throttling class before it can reach the handler, so what lands
+    # here is a durable condition — a denied call, expired credentials, a region
+    # or account the role cannot read — not a momentary one.
     try:
-        s3 = boto3.client("s3")
-        s3r = boto3.resource("s3")
+        s3 = boto3.client("s3", config=_THROTTLE_RETRY_CONFIG)
+        s3r = boto3.resource("s3", config=_THROTTLE_RETRY_CONFIG)
         now = datetime.now(tz=timezone.utc)
         protected = _live_idp_run_prefixes()
+        listed = s3.list_buckets().get("Buckets", [])
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "could not enumerate the account's buckets, so 0 of an unknown "
+            "number of stale idp- buckets were considered and none was "
+            f"reaped: {e}"
+        )
 
+    try:
         stale, skipped_protected, skipped_young = [], 0, 0
-        for b in s3.list_buckets().get("Buckets", []):
+        age_unestablishable = []
+        for b in listed:
             name = b.get("Name", "")
             if not name.startswith("idp-"):
                 continue
@@ -5974,9 +6841,14 @@ def cleanup_stale_idp_buckets():
             if m and m.group(1) in protected:
                 skipped_protected += 1
                 continue
-            created = b.get("CreationDate")
-            age = (now - created).total_seconds() if created else None
-            if age is not None and age < IDP_BUCKET_STALE_AGE_SECONDS:
+            age = _listing_age_seconds(b.get("CreationDate"), now)
+            if age is None:
+                # Fails CLOSED, like the live-stack guard above it: with no age
+                # the gate cannot be satisfied, and this path empties a bucket
+                # before deleting it, so being wrong destroys its contents.
+                age_unestablishable.append(name)
+                continue
+            if age < IDP_BUCKET_STALE_AGE_SECONDS:
                 skipped_young += 1
                 continue
             stale.append(name)
@@ -5986,23 +6858,188 @@ def cleanup_stale_idp_buckets():
                 f"  ({skipped_protected} protected by a live stack, "
                 f"{skipped_young} younger than the age gate — skipped)"
             )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path empties the bucket "
+            "before deleting it",
+        )
         if not stale:
             print("✅ No stale idp- test buckets to reap")
-            return
+            return []
 
         deleted = 0
         for name in stale:
             try:
                 # Empty first — versions, delete markers, and objects — then
-                # delete the (now empty) bucket.
+                # delete the (now empty) bucket. Per-bucket on purpose: this is
+                # the best-effort half, so one failure costs one bucket and the
+                # next run takes it.
                 s3r.Bucket(name).object_versions.delete()
                 s3.delete_bucket(Bucket=name)
                 deleted += 1
             except Exception as e:  # noqa: BLE001
                 print(f"[{name}] ⚠️ bucket delete failed: {e}")
         print(f"✅ Reaped {deleted}/{len(stale)} stale idp- test bucket(s)")
+        return []
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ Stale idp- bucket cleanup failed: {e}")
+        # Not a per-bucket delete failure — those are caught in the loop above
+        # and never arrive here. This is the selection or iteration itself
+        # giving out part-way, which leaves the buckets after it unconsidered.
+        # Partial is not clean, so it is a finding for the same reason
+        # enumeration is. An undateable `CreationDate` used to arrive here as a
+        # TypeError and cost the whole sweep; `_listing_age_seconds` answers
+        # None for it instead, so that shape is now one skipped bucket.
+        return _sweep_finding(
+            "the sweep gave out part-way through the buckets it listed, so an "
+            f"unknown number were never considered: {e}"
+        )
+
+
+# Reap orphaned idp- run-scoped IAM managed policies older than this. Same
+# rationale as the stack and bucket reapers, with one difference that makes it
+# load-bearing: a managed policy is NOT owned by any stack once its run is torn
+# down, so the stack reaper cannot reach it, and managed policies are a
+# per-account quota — the eventual failure lands on an unrelated deploy.
+IDP_POLICY_STALE_AGE_SECONDS = 6 * 3600  # 6h
+
+
+def _policy_age_seconds(policy, now):
+    """Age of a `list_policies` entry in seconds, or None if not establishable.
+
+    The field name is the only thing specific to policies here; the three ways
+    an age can fail to be establishable, and the rule that None means "the age
+    gate cannot be satisfied" rather than "old enough", are shared with the
+    other three gates in `_listing_age_seconds`.
+    """
+    return _listing_age_seconds(policy.get("CreateDate"), now)
+
+
+def cleanup_stale_idp_policies():
+    """Reap orphaned `idp-MMDD-HHMMSS*` IAM managed policies whose run is gone.
+
+    Two names leak here. `<stack>-PermissionsBoundary` is created outside
+    CloudFormation by create_iam_resources, so nothing removes it implicitly;
+    `<stack>-iam-PassRolePolicy` belongs to the pre-stack and survives a
+    pre-stack delete that did not complete. Either one outliving its run is
+    permanent: no stack owns it, so cleanup_stale_idp_stacks cannot see it.
+
+    Safety — a policy is deleted only if ALL of:
+      * its name carries a run prefix (idp-MMDD-HHMMSS), which is also what
+        excludes SHARED_BOUNDARY_POLICY_NAME: the shared probe boundary is named
+        for no run, so it can never match and concurrent probes keep sharing it,
+      * that run has NO surviving CloudFormation stack — so an in-flight run, and
+        a stack deliberately retained for inspection, are both untouchable, and
+      * its age is KNOWN and exceeds IDP_POLICY_STALE_AGE_SECONDS, a backstop for
+        the window between creating the boundary and the stack that will protect
+        it.
+
+    Every one of those three fails CLOSED, the age one included: a policy whose
+    `CreateDate` the listing did not carry has an age that cannot be
+    established, which is not the same claim as being old enough to delete, and
+    this is the one path here that issues `delete_policy` against a shared CI
+    account. It is reported in its own counter rather than folded into the
+    too-young one, because "younger than the gate" and "age unknown" are
+    different facts and only the second needs looking at. The distinction is the
+    same one verify_iam_resources_gone draws between a finding and an
+    `UNVERIFIED:` — an API answer that cannot establish something is not
+    evidence for it.
+
+    Convergent rather than immediate: the stack reaper above only *issues* its
+    deletes, so a run reaped this minute still has stacks and is skipped here
+    until the next run. Never raises.
+
+    TWO enumerations — `_live_idp_run_prefixes` (ListStacks) and `list_policies`
+    — and the first runs before the second because without the protected-prefix
+    set there is no safe selection to make, so either failing is the same claim:
+    nothing was considered. Returns the Step 0 sweep outcome described at
+    STARTUP_SWEEPS, an empty list only if both answered and every run-prefixed
+    local policy was considered.
+
+    A policy that would not delete stays best effort and is NOT a finding — it is
+    named loudly below and the next run takes it.
+    """
+    print("🧹 Cleaning up orphaned idp- IAM managed policies (quota leak guard)...")
+
+    # Enumeration and selection in one block: `list_policies` is paginated, so
+    # the iteration IS the enumeration, and `_live_idp_run_prefixes` failing
+    # removes the protection selection depends on rather than merely a listing.
+    try:
+        iam = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
+        now = datetime.now(tz=timezone.utc)
+        protected = _live_idp_run_prefixes()
+
+        stale, skipped_protected, skipped_young = [], 0, 0
+        # Not spelled with a word from exemption_discovery.NAME_VOCABULARY (an
+        # earlier `unknown_age` was discovered through `KNOWN_`), because this
+        # is not a gate carve-out and no registry entry could say anything
+        # useful about it: the members are whatever the live listing failed to
+        # date, so there is no authored judgement to write and no ratchet that
+        # could test one.
+        age_unestablishable = []
+        paginator = iam.get_paginator("list_policies")
+        for page in paginator.paginate(Scope="Local"):
+            for policy in page.get("Policies", []):
+                name = policy.get("PolicyName", "")
+                match = _IDP_RUN_PREFIX_RE.match(name)
+                if not match:
+                    continue
+                if match.group(1) in protected:
+                    skipped_protected += 1
+                    continue
+                age = _policy_age_seconds(policy, now)
+                if age is None:
+                    # Age not establishable, so the age gate cannot be satisfied.
+                    # Named rather than counted: this should not happen, and a
+                    # silent skip would leave a policy accumulating against the
+                    # quota with nothing saying which one.
+                    age_unestablishable.append(name)
+                    continue
+                if age < IDP_POLICY_STALE_AGE_SECONDS:
+                    skipped_young += 1
+                    continue
+                stale.append((name, policy.get("Arn", "")))
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "could not enumerate the account's local IAM managed policies (or "
+            "the live stacks that protect them), so 0 of an unknown number of "
+            "orphaned idp- policies were considered and none was deleted — each "
+            f"one is permanent, since no stack owns it: {e}"
+        )
+
+    try:
+        if skipped_protected or skipped_young:
+            print(
+                f"  ({skipped_protected} protected by a live stack, "
+                f"{skipped_young} younger than the age gate — skipped)"
+            )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path deletes",
+        )
+        if not stale:
+            print("✅ No orphaned idp- IAM managed policies to reap")
+            return []
+
+        deleted = 0
+        for name, arn in sorted(stale):
+            gone, detail = _delete_managed_policy(iam, arn)
+            if gone:
+                deleted += 1
+            else:
+                # Loud, because this is the path on which the quota keeps
+                # filling: the policy is still there and nothing else will take
+                # it until whatever holds it is gone.
+                print(f"[{name}] ⚠️ managed policy NOT deleted — {detail}")
+        print(f"✅ Reaped {deleted}/{len(stale)} orphaned idp- IAM managed policy/ies")
+        return []
+    except Exception as e:  # noqa: BLE001
+        # Not a per-policy delete failure — `_delete_managed_policy` reports
+        # those through its `(gone, detail)` pair and the loop names them. This
+        # is the reaping pass itself giving out.
+        return _sweep_finding(
+            "the orphaned idp- IAM policy sweep gave out part-way through the "
+            f"policies it selected, so an unknown number were never deleted: {e}"
+        )
 
 
 def validate_apigw_global_hosting(stack_name):
@@ -7146,6 +8183,10 @@ def _run_probe_attempt(probe, admin_email, template_url, vpc_params):
         _capture_cf_events(result, stack_name)
         return result
     finally:
+        # A probe's teardown findings are printed by the verification but do NOT
+        # change its verdict: a probe uses the shared boundary policy, so it
+        # creates no per-run policy of its own, and probes are off by default in
+        # CI. Folding them into the probe result is a separate change.
         cleanup_stack({"stack_name": stack_name})
 
 
@@ -7343,15 +8384,32 @@ def publish_summary_to_s3(summary_text):
 
 
 def build_consolidated_summary(
-    stack_name, primary_result, probe_results, publish_success
+    stack_name,
+    primary_result,
+    probe_results,
+    publish_success,
+    startup_sweep_findings=None,
 ):
     """Build the deterministic end-of-run status table for EVERY test.
 
     Independent of Bedrock — this ALWAYS renders (the GitLab log needs a
     reliable "here is every test and its status" view even when Bedrock is
-    unavailable). Covers the publish step, the primary suite's per-step results
-    (from result["step_results"]), and each deployment-variant probe. The
-    Bedrock pass/fail narrative is layered on top of this, not instead of it.
+    unavailable). Covers the Step 0 startup sweeps, the publish step, the primary
+    suite's per-step results (from result["step_results"]), and each
+    deployment-variant probe. The Bedrock pass/fail narrative is layered on top
+    of this, not instead of it.
+
+    `startup_sweep_findings` maps a STARTUP_SWEEPS `func` to that sweep's return
+    value. Per sweep: an empty list renders a passed row; a non-empty one renders
+    a row that fails the whole table if the sweep's `fails_run` says so and a
+    warning row if not; and `None` — including a sweep absent from the mapping —
+    renders as neither, because "nobody reported" and "reported clean" being one
+    row is the defect this section exists to remove, one level up.
+
+    The sweeps are in the table rather than left as log lines because this table
+    is the artifact a reader actually opens — printed, uploaded to S3 and mailed
+    on failure — and a sweep that could not enumerate its targets reaped nothing
+    on every run behind a `⚠️` in a six-figure-line log (#1391, #1434).
 
     Returns the summary text; the caller prints and uploads it.
     """
@@ -7362,6 +8420,10 @@ def build_consolidated_summary(
         icon = {
             "passed": "✅",
             "failed": "❌",
+            # Reported without failing the table. Used only by a Step 0 sweep
+            # whose `fails_run` is False, so the row says what happened while
+            # the verdict stays what the deploy and the suite made it.
+            "warning": "⚠️",
             "skipped": "⏭️",
             "cancelled": "⚪",
         }.get(status, "❓")
@@ -7371,7 +8433,32 @@ def build_consolidated_summary(
             text += f" — {detail[:120]}"
         return text
 
+    # Step 0 startup sweeps, one row each, driven off STARTUP_SWEEPS so a sweep
+    # added to that registry cannot reach the table without a row or reach the
+    # verdict without a decision.
+    lines.append("🧹 Startup sweeps (resources leaked by PRIOR runs)")
+    reported = startup_sweep_findings or {}
+    for sweep in STARTUP_SWEEPS:
+        findings = reported.get(sweep.func)
+        if findings:
+            for finding in findings:
+                lines.append(
+                    row(
+                        "failed" if sweep.fails_run else "warning", sweep.label, finding
+                    )
+                )
+            if sweep.fails_run:
+                overall_ok = False
+        elif findings is None:
+            # The caller does not have this sweep's result. NOT rendered as a
+            # pass: "nobody reported" and "reported clean" being the same row is
+            # the defect this section exists to remove, one level up.
+            lines.append(row("cancelled", sweep.label, "not reported"))
+        else:
+            lines.append(row("passed", f"{sweep.label} (enumerated, swept)"))
+
     # Publish / build
+    lines.append("")
     lines.append("📦 Build & Publish")
     if publish_success:
         lines.append(row("passed", "Publish templates to S3"))
@@ -7405,6 +8492,34 @@ def build_consolidated_summary(
                     )
                 )
                 overall_ok = False
+
+    # Teardown of this run's own IAM resources. Rendered from the verification
+    # read back off the account, never from the fact that a cleanup was called:
+    # "the cleanup ran" is the claim that let three runs' permissions-boundary
+    # policies survive while the log said cleanup was handled.
+    lines.append("")
+    lines.append("🧹 Teardown (IAM pre-stack + permissions boundary)")
+    teardown = (primary_result or {}).get("teardown")
+    if not publish_success or teardown is None:
+        lines.append(row("cancelled", "Not reached"))
+    elif teardown.get("retained"):
+        lines.append(
+            row(
+                "skipped",
+                f"Retained for inspection — {stack_name}-iam and its boundary "
+                "policy are reaped with the retention marker",
+            )
+        )
+    elif teardown.get("findings"):
+        for finding in teardown["findings"]:
+            lines.append(row("failed", "IAM teardown", finding))
+        overall_ok = False
+    else:
+        lines.append(
+            row(
+                "passed", f"Verified gone: {stack_name}-iam and {stack_name}-* policies"
+            )
+        )
 
     # Deployment-variant probes
     lines.append("")
@@ -7491,16 +8606,38 @@ def main():
     # exhaust the RolesPerAccount quota (which failed every deploy once ~600
     # roles had accumulated). All are age-gated so a concurrent pipeline's
     # in-flight run is never touched.
-    cleanup_stale_bda_blueprints()
-    cleanup_stale_apigw_test_vpcs()
-    cleanup_stale_idp_stacks()
+    #
+    # Every sweep's outcome is BOUND here rather than printed and forgotten: a
+    # sweep whose enumeration failed considered nothing, and a `⚠️` on an
+    # otherwise-green run is how that stayed unnoticed for months (#1391, #1434).
+    # What each outcome then does to the verdict is decided per sweep below,
+    # against the `fails_run` judgement in STARTUP_SWEEPS.
+    bda_sweep_findings = cleanup_stale_bda_blueprints()
+    apigw_vpc_sweep_findings = cleanup_stale_apigw_test_vpcs()
+    stale_stack_findings = cleanup_stale_idp_stacks()
     # Buckets last: a stack the reaper above just deleted frees its buckets for
     # reaping here (CloudFormation can't delete a non-empty bucket, so they'd
     # otherwise leak — thousands accumulated this way).
-    cleanup_stale_idp_buckets()
+    stale_bucket_findings = cleanup_stale_idp_buckets()
+    # Managed policies after the stacks, for the same reason and with the same
+    # protection: a policy is only reaped once its run has no stacks left, so
+    # this converges the ones a retained failure deliberately left behind (and
+    # the ones already orphaned by runs that predate the verification below).
+    stale_policy_findings = cleanup_stale_idp_policies()
     # Evidence bundles from runs long since diagnosed. Not reaped by an S3
     # lifecycle rule because the bucket is not managed by this repository.
-    cleanup_stale_ci_diagnostics()
+    diagnostics_sweep_findings = cleanup_stale_ci_diagnostics()
+
+    # Keyed by function name so the status table can pair each result with its
+    # STARTUP_SWEEPS row without this dict having to repeat the labels.
+    startup_sweep_findings = {
+        "cleanup_stale_bda_blueprints": bda_sweep_findings,
+        "cleanup_stale_apigw_test_vpcs": apigw_vpc_sweep_findings,
+        "cleanup_stale_idp_stacks": stale_stack_findings,
+        "cleanup_stale_idp_buckets": stale_bucket_findings,
+        "cleanup_stale_idp_policies": stale_policy_findings,
+        "cleanup_stale_ci_diagnostics": diagnostics_sweep_findings,
+    }
 
     # Step 1: Publish templates to S3
     try:
@@ -7578,7 +8715,7 @@ def main():
                 "step_results": step_results,
             }
             snapshot = build_consolidated_summary(
-                stack_name, partial, [], publish_success
+                stack_name, partial, [], publish_success, startup_sweep_findings
             )
             snapshot = (
                 "⏳ IN-PROGRESS SUMMARY (primary suite still running; "
@@ -7630,12 +8767,12 @@ def main():
 
         # Step 4: clean up the primary stack (the APIGW thread cleans up its own
         # stack in its finally block) -- unless this run is keeping it for
-        # inspection, in which case the startup reaper takes it once the
-        # retention marker expires.
-        if not result["success"] and retain_failed_stack(stack_name):
-            print(f"[{stack_name}] ⏸️  teardown skipped — stack retained for inspection")
-        else:
-            cleanup_stack(result)
+        # inspection, in which case the startup reapers take it, its pre-stack
+        # and its boundary policy once the retention marker expires.
+        #
+        # Reached on BOTH the success and the failure path, and the result is a
+        # verification read back off the account rather than a cleanup message.
+        result["teardown"] = teardown_primary_stack(result, stack_name)
 
         if diagnostics_uri:
             ai_summary = f"{ai_summary}\n\n📦 Evidence bundle: {diagnostics_uri}"
@@ -7651,7 +8788,7 @@ def main():
         # finish. Marked INTERIM so a reader knows probe rows may still be
         # pending.
         interim = build_consolidated_summary(
-            stack_name, result, probe_results, publish_success
+            stack_name, result, probe_results, publish_success, startup_sweep_findings
         )
         interim = (
             "⏳ INTERIM SUMMARY (primary suite done; deployment-variant probes "
@@ -7726,12 +8863,68 @@ def main():
         if not failure_reason:
             failure_reason = f"--headless template validation failed: {headless_detail}"
 
+    # Fold the teardown verification (Step 4) into the verdict. A leaked IAM
+    # pre-stack or managed policy is a per-account quota consumed, so the
+    # failure it produces surfaces at an unrelated deploy days later with
+    # nothing to connect it back — which is why this is a run failure and not a
+    # warning. A warning-level line is exactly what three runs' orphaned
+    # policies, one of them from a run that passed, accumulated behind.
+    teardown_findings = (result or {}).get("teardown", {}).get("findings") or []
+    if teardown_findings:
+        stack_success = False
+        detail = "; ".join(teardown_findings)
+        print(f"[{stack_name}] ❌ IAM teardown NOT verified: {detail}")
+        if not failure_reason:
+            failure_reason = f"IAM teardown not verified: {detail}"
+
+    # Fold the Step 0 sweeps into the verdict, on the same terms as the teardown
+    # above: a sweep that could not enumerate reaps nothing on *every* run and
+    # the cost accrues silently against an account nobody is watching (#1391).
+    #
+    # Applied here rather than at the sweeps themselves, which are Step 0:
+    # raising there would cost the whole night's deploy, suite and teardown,
+    # which on a durable denial buys nothing and on a transient would be a bad
+    # trade. This keeps every other signal the run produces and ends it red with
+    # a named reason instead. An already-set `failure_reason` wins, so a real
+    # deploy failure is never masked by a sweep.
+    #
+    # ONE BLOCK PER SWEEP, and only for the sweeps whose `fails_run` is True —
+    # see STARTUP_SWEEPS, where that decision is recorded per member with its own
+    # reason. The BDA blueprint sweep and the diagnostics expiry get their table
+    # row and no verdict flip; writing those decisions as one loop over the
+    # registry would read as one rule applied to six lookalikes, which is the
+    # defect this fix is the second half of.
+    if stale_stack_findings:
+        stack_success = False
+        reason = _report_sweep_not_completed(
+            "cleanup_stale_idp_stacks", stale_stack_findings
+        )
+        failure_reason = _first_failure_reason(failure_reason, reason)
+    if apigw_vpc_sweep_findings:
+        stack_success = False
+        reason = _report_sweep_not_completed(
+            "cleanup_stale_apigw_test_vpcs", apigw_vpc_sweep_findings
+        )
+        failure_reason = _first_failure_reason(failure_reason, reason)
+    if stale_bucket_findings:
+        stack_success = False
+        reason = _report_sweep_not_completed(
+            "cleanup_stale_idp_buckets", stale_bucket_findings
+        )
+        failure_reason = _first_failure_reason(failure_reason, reason)
+    if stale_policy_findings:
+        stack_success = False
+        reason = _report_sweep_not_completed(
+            "cleanup_stale_idp_policies", stale_policy_findings
+        )
+        failure_reason = _first_failure_reason(failure_reason, reason)
+
     # Step 5: Print the deterministic consolidated status table FIRST (always
     # renders, Bedrock or not — the GitLab log needs a reliable "every test +
     # status" view), then the Bedrock pass/fail narrative(s). Both are uploaded
     # to S3 so the GitLab job can fetch the full report.
     consolidated = build_consolidated_summary(
-        stack_name, result, probe_results, publish_success
+        stack_name, result, probe_results, publish_success, startup_sweep_findings
     )
     print(f"\n{consolidated}\n")
 

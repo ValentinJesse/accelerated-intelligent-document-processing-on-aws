@@ -840,6 +840,7 @@ export const getPricing = /* GraphQL */ `
       success
       pricing
       defaultPricing
+      nonChargeableUnits
       error {
         type
         message

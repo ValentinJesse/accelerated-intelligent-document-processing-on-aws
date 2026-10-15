@@ -1356,6 +1356,21 @@ Monitor resource usage and costs:
 - **S3 Storage**: Track storage growth over time
 - **Data Transfer**: Monitor network costs between services
 
+### `DocumentEstimatedCost` — the one cost signal the stack emits itself
+
+`DocumentEstimatedCost`, and its companion `UnpricedMeteringRows`, are emitted
+per completed document into the stack's own metric namespace, carrying the cost
+already written to that document's metering rows. `Sum` over a period is spend in
+that period, which is the shape a spend alarm wants; `Average` is cost per
+document. Neither metric carries dimensions, for a reason worth reading before
+adding one.
+
+**It reports and does not enforce.** Nothing throttles, queues or stops
+processing when spend rises, and the stack creates no spend alarm and no budget —
+both are yours to set up. The dimension reasoning, how to scope a budget (which
+is less obvious than it looks) and a method for choosing its amount are in
+[Cost Considerations](cost-calculator.md#documentestimatedcost--a-cloudwatch-metric-you-can-alarm-on).
+
 ## Custom Dashboard Creation
 
 You can create custom dashboards focused on specific aspects:

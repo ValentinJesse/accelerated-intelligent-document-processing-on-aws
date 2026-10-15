@@ -303,17 +303,18 @@ document.
 And **the declarations above govern the API, not the buckets.**
 `CognitoIdentityPoolSetRole` attaches a single `authenticated` role and declares no role
 mappings, so group membership plays no part in which role a signed-in user assumes,
-and that role — `CognitoAuthorizedRole` — grants `s3:GetObject`, `s3:GetObjectVersion` and
-`s3:ListBucket` on the Input and Output buckets plus `kms:Decrypt` on the
+and that role — `CognitoAuthorizedRole` — grants `s3:GetObject` and
+`s3:GetObjectVersion` on the Input and Output buckets plus `kms:Decrypt` on the
 customer-managed key to every authenticated user, group or no group. The web UI uses that
 path deliberately: the file viewer defaults to signing in the browser, as do the page
 thumbnails, the page-image viewer and the document export. So a caller who is refused
-`getFileContents` can still read a **document** object. No `ANY` operation hands over an
-object key any more, but that is not what bounds the role: `s3:ListBucket` on it enumerates
-the buckets directly, with no API call at all. Narrowing this is a change to the
-document-viewing data path — group-scoped identity pool role mappings, or a resolver-only
-read path — and it has not been made; the two candidate shapes and their obstacles are set
-out in
+`getFileContents` can still read a **document** object. The grant is object read only —
+both actions authorize against a key, the role carries no `s3:ListBucket` to produce one,
+and no `ANY` operation hands over an object key either — so what is left is that the
+key-returning operations are `ANY_GROUP`, and any one of the five groups reaches them.
+Narrowing this is a change to the document-viewing data path — group-scoped identity
+pool role mappings, or a resolver-only read path — and it has not been made; the two
+candidate shapes and their obstacles are set out in
 [Identity Pool group scoping](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/blob/develop/docs/planning/identity-pool-group-scoping-plan.md).
 The buckets the per-user scope axes partition — Configuration and Test Set — are
 deliberately **not** on that role, so `allowedConfigVersions` and `allowedTestSets` are not
@@ -379,9 +380,9 @@ justification in `scripts/security/dep_audit_allowlist.json`.
 
 | Review item | Your comment | Owner | Date |
 |---|---|---|---|
-| Who is allowed to create an account? Is `AllowedSignUpEmailDomain` still empty, keeping sign-up administrator-only, and if you have set it, do you control every domain listed? A self-registered user is in no group, so the API refuses them the document-content operations — but `CognitoAuthorizedRole` still grants them `s3:GetObject`/`ListBucket` on the document buckets directly | | | |
+| Who is allowed to create an account? Is `AllowedSignUpEmailDomain` still empty, keeping sign-up administrator-only, and if you have set it, do you control every domain listed? A self-registered user is in no group, so the API refuses them the document-content operations — but `CognitoAuthorizedRole` still grants them `s3:GetObject` on the document buckets directly, for any object key they arrive with | | | |
 | Is MFA enabled on the Cognito user pool? The pool sets no `MfaConfiguration`, so a default deployment has it off | | | |
-| Do you accept that the 6 `groups: ANY` operations carrying no ownership or scope check are reachable by any authenticated user, including one in no group? They are a public version number, the two fine-tuning job reads and the three feature-platform reads — nothing derived from a document. Separately, and not fixed by any of these declarations: `CognitoAuthorizedRole` grants every authenticated user `s3:GetObject`/`ListBucket` on the document buckets, so a direct S3 read reaches document bytes with no API call and no key from an API. Does that meet your data classification? | | | |
+| Do you accept that the 6 `groups: ANY` operations carrying no ownership or scope check are reachable by any authenticated user, including one in no group? They are a public version number, the two fine-tuning job reads and the three feature-platform reads — nothing derived from a document. Separately, and not fixed by any of these declarations: `CognitoAuthorizedRole` grants every authenticated user `s3:GetObject` on the document buckets, so a direct S3 read reaches document bytes with no resolver in the path and no per-document check. The role cannot enumerate, so the key has to come from elsewhere — and the API operations that return keys require an assigned group. Does that meet your data classification? | | | |
 | Have you restricted `WAFAllowedIPv4Ranges`, and if the API is reachable from the internet, have you added AWS Managed Rules and a rate-based rule beyond the IP allow-list? | | | |
 | Have you supplied a `PermissionsBoundaryArn`, and does your organization require one? | | | |
 | Is the 123-statement `Resource: "*"` surface acceptable under your service control policies, and have you reviewed the statements that are not forced by an account-scoped API? | | | |
