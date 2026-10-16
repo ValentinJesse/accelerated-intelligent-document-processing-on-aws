@@ -1398,9 +1398,12 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   fields could not be located. */}
               {path.length === 0 && coverage.total > 0 && (
                 <ExtBox fontSize="body-s" color="text-body-secondary">
-                  {!geometryAvailable
-                    ? 'No field has a bounding box in this document'
-                    : `${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} have a bounding box`}
+                  {/* Always the count, never a claim about the document. "No field
+                      has a bounding box in this document" was wrong wherever a
+                      packet's other sections had them, and `0 of 13 fields have a
+                      bounding box` says the same thing about the section it is
+                      captioning without attributing a cause. */}
+                  {`${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} have a bounding box`}
                   {/* "in this section" once a filter is on, because the count is of
                       the section and the rows are a subset of it. Without that the
                       caption reads as a statement about what is on screen, and

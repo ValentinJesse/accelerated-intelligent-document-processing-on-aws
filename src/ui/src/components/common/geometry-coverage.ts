@@ -26,11 +26,14 @@ export type FieldGeometryState =
   /** A value, but it could not be tied to anything on the page. */
   | 'unmatched'
   /**
-   * Nothing in this document has a box, so this field's own value explains
-   * nothing. Distinguished because the remedy is a configuration one — the
-   * document was produced under `geometry.mode: off`, or its labels predate
-   * geometry — and the per-field reasons would otherwise send a reader checking
-   * every value against the page for a cause that is the same on every row.
+   * This field has a value, and nothing in the section has a box — so its own
+   * value explains nothing and the cause is shared by every row.
+   *
+   * ⚠️ Scoped to the **section**, and asserts no cause. A packet section can
+   * come back with no boxes while its siblings have them under the same
+   * configuration, so neither "this document" nor `geometry.mode` can be
+   * claimed from here; saying either sent a reader to the configuration for a
+   * section-level outcome.
    */
   | 'none-produced'
   /**
@@ -117,11 +120,13 @@ export const classifyFieldGeometry = (
   hasFieldData = true,
 ): FieldGeometryState => {
   if (hasGeometry) return 'located';
-  if (!geometryAvailable) return 'none-produced';
-  // Before the no-data case, because it is the more useful statement when both
-  // hold: a field the model returned nothing for needs no explanation about
-  // missing assessment data.
+  // A field's own absent value explains it before any section-wide fact does.
+  // Ordered after the section check previously, which masked the truthful
+  // reason: a misclassified section extracted nothing at all, so every field
+  // read "no bounding boxes in this document" — blaming the configuration —
+  // where "no value extracted" was both true and useful.
   if (isAbsentValue(value)) return 'no-value';
+  if (!geometryAvailable) return 'none-produced';
   // `unmatched` is a claim that matching ran and found nothing, so it requires
   // an entry to have existed. Without one, nothing ran.
   return hasFieldData ? 'unmatched' : 'no-data';
@@ -142,7 +147,7 @@ export const describeFieldGeometry = (state: FieldGeometryState): string => {
     case 'unmatched':
       return 'Value not found in the page text, so no bounding box.';
     case 'none-produced':
-      return 'No bounding boxes in this document (extraction.geometry.mode).';
+      return 'No field in this section has a bounding box.';
     case 'no-data':
       return 'No bounding box recorded — the assessment step skipped this field.';
     default:

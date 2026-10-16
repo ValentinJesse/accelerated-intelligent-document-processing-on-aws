@@ -1655,9 +1655,11 @@ The causes, which have different remedies:
   the value is not present verbatim in the OCR text, which happens when extraction
   canonicalizes it (a reformatted date) or infers it from elsewhere. `llm_grounded`
   is the mode that addresses this class.
-- **No boxes at all for the document.** Set by `geometry.mode: off`, or labels
-  predating geometry. Stated once rather than per field, since the cause is
-  identical on every row.
+- **No field in the section has one.** The cause is shared by every row rather
+  than being about any one value. ⚠️ It is reported about the **section**, not the
+  document or the configuration: one section of a packet can come back with no
+  boxes while its siblings have them under the same `geometry.mode`, so neither
+  can be concluded from the viewer.
 
 A section also states its coverage up front — *"6 of 10 fields have a bounding
 box"* — so the split is visible without hovering every row. The denominator is the

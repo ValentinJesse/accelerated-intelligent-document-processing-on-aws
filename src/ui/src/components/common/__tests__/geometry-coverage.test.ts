@@ -94,14 +94,20 @@ describe('classifyFieldGeometry', () => {
   });
 });
 
-describe('classifyFieldGeometry when the document has no geometry at all', () => {
-  it('blames the document rather than the field', () => {
-    // With geometry.mode: off, or on labels predating geometry, no row can be
-    // located and the cause is identical on every one. Reporting each field's own
-    // value would send the reader checking values against the page for a
-    // configuration condition no checking would reveal.
+describe('classifyFieldGeometry when nothing in the section has geometry', () => {
+  it('reports the shared cause for a field that does have a value', () => {
+    // Nothing in the section is located, so this field's own value explains
+    // nothing and the cause is the same on every row.
     expect(classifyFieldGeometry('24 AUG 11', false, false)).toBe('none-produced');
-    expect(classifyFieldGeometry('', false, false)).toBe('none-produced');
+  });
+
+  it('still prefers the absent value, which is the truthful reason', () => {
+    // Measured on a misclassified packet section: all thirteen fields came back
+    // 'None' with confidence 0.0 and no boxes, so the section-wide check fired
+    // first and every row read "no bounding boxes in this document" — blaming
+    // the configuration, while sibling sections of the same document had boxes.
+    expect(classifyFieldGeometry('', false, false)).toBe('no-value');
+    expect(classifyFieldGeometry('None', false, false)).toBe('no-value');
   });
 
   it('still reports a field that does have a box', () => {
@@ -133,10 +139,20 @@ describe('classifyFieldGeometry when nothing was recorded for the field', () => 
 });
 
 describe('describeFieldGeometry', () => {
+  it('never attributes a section-level outcome to the document or the configuration', () => {
+    // A packet section can come back with no boxes while its siblings have them
+    // under the same configuration, so neither can be claimed from here.
+    const all = (['located', 'no-value', 'unmatched', 'none-produced', 'no-data'] as const).map(describeFieldGeometry);
+    all.forEach((text) => {
+      expect(text).not.toMatch(/this document/i);
+      expect(text).not.toMatch(/geometry\.mode/i);
+    });
+  });
+
   it('names the cause rather than restating the absence', () => {
     expect(describeFieldGeometry('no-value')).toMatch(/No value extracted, so no bounding box/);
     expect(describeFieldGeometry('unmatched')).toMatch(/Value not found in the page text/);
-    expect(describeFieldGeometry('none-produced')).toMatch(/No bounding boxes in this document/);
+    expect(describeFieldGeometry('none-produced')).toMatch(/No field in this section has a bounding box/);
     expect(describeFieldGeometry('no-data')).toMatch(/No bounding box recorded/);
   });
 
