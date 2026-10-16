@@ -12,9 +12,9 @@
  * section, the six carrying a value each had a box and the four carrying none had
  * no box ([#1327]).
  *
- * That rule is obvious once stated and invisible until then: the viewer offered a
- * locate control on some rows and nothing on the others, leaving the reader to
- * infer the rule or conclude the boxes were unreliable.
+ * Every row therefore carries a control: the locate action where there is a box,
+ * and otherwise the reason there is none. An empty slot would leave the reader to
+ * infer the rule, or to conclude the boxes are unreliable.
  */
 
 /** A field's relationship to the page, as the viewer can determine it. */
@@ -42,8 +42,9 @@ export type FieldGeometryState =
    * rather than a match having been attempted and missed.
    *
    * Real and common: one form section of a packet showed ten fields with
-   * entries for three. Reporting the other seven as unmatched invited the reader
-   * to check values against the page, which could not have revealed the cause.
+   * entries for three. It must not be reported as `unmatched`, which tells the
+   * reader to check the value against the page — advice that cannot reveal a
+   * cause lying in whether the field was assessed at all.
    */
   | 'no-data';
 
@@ -128,11 +129,11 @@ export const classifyFieldGeometry = (
   hasFieldData = true,
 ): FieldGeometryState => {
   if (hasGeometry) return 'located';
-  // A field's own absent value explains it before any section-wide fact does.
-  // Ordered after the section check previously, which masked the truthful
-  // reason: a misclassified section extracted nothing at all, so every field
-  // read "no bounding boxes in this document" — blaming the configuration —
-  // where "no value extracted" was both true and useful.
+  // A field's own absent value is consulted before any section-wide fact, so
+  // the reason names the field rather than the section. A section that
+  // extracted nothing at all is the case that makes the order matter: every
+  // field is then absent, and "no value extracted" is both true and actionable
+  // where a section-wide statement is neither.
   if (isAbsentValue(value)) return 'no-value';
   if (!geometryAvailable) return 'none-produced';
   // `unmatched` is a claim that matching ran and found nothing, so it requires

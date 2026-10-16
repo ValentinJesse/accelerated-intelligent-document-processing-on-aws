@@ -19,7 +19,7 @@
 import React from 'react';
 import { Button, Popover, Box } from '@cloudscape-design/components';
 
-import { classifyFieldGeometry, describeFieldGeometry } from './geometry-coverage';
+import { classifyFieldGeometry, describeFieldGeometry, hasDrawableGeometry } from './geometry-coverage';
 
 interface FieldGeometryAffordanceProps {
   /** Label the control names, so the announcement identifies the row. */
@@ -58,7 +58,13 @@ const FieldGeometryAffordance = ({
   hasFieldData = true,
   onLocate,
 }: FieldGeometryAffordanceProps): React.JSX.Element => {
-  const state = classifyFieldGeometry(value, Boolean(geometry), geometryAvailable, hasFieldData);
+  // `hasDrawableGeometry`, not truthiness: an empty array and an entry with no
+  // boundingBox are both truthy and neither is drawable, so the control would
+  // offer a highlight the overlay cannot paint while the count — which uses
+  // this predicate — called the field unlocated. Callers normalise before
+  // passing today, which makes the agreement a convention at three call sites;
+  // routing through the one function makes it structural.
+  const state = classifyFieldGeometry(value, hasDrawableGeometry(geometry), geometryAvailable, hasFieldData);
 
   if (state === 'located') {
     return (

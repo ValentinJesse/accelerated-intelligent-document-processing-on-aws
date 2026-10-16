@@ -40,9 +40,6 @@ const logger = new ConsoleLogger('VisualEditorModal');
 type ExtendedBoxProps = BoxProps & React.HTMLAttributes<HTMLDivElement>;
 const ExtBox = Box as React.ComponentType<ExtendedBoxProps>;
 
-
-
-
 interface VisualEditorModalProps {
   visible: boolean;
   onDismiss: () => void;

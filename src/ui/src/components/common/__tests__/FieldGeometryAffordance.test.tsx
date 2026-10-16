@@ -160,23 +160,26 @@ describe('a section that can only partly be shown on the page', () => {
     expect(screen.getByText(/0 of 10 fields have a bounding box/)).toBeInTheDocument();
   });
 
-  it('takes the skipped-field verdict from the same lookup that renders the confidence', () => {
-    // Reported from a deployed build: a row showed "Confidence: 87.0% /
-    // Threshold: 80.0%" beside "the assessment step skipped this field". Those
-    // came from two different lookups — the number from
-    // getFieldConfidenceInfo(fieldKey, explainabilityInfo, filteredPath, …),
-    // the verdict from a `confidence` prop a parent derives with the raw path.
-    // `filteredPath` strips structural keys, so the two can disagree.
+  it("keys the skipped-field verdict on entry presence, from the row's own lookup", () => {
+    // Three distinct facts, easily conflated, and each wrong as a stand-in for
+    // this one:
+    //   - the `confidence` prop: derived by whichever parent rendered the row,
+    //     along a path that can resolve differently from the row's own lookup;
+    //   - `hasConfidenceInfo`: whether a usable NUMBER was found, which is false
+    //     for a field assessed at a finer granularity (a scalar whose entry is an
+    //     object of sub-field confidences) and for a run that records confidence
+    //     in another shape;
+    //   - `hasEntry`: whether anything was recorded about the field, which is
+    //     what "the assessment step skipped this field" actually claims.
     //
-    // ⚠️ Asserted at source level deliberately. The shape that makes them
-    // disagree is not reproduced here — both recursive call sites pass the prop,
-    // so every payload tried gives the same answer either way, and a rendered
-    // test over those shapes passes against the broken wiring too (measured).
-    // What is pinned instead is the single source, which removes the class:
-    // the reason cannot contradict the number when both read the same lookup.
+    // ⚠️ Asserted at source level because no fixture here separates them: both
+    // recursive call sites pass the prop, so the shapes available to a rendered
+    // test answer the same whichever is read (measured — a rendered version of
+    // this passed against the prop). What is pinned is the single source.
     const source = readFileSync(join(__dirname, '..', '..', 'document-viewer', 'FormFieldRenderer.tsx'), 'utf-8');
-    expect(source).toContain('hasFieldData={confidenceInfo.hasConfidenceInfo}');
+    expect(source).toContain('hasFieldData={Boolean(confidenceInfo.hasEntry)}');
     expect(source).not.toMatch(/hasFieldData=\{confidence !== undefined/);
+    expect(source).not.toMatch(/hasFieldData=\{confidenceInfo\.hasConfidenceInfo\}/);
   });
 
   it('omits the count when the section displays no fields at all', () => {

@@ -21,6 +21,9 @@ import { ConsoleLogger } from 'aws-amplify/utils';
 import { getFieldConfidenceInfo } from '../common/confidence-alerts-utils';
 import FieldGeometryAffordance from '../common/FieldGeometryAffordance';
 import { hasAnyDrawableGeometry, summariseGeometryCoverage } from '../common/geometry-coverage';
+
+/** Stands in at every level below the root, which does not render the count. */
+const EMPTY_COVERAGE = { located: 0, total: 0 };
 import type { BoxProps } from '@cloudscape-design/components';
 
 // Extended Box props to allow native HTML attributes that Cloudscape passes through at runtime
@@ -136,11 +139,12 @@ const FormFieldRenderer = memo<Record<string, any>>(
     /**
      * How many of this section's fields have a bounding box.
      *
-     * Computed at every level and rendered only at the root, which is cheap (one
-     * walk of `explainability_info`, no React work) and keeps the count out of
-     * the recursive render path, where it would be recomputed per field.
+     * Only at the root, which is the only level that renders it. This component
+     * recurses, and the walk is over the value subtree, so computing it at every
+     * level costs depth × nodes on a table-heavy document for a line that is
+     * drawn once.
      */
-    const coverage = summariseGeometryCoverage(value, explainabilityInfo);
+    const coverage = path.length === 0 ? summariseGeometryCoverage(value, explainabilityInfo) : EMPTY_COVERAGE;
 
     /**
      * Whether this document produced any boxes at all, which decides whether a
@@ -690,15 +694,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* From the SAME lookup that renders the confidence on this
-                         row, never from the `confidence` prop. The prop is passed
-                         by whichever parent happened to derive it, and
-                         `getFieldConfidenceInfo` navigates differently — so where
-                         the two disagree the row showed "Confidence: 87.0% /
-                         Threshold: 80.0%" beside an explanation that the
-                         assessment step had skipped the field. One source means
-                         the reason cannot contradict the number above it. */
-                      hasFieldData={confidenceInfo.hasConfidenceInfo}
+                      hasFieldData={Boolean(confidenceInfo.hasEntry)}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -919,15 +915,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* From the SAME lookup that renders the confidence on this
-                         row, never from the `confidence` prop. The prop is passed
-                         by whichever parent happened to derive it, and
-                         `getFieldConfidenceInfo` navigates differently — so where
-                         the two disagree the row showed "Confidence: 87.0% /
-                         Threshold: 80.0%" beside an explanation that the
-                         assessment step had skipped the field. One source means
-                         the reason cannot contradict the number above it. */
-                      hasFieldData={confidenceInfo.hasConfidenceInfo}
+                      hasFieldData={Boolean(confidenceInfo.hasEntry)}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1158,15 +1146,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* From the SAME lookup that renders the confidence on this
-                         row, never from the `confidence` prop. The prop is passed
-                         by whichever parent happened to derive it, and
-                         `getFieldConfidenceInfo` navigates differently — so where
-                         the two disagree the row showed "Confidence: 87.0% /
-                         Threshold: 80.0%" beside an explanation that the
-                         assessment step had skipped the field. One source means
-                         the reason cannot contradict the number above it. */
-                      hasFieldData={confidenceInfo.hasConfidenceInfo}
+                      hasFieldData={Boolean(confidenceInfo.hasEntry)}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1398,11 +1378,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   fields could not be located. */}
               {path.length === 0 && coverage.total > 0 && (
                 <ExtBox fontSize="body-s" color="text-body-secondary">
-                  {/* Always the count, never a claim about the document. "No field
-                      has a bounding box in this document" was wrong wherever a
-                      packet's other sections had them, and `0 of 13 fields have a
-                      bounding box` says the same thing about the section it is
-                      captioning without attributing a cause. */}
+                  {/* Always the count, and never a claim about the document: a
+                      packet section can come back with no boxes while its siblings
+                      have them, so only the section this line captions can be
+                      spoken for. `0 of 13 fields have a bounding box` says that
+                      much and attributes no cause. */}
                   {`${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} have a bounding box`}
                   {/* "in this section" once a filter is on, because the count is of
                       the section and the rows are a subset of it. Without that the
@@ -1630,15 +1610,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* From the SAME lookup that renders the confidence on this
-                         row, never from the `confidence` prop. The prop is passed
-                         by whichever parent happened to derive it, and
-                         `getFieldConfidenceInfo` navigates differently — so where
-                         the two disagree the row showed "Confidence: 87.0% /
-                         Threshold: 80.0%" beside an explanation that the
-                         assessment step had skipped the field. One source means
-                         the reason cannot contradict the number above it. */
-                      hasFieldData={confidenceInfo.hasConfidenceInfo}
+                      hasFieldData={Boolean(confidenceInfo.hasEntry)}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1991,17 +1963,14 @@ const FormFieldRenderer = memo<Record<string, any>>(
                  This is the fallback field shape, which has no value header row to
                  hang the locate control off. */
               secondaryControl={
-                geometry ? (
-                  <Button
-                    variant="inline-icon"
-                    iconName="search"
-                    ariaLabel={`Show ${fieldKey} on the page`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleClick();
-                    }}
-                  />
-                ) : undefined
+                <FieldGeometryAffordance
+                  fieldKey={fieldKey}
+                  value={value}
+                  geometry={geometry}
+                  geometryAvailable={geometryAvailable}
+                  hasFieldData={Boolean(confidenceInfo.hasEntry)}
+                  onLocate={handleClick}
+                />
               }
             >
               {isReadOnly ? (

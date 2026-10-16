@@ -23,6 +23,12 @@ interface BoundingBoxGeometry {
 interface FieldExplainabilityResult {
   confidence: number | null;
   geometry: BoundingBoxGeometry | null;
+  /**
+   * Whether `explainability_info` held an entry for the field at all, which is
+   * not the same as whether that entry carried a numeric confidence: this
+   * lookup populates `confidence` only for a number.
+   */
+  hasEntry: boolean;
 }
 
 interface ComparisonItem extends FlatField {
@@ -35,6 +41,8 @@ interface ComparisonItem extends FlatField {
   hasPredictedCorrection: boolean;
   confidence: number | null;
   geometry: BoundingBoxGeometry | null;
+  /** Whether `explainability_info` held an entry for the field at all. */
+  hasEntry: boolean;
 }
 
 interface CorrectionItem {
@@ -148,7 +156,7 @@ const getFieldExplainabilityInfo = (
   explainabilityInfo: unknown[] | null | undefined,
 ): FieldExplainabilityResult => {
   if (!explainabilityInfo || !Array.isArray(explainabilityInfo) || !explainabilityInfo[0]) {
-    return { confidence: null, geometry: null };
+    return { confidence: null, geometry: null, hasEntry: false };
   }
 
   // Filter out structural keys from the path
@@ -201,7 +209,7 @@ const getFieldExplainabilityInfo = (
     }
   }
 
-  return { confidence, geometry };
+  return { confidence, geometry, hasEntry: true };
 };
 
 /**
@@ -296,6 +304,7 @@ const FieldComparisonTable = ({
         hasPredictedCorrection: !!predictedCorrection,
         confidence,
         geometry,
+        hasEntry: explainInfo.hasEntry,
       };
     });
 
@@ -505,11 +514,12 @@ const FieldComparisonTable = ({
           value={item.predictedValue}
           geometry={item.geometry}
           geometryAvailable={anyFieldLocatable}
-          /* Same signal the field renderer passes: no confidence means no
-             assessment entry for this field, which is a different cause from a
-             box that was looked for and not found. Omitting it defaulted every
-             such row to "unmatched". */
-          hasFieldData={item.confidence !== undefined && item.confidence !== null}
+          /* Entry presence, not a confidence number. This lookup populates
+             `confidence` only for a numeric one, so a field whose entry exists
+             without one — assessed at a finer granularity, or from a run that
+             records confidence differently — would be reported as never
+             assessed, a stronger and different claim than unmatched. */
+          hasFieldData={Boolean(item.hasEntry)}
           onLocate={() => handleRowClick(item)}
         />
       ),
