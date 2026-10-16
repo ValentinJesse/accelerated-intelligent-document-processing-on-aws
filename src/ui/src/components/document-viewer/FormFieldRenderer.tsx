@@ -1389,7 +1389,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       caption reads as a statement about what is on screen, and
                       "6 of 10" above two rows is the same two-facts-no-way-to-choose
                       problem this caption exists to remove. */}
-                  {geometryAvailable && filterMode !== 'none' && ' in this section'}
+                  {filterMode !== 'none' && ' in this section'}
                   {/* No clause naming the causes. There are four of them, only one
                       applies to any given row, and which one requires that row's own
                       entry and value — so a line about the section can only list

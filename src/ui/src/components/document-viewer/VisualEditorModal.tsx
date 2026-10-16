@@ -1049,49 +1049,49 @@ const VisualEditorModal = ({
                     <Header
                       variant="h3"
                       actions={
-                          <SpaceBetween direction="horizontal" size="xs" alignItems="center">
-                            {/* Expand/Collapse controls */}
-                            <Button variant="normal" onClick={handleExpandAll}>
-                              + Expand All
-                            </Button>
-                            <Button variant="normal" onClick={handleCollapseAll}>
-                              − Collapse All
-                            </Button>
-                            {/* Filter dropdown */}
-                            <select
-                              value={filterMode}
-                              onChange={(e) => setFilterMode(e.target.value)}
-                              style={{
-                                padding: '4px 8px',
-                                borderRadius: '4px',
-                                border: '1px solid #ccc',
-                              }}
-                            >
-                              <option value="none">Show All</option>
-                              <option value="confidence-alerts">Confidence Alerts Only</option>
-                              <option value="eval-mismatches" disabled={!showEvaluation}>
-                                Eval Mismatches Only
-                              </option>
-                            </select>
-                            {/* Evaluation toggle */}
-                            {(isBaselineAvailable || loadingEvaluation) && (
-                              <>
-                                {loadingEvaluation && <Spinner {...({ size: 'small' } as Record<string, unknown>)} />}
-                                <Toggle
-                                  checked={showEvaluation}
-                                  onChange={({ detail }) => {
-                                    setShowEvaluation(detail.checked);
-                                    // Reset filter when turning off evaluation
-                                    if (!detail.checked) {
-                                      setFilterMode('none');
-                                    }
-                                  }}
-                                  disabled={loadingEvaluation || !baselineData}
-                                >
-                                  Show Evaluation
-                                </Toggle>
-                              </>
-                            )}
+                        <SpaceBetween direction="horizontal" size="xs" alignItems="center">
+                          {/* Expand/Collapse controls */}
+                          <Button variant="normal" onClick={handleExpandAll}>
+                            + Expand All
+                          </Button>
+                          <Button variant="normal" onClick={handleCollapseAll}>
+                            − Collapse All
+                          </Button>
+                          {/* Filter dropdown */}
+                          <select
+                            value={filterMode}
+                            onChange={(e) => setFilterMode(e.target.value)}
+                            style={{
+                              padding: '4px 8px',
+                              borderRadius: '4px',
+                              border: '1px solid #ccc',
+                            }}
+                          >
+                            <option value="none">Show All</option>
+                            <option value="confidence-alerts">Confidence Alerts Only</option>
+                            <option value="eval-mismatches" disabled={!showEvaluation}>
+                              Eval Mismatches Only
+                            </option>
+                          </select>
+                          {/* Evaluation toggle */}
+                          {(isBaselineAvailable || loadingEvaluation) && (
+                            <>
+                              {loadingEvaluation && <Spinner {...({ size: 'small' } as Record<string, unknown>)} />}
+                              <Toggle
+                                checked={showEvaluation}
+                                onChange={({ detail }) => {
+                                  setShowEvaluation(detail.checked);
+                                  // Reset filter when turning off evaluation
+                                  if (!detail.checked) {
+                                    setFilterMode('none');
+                                  }
+                                }}
+                                disabled={loadingEvaluation || !baselineData}
+                              >
+                                Show Evaluation
+                              </Toggle>
+                            </>
+                          )}
                         </SpaceBetween>
                       }
                     >

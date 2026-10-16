@@ -4,11 +4,14 @@
 /**
  * The per-field answer to "can this be shown on the page, and if not why".
  *
- * One component for all four of FormFieldRenderer's value branches (string,
- * number, boolean, array item), which carried four byte-identical copies of the
- * locate button. The duplication is why the absent case went unanswered for so
- * long: adding an explanation meant adding it four times, and a change to one
- * copy was invisible against the others.
+ * One component for the five places FormFieldRenderer renders this control —
+ * the string, number, boolean and null value branches, plus the `secondaryControl`
+ * of the fallback field shape. The array branch recurses into the primitive
+ * renderers and has none of its own, so there is no array-item copy to find.
+ *
+ * The contract lives here rather than being restated per site: the branches are
+ * near-identical, which makes a per-branch copy easy to change in one place and
+ * miss in the other four.
  *
  * Both halves are **real controls rather than hover affordances**, for the reason
  * the locate button already was: a click target with no affordance is invisible to
