@@ -187,9 +187,11 @@ in ca-central-1. See [Document Knowledge Base Query](./knowledge-base.md#configu
 ca-central-1 is one of the four Regions each release is published to, so it has
 a Launch Stack button in the [Deployment Guide](./deployment.md) and a plain
 `idp-cli deploy --region ca-central-1` resolves the published template without
-your having to name one. Canada joined that set after 0.6.11, so a release
-earlier than that has no ca-central-1 artifacts; to deploy one of those, or to
-deploy unreleased code, supply the template yourself in one of two forms:
+your having to name one. ⚠️ **0.6.11 and every release before it have no
+ca-central-1 artifacts** — Canada joined the published set in 0.6.12, so both
+routes work only from that release on, and until it is published the Launch
+Stack button answers 404. To deploy an earlier release, or unreleased code,
+supply the template yourself in one of two forms:
 
 ```bash
 # Build, publish to a bucket in your account and deploy in one step

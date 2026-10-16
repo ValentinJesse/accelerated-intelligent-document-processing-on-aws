@@ -56,7 +56,8 @@ appended by the publisher, not written in the script
 
 ⚠️ **Why those regions** is recorded for one of the four and not for the other three. The
 rationale for `ca-central-1` is Canada-specific model routing and data residency, built out
-in #1373 and documented in `docs/canada-region-model-support.md`. For `us-west-2`,
+in [#1373](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/pull/1373)
+and documented in `docs/canada-region-model-support.md`. For `us-west-2`,
 `us-east-1` and `eu-central-1` the rationale (customer demand, EU data-residency coverage,
 model availability) is not written down anywhere in the repository. Do not add or drop a
 region on the strength of this document.
@@ -68,9 +69,13 @@ and silent in each direction — a region published but missing from the dict is
 the `--govcloud` path while the Launch Stack buttons still offer it, and a region in the
 dict that was never published serves a 404. `TestTemplateUrlTable` in
 `lib/idp_cli_pkg/tests/test_cli_module_helpers.py` derives the script's region list and
-fails naming the mismatch, so adding a region means both files plus the Launch Stack tables
-in `README.md` and `docs/deployment.md` and the `## Templates` block in
-`.claude/skills/cut-release-changelog.md`. The extensions marketplace
+fails naming the mismatch, so adding a region means both files plus **three** Launch Stack
+tables — `README.md`, `docs/deployment.md` and
+`workshop/amazon-quick-integration-workshop.md`, the third being the one easiest to miss —
+the `## Templates` block in `.claude/skills/cut-release-changelog.md`, the upgrade-test
+region list in `.claude/skills/test-upgrade.md`, and any per-region page such as
+`docs/canada-region-model-support.md`. Only the first two are covered by a test; the rest
+are on this list because nothing checks them. The extensions marketplace
 (`config_library/extensions-marketplace.yaml`) is a **separate** set and is not covered by
 that test — it still carries three regions.
 
@@ -194,7 +199,13 @@ issue against the same bucket:
   prints `Could not verify/apply the EnforceSSLOnly bucket policy on the existing bucket —
   add it manually` and **continues**. It is not fatal.
 - `s3:CreateBucket` / `s3:PutBucketVersioning` — only on the 404 path, i.e. only if the
-  bucket does not exist. For the `aws-ml-blog-*` buckets this path is not taken.
+  bucket does not exist. For the `aws-ml-blog-*` buckets this path is not taken: all four,
+  `aws-ml-blog-ca-central-1` included, answer an unauthenticated request with `403
+  AccessDenied` rather than `404 NoSuchBucket`, which only an existing bucket does
+  (measured 2026-10-16; a name that does not exist was probed as a control and answered
+  `404 NoSuchBucket`). ⚠️ That establishes existence and **nothing about configuration** —
+  whether the Canada bucket has ACLs enabled is unread, and `--public` depends on it, so
+  see the ACL note below.
 - `cloudformation:ValidateTemplate`
 
 ✅ `--public` works by setting **object ACLs** (`ACL=public-read`) on every object under
@@ -485,6 +496,11 @@ bash scripts/aws-release.sh
 `<PREV>`, while `<PREV>`'s versioned artifacts under `artifacts/genai-idp/<PREV>/` are
 already there (so it is mostly a template re-upload plus per-region rebuild time). Then
 publish a patch release with the fix.
+
+⚠️ **Rolling back across the 0.6.11/0.6.12 boundary is different in `ca-central-1`**, where
+`<PREV>` was never published: that region does a full publish rather than a re-upload, and
+the Canada Launch Stack button then serves a release whose own `## Templates` block carries
+no Canada URL. Expect the Canada leg to take as long as a first publish.
 
 ⚠️ **Do not assume you can recover the previous `idp-main.yaml` bytes from S3 object
 versioning.** `publish.py` enables versioning only on buckets it creates; the

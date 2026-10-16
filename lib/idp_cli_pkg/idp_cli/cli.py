@@ -375,8 +375,9 @@ def _display_deployment_failure(client, stack_name: str, result):
 # publishes to: this dict and that script are the two halves of the same claim,
 # and a Region in one but not the other is the failure to avoid — an entry here
 # with no published artifact serves a 404 to `idp-cli deploy`, and a published
-# Region missing here is refused by the `--govcloud` path below while the README
-# and `docs/deployment.md` Launch Stack buttons still offer it.
+# Region missing here is refused by all three deploy paths that read this dict
+# (`--govcloud`, `--headless` and the plain deploy below) while the README and
+# `docs/deployment.md` Launch Stack buttons still offer it.
 TEMPLATE_URLS = {
     "us-west-2": "https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp-main.yaml",
     "us-east-1": "https://s3.us-east-1.amazonaws.com/aws-ml-blog-us-east-1/artifacts/genai-idp/idp-main.yaml",

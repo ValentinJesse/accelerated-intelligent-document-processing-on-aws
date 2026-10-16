@@ -62,14 +62,21 @@ bullet) and before the next `## [x.y.z]` heading, add:
 
 ```markdown
 ## Templates
-   - us-west-2: `https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp-main_0.6.4.yaml`
-   - us-east-1: `https://s3.us-east-1.amazonaws.com/aws-ml-blog-us-east-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
-   - eu-central-1: `https://s3.eu-central-1.amazonaws.com/aws-ml-blog-eu-central-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
-   - ca-central-1: `https://s3.ca-central-1.amazonaws.com/aws-ml-blog-ca-central-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
+   - us-west-2: `https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp-main_<x.y.z>.yaml`
+   - us-east-1: `https://s3.us-east-1.amazonaws.com/aws-ml-blog-us-east-1/artifacts/genai-idp/idp-main_<x.y.z>.yaml`
+   - eu-central-1: `https://s3.eu-central-1.amazonaws.com/aws-ml-blog-eu-central-1/artifacts/genai-idp/idp-main_<x.y.z>.yaml`
+   - ca-central-1: `https://s3.ca-central-1.amazonaws.com/aws-ml-blog-ca-central-1/artifacts/genai-idp/idp-main_<x.y.z>.yaml`
 ```
 
+The version is written out as `<x.y.z>` above rather than shown on a real
+release, because every release through 0.6.11 has a **three**-region block and a
+four-region example carrying one of those versions would be an instance of the
+back-filling the warning below forbids.
+
 Conventions to match exactly — copy the previous release's block and change the
-four version numbers rather than retyping it:
+version numbers rather than retyping it. ⚠️ **The first four-region cut adds a
+line as well**: 0.6.11's block has three URLs, so copying it and editing versions
+alone yields three and silently drops Canada.
 
 - `## Templates` is an `h2`, deliberately **not** nested under the release
   heading; that is the existing file's shape.

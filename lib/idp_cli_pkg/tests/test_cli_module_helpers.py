@@ -746,13 +746,68 @@ class TestTemplateUrlTable:
         """The dict and ``scripts/aws-release.sh`` are two halves of one claim.
 
         Derived rather than pinned, because the failure is one-sided and silent
-        in both directions: a Region published but absent here is refused by the
-        ``--govcloud`` path while the README's Launch Stack button still offers
-        it, and a Region here but never published serves a 404 to ``idp-cli
-        deploy``. Pinning only the set above would let the two drift apart with
-        this file still green.
+        in both directions: a Region published but absent here is refused by all
+        three deploy paths that read the dict (``--govcloud``, ``--headless``
+        and the plain deploy) while the README's Launch Stack button still
+        offers it, and a Region here but never published serves a 404 to
+        ``idp-cli deploy``. Pinning only the set above would let the two drift
+        apart with this file still green.
         """
-        script = Path(__file__).resolve().parents[3] / "scripts" / "aws-release.sh"
+        published = self._published_regions()
+        assert published == set(TEMPLATE_URLS), (
+            "scripts/aws-release.sh and TEMPLATE_URLS disagree about which "
+            "Regions carry a published template.\n"
+            f"  published but not in TEMPLATE_URLS: {sorted(published - set(TEMPLATE_URLS))}\n"
+            f"  in TEMPLATE_URLS but not published: {sorted(set(TEMPLATE_URLS) - published)}\n"
+            "Add the Region to both, plus all three Launch Stack tables "
+            "(README.md, docs/deployment.md, "
+            "workshop/amazon-quick-integration-workshop.md) and the Templates "
+            "block in .claude/skills/cut-release-changelog.md."
+        )
+
+    @pytest.mark.parametrize(
+        "page",
+        [
+            "README.md",
+            "docs/deployment.md",
+            "workshop/amazon-quick-integration-workshop.md",
+        ],
+    )
+    def test_every_published_region_has_a_launch_stack_row(self, page):
+        """Each Launch Stack table offers exactly the published Regions.
+
+        Three tables carry these buttons and the third is the one that gets
+        forgotten, because the other two sit side by side in the deployment
+        docs. A missing row is a Region customers cannot one-click deploy
+        although its artifacts exist; a surplus row is a button that 404s in the
+        CloudFormation console. Derived from the publish script for the same
+        reason the dict is.
+        """
+        path = self._repo_root() / page
+        if not path.is_file():  # pragma: no cover - packaged install
+            pytest.skip(f"{path} is not present in this checkout")
+
+        text = path.read_text(encoding="utf-8")
+        offered = {
+            region
+            for region in re.findall(
+                r"templateURL=https://s3\.([a-z0-9-]+)\.amazonaws\.com/", text
+            )
+        }
+        published = self._published_regions()
+        assert offered == published, (
+            f"{page}'s Launch Stack table and scripts/aws-release.sh disagree.\n"
+            f"  published with no button: {sorted(published - offered)}\n"
+            f"  button with no published artifact: {sorted(offered - published)}"
+        )
+
+    @staticmethod
+    def _repo_root() -> Path:
+        return Path(__file__).resolve().parents[3]
+
+    @classmethod
+    def _published_regions(cls) -> set[str]:
+        script = cls._repo_root() / "scripts" / "aws-release.sh"
         if not script.is_file():  # pragma: no cover - packaged install
             pytest.skip(f"{script} is not present in this checkout")
 
@@ -760,15 +815,7 @@ class TestTemplateUrlTable:
             re.findall(r"--region\s+(\S+)", script.read_text(encoding="utf-8"))
         )
         assert published, f"no --region arguments found in {script}"
-        assert published == set(TEMPLATE_URLS), (
-            "scripts/aws-release.sh and TEMPLATE_URLS disagree about which "
-            "Regions carry a published template.\n"
-            f"  published but not in TEMPLATE_URLS: {sorted(published - set(TEMPLATE_URLS))}\n"
-            f"  in TEMPLATE_URLS but not published: {sorted(set(TEMPLATE_URLS) - published)}\n"
-            "Add the Region to both, plus the Launch Stack tables in README.md "
-            "and docs/deployment.md and the Templates block in "
-            ".claude/skills/cut-release-changelog.md."
-        )
+        return published
 
     @pytest.mark.parametrize("region", sorted(TEMPLATE_URLS))
     def test_each_url_names_its_own_region_in_both_places(self, region):
