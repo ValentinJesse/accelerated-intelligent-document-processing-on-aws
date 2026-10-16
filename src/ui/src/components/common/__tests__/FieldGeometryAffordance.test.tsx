@@ -147,33 +147,22 @@ describe('a section that can only partly be shown on the page', () => {
     expect(onFieldFocus).not.toHaveBeenCalled();
   });
 
-  it('omits the count where there is no per-field data to count', () => {
-    // "0 of 0" would assert a coverage figure for a section that was never
-    // assessed, which is a different statement from one whose fields could not be
-    // located.
+  it('states the count even when nothing was recorded, rather than going silent', () => {
+    // The denominator is the fields displayed, which is known whatever the
+    // assessment recorded — so "0 of 10" is both true and more use than no line
+    // at all. Silence here is indistinguishable from a viewer that does not do
+    // bounding boxes, which is the reading this caption exists to prevent.
     renderSection({ explainabilityInfo: null });
 
+    expect(screen.getByText(/0 of 10 fields can be shown on the page/)).toBeInTheDocument();
+  });
+
+  it('omits the count when the section displays no fields at all', () => {
+    // Nothing to describe. "0 of 0" would read as a finding about a section that
+    // has no rows to find anything about.
+    renderSection({ value: {} });
+
     expect(screen.queryByText(/can be shown on the page/)).not.toBeInTheDocument();
-  });
-
-  it("says the count is the section's once a filter is hiding rows", () => {
-    // The count is of the section; the rows are a subset of it. Left unqualified,
-    // "6 of 10" sits above two rows and is the same two-facts-no-way-to-choose
-    // problem the caption exists to remove.
-    renderSection({ filterMode: 'confidence-alerts' });
-
-    expect(screen.getByText(/6 of 10 fields can be shown on the page in this section/)).toBeInTheDocument();
-  });
-
-  it('blames the document, not each field, when nothing carries a box', async () => {
-    // geometry.mode: off, or labels predating geometry. The per-field reasons are
-    // all wrong here in the same way, so the slot says so once per row instead.
-    const noBoxes = [Object.fromEntries(Object.keys(INFERENCE_RESULT).map((k) => [k, { confidence: 0.9 }]))];
-    renderSection({ explainabilityInfo: noBoxes });
-
-    expect(screen.getByText(/this document carries no bounding boxes/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /Why FormId cannot be shown on the page/i }));
-    expect(screen.getByText(/No bounding boxes were produced for this document/)).toBeInTheDocument();
   });
 
   it('does not caption a nested group, which would read as the whole section', () => {

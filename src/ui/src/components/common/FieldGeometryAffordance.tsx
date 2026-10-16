@@ -38,6 +38,14 @@ interface FieldGeometryAffordanceProps {
    * would reveal.
    */
   geometryAvailable?: boolean;
+  /**
+   * Whether `explainability_info` holds an entry for this field at all.
+   *
+   * False means neither a confidence nor a box was recorded for it, which is a
+   * different statement from a box that could not be found — and sending the
+   * reader to check the value against the page could not reveal that cause.
+   */
+  hasFieldData?: boolean;
   /** Show the field on the page. Only called in the located state. */
   onLocate: () => void;
 }
@@ -47,9 +55,10 @@ const FieldGeometryAffordance = ({
   value,
   geometry,
   geometryAvailable = true,
+  hasFieldData = true,
   onLocate,
 }: FieldGeometryAffordanceProps): React.JSX.Element => {
-  const state = classifyFieldGeometry(value, Boolean(geometry), geometryAvailable);
+  const state = classifyFieldGeometry(value, Boolean(geometry), geometryAvailable, hasFieldData);
 
   if (state === 'located') {
     return (

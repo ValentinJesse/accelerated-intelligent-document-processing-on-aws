@@ -31,7 +31,17 @@ export type FieldGeometryState =
    * geometry — and the per-field reasons would otherwise send a reader checking
    * every value against the page for a cause that is the same on every row.
    */
-  | 'none-produced';
+  | 'none-produced'
+  /**
+   * The field is displayed but `explainability_info` holds no entry for it, so
+   * there is neither a confidence nor a box — nothing was recorded about it
+   * rather than a match having been attempted and missed.
+   *
+   * Real and common: one form section of a packet showed ten fields with
+   * entries for three. Reporting the other seven as unmatched invited the reader
+   * to check values against the page, which could not have revealed the cause.
+   */
+  | 'no-data';
 
 /**
  * Values that mean "the model returned nothing", beyond the empty ones.
@@ -99,10 +109,21 @@ export const hasDrawableGeometry = (geometry: unknown): boolean =>
  * anywhere there is no per-field conclusion to draw, and offering one would be
  * wrong on every row at once.
  */
-export const classifyFieldGeometry = (value: unknown, hasGeometry: boolean, geometryAvailable = true): FieldGeometryState => {
+export const classifyFieldGeometry = (
+  value: unknown,
+  hasGeometry: boolean,
+  geometryAvailable = true,
+  hasFieldData = true,
+): FieldGeometryState => {
   if (hasGeometry) return 'located';
   if (!geometryAvailable) return 'none-produced';
-  return isAbsentValue(value) ? 'no-value' : 'unmatched';
+  // Before the no-data case, because it is the more useful statement when both
+  // hold: a field the model returned nothing for needs no explanation about
+  // missing assessment data.
+  if (isAbsentValue(value)) return 'no-value';
+  // `unmatched` is a claim that matching ran and found nothing, so it requires
+  // an entry to have existed. Without one, nothing ran.
+  return hasFieldData ? 'unmatched' : 'no-data';
 };
 
 /** One sentence per state, for the row that carries no locate control. */
@@ -114,9 +135,42 @@ export const describeFieldGeometry = (state: FieldGeometryState): string => {
       return 'This value could not be matched to anything on the page, so it cannot be shown there. Check the extracted value against the document.';
     case 'none-produced':
       return 'No bounding boxes were produced for this document, so no field can be shown on the page. This is set by extraction.geometry.mode in the configuration.';
+    case 'no-data':
+      return 'No confidence or bounding-box data was recorded for this field, so there is nothing to locate it by. The assessment step covered some of this section’s fields and not this one.';
     default:
       return 'Show this field on the page.';
   }
+};
+
+/**
+ * Whether anything in this document carries a drawable box.
+ *
+ * Read from `explainability_info` alone, and that is the point: the renderer
+ * recurses, and every level recomputes what it needs from the props it holds.
+ * `explainability_info` is handed down whole, so this answers the same at every
+ * level — while anything derived from the local `value` does not, because at a
+ * leaf the value is a string and a count over it is zero. Deriving this
+ * document-level fact from a field-level count made every row of a box-less
+ * document report "could not be matched to anything on the page" instead of
+ * naming the configuration.
+ */
+export const hasAnyDrawableGeometry = (explainabilityInfo: unknown): boolean => {
+  let found = false;
+  const walk = (node: unknown): void => {
+    if (found || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    if (hasDrawableGeometry(record.geometry)) {
+      found = true;
+      return;
+    }
+    Object.values(record).forEach(walk);
+  };
+  walk(explainabilityInfo);
+  return found;
 };
 
 export interface GeometryCoverage {
@@ -129,36 +183,54 @@ export interface GeometryCoverage {
 /**
  * How much of a section can be shown on the page.
  *
- * Counted from `explainability_info` rather than from the value tree, because that
- * is the structure the per-field controls are driven from — counting the values
- * instead would mean a second way of deciding what a field is, and two counts that
- * can disagree on screen. A leaf is a node carrying `confidence`: that is what the
- * extraction writes per field, and it is present whether or not geometry is.
+ * ⚠️ **The denominator is the fields displayed, which means the value tree.**
+ * Counting `explainability_info` leaves instead looks right — it is where the
+ * boxes live — and is wrong whenever the two differ, which is common: one form
+ * section of a packet displayed ten fields and carried entries for three, so the
+ * caption read "3 of 3" above ten rows. Every displayed field gets a row and a
+ * control whether or not anything was recorded about it, so the count has to come
+ * from the same place the rows do.
  *
- * Nested objects and arrays are walked, so a packet's sub-objects count once each
- * rather than as one field apiece.
+ * `explainability_info` is still the source for the numerator, looked up per field
+ * along the path the row itself uses, so "located" means the same thing in the
+ * caption and on the row.
+ *
+ * A displayed field is a leaf of the value tree: objects and arrays are containers
+ * and are walked through, so a packet's sub-objects contribute their own leaves
+ * rather than counting as one field each. An empty object or array has no leaf and
+ * so contributes nothing, matching a renderer that draws no row for it.
  */
-export const summariseGeometryCoverage = (explainabilityInfo: unknown): GeometryCoverage => {
+export const summariseGeometryCoverage = (value: unknown, explainabilityInfo: unknown): GeometryCoverage => {
   let located = 0;
   let total = 0;
 
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      node.forEach(walk);
-      return;
+  const root = Array.isArray(explainabilityInfo) ? explainabilityInfo[0] : explainabilityInfo;
+
+  /** The explainability entry for a path, by the navigation the rows use. */
+  const entryAt = (path: (string | number)[]): Record<string, unknown> | null => {
+    let node: unknown = root;
+    for (const part of path) {
+      if (!node || typeof node !== 'object') return null;
+      node = (node as Record<string | number, unknown>)[part];
     }
-    if (!node || typeof node !== 'object') return;
-    const record = node as Record<string, unknown>;
-    if ('confidence' in record) {
-      total += 1;
-      // The same predicate the per-field control uses, so the caption counts
-      // exactly the fields that offer a way to be located.
-      if (hasDrawableGeometry(record.geometry)) located += 1;
-      return;
-    }
-    Object.values(record).forEach(walk);
+    return node && typeof node === 'object' ? (node as Record<string, unknown>) : null;
   };
 
-  walk(explainabilityInfo);
+  const walk = (node: unknown, path: (string | number)[]): void => {
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, [...path, index]));
+      return;
+    }
+    if (node !== null && typeof node === 'object') {
+      Object.entries(node as Record<string, unknown>).forEach(([key, child]) => walk(child, [...path, key]));
+      return;
+    }
+    // A leaf: one displayed field.
+    total += 1;
+    if (hasDrawableGeometry(entryAt(path)?.geometry)) located += 1;
+  };
+
+  // The root itself must be a container; a bare primitive is not a section.
+  if (value !== null && typeof value === 'object') walk(value, []);
   return { located, total };
 };

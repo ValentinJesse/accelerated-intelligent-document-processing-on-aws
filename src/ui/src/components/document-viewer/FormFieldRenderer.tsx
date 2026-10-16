@@ -20,7 +20,7 @@ import {
 import { ConsoleLogger } from 'aws-amplify/utils';
 import { getFieldConfidenceInfo } from '../common/confidence-alerts-utils';
 import FieldGeometryAffordance from '../common/FieldGeometryAffordance';
-import { summariseGeometryCoverage } from '../common/geometry-coverage';
+import { hasAnyDrawableGeometry, summariseGeometryCoverage } from '../common/geometry-coverage';
 import type { BoxProps } from '@cloudscape-design/components';
 
 // Extended Box props to allow native HTML attributes that Cloudscape passes through at runtime
@@ -140,18 +140,23 @@ const FormFieldRenderer = memo<Record<string, any>>(
      * walk of `explainability_info`, no React work) and keeps the count out of
      * the recursive render path, where it would be recomputed per field.
      */
-    const coverage = summariseGeometryCoverage(explainabilityInfo);
+    const coverage = summariseGeometryCoverage(value, explainabilityInfo);
 
     /**
      * Whether this document produced any boxes at all, which decides whether a
      * field's own value explains anything about its missing box.
      *
-     * `total === 0` is "no per-field data to judge from", which is NOT the same
-     * claim as "no boxes were produced" — so it reads as available and the
-     * per-field reasons apply, rather than asserting a configuration cause this
-     * component cannot see.
+     * ⚠️ Derived from `explainabilityInfo`, never from `coverage`. This component
+     * recurses and each level recomputes from its own props, so a count taken
+     * over the local `value` is zero at a leaf — which read as "nothing to judge
+     * from", flipped this to true, and made every row of a box-less document
+     * claim its value could not be matched on the page.
+     *
+     * With no `explainability_info` at all there is genuinely nothing to judge
+     * from, and that is not the same claim as "no boxes were produced": it reads
+     * as available, and the per-field reasons apply instead.
      */
-    const geometryAvailable = coverage.total === 0 || coverage.located > 0;
+    const geometryAvailable = !explainabilityInfo || hasAnyDrawableGeometry(explainabilityInfo);
 
     // Helper to check if a value has confidence alerts (recursively)
     const hasConfidenceAlertInTree = (
@@ -685,6 +690,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
+                      /* `confidence` is the per-field assessment entry's own
+                         value, so its absence is how this row knows nothing was
+                         recorded for the field — as distinct from a box that was
+                         looked for and not found. */
+                      hasFieldData={confidence !== undefined && confidence !== null}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -905,6 +915,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
+                      /* `confidence` is the per-field assessment entry's own
+                         value, so its absence is how this row knows nothing was
+                         recorded for the field — as distinct from a box that was
+                         looked for and not found. */
+                      hasFieldData={confidence !== undefined && confidence !== null}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1135,6 +1150,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
+                      /* `confidence` is the per-field assessment entry's own
+                         value, so its absence is how this row knows nothing was
+                         recorded for the field — as distinct from a box that was
+                         looked for and not found. */
+                      hasFieldData={confidence !== undefined && confidence !== null}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1595,6 +1615,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
+                      /* `confidence` is the per-field assessment entry's own
+                         value, so its absence is how this row knows nothing was
+                         recorded for the field — as distinct from a box that was
+                         looked for and not found. */
+                      hasFieldData={confidence !== undefined && confidence !== null}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>

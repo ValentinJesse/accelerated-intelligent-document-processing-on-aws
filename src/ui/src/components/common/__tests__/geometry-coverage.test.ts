@@ -20,9 +20,6 @@ import { describe, expect, it } from 'vitest';
 
 import { classifyFieldGeometry, describeFieldGeometry, isAbsentValue, summariseGeometryCoverage } from '../geometry-coverage';
 
-/** The geometry shape the viewer can draw: a box and the page it is on. */
-const box = () => [{ boundingBox: { left: 0.1, top: 0.2, width: 0.3, height: 0.04 }, page: 1 }];
-
 /** A located field: confidence and a geometry entry. */
 const located = (confidence = 0.9) => ({
   confidence,
@@ -114,24 +111,82 @@ describe('classifyFieldGeometry when the document has no geometry at all', () =>
   });
 });
 
+describe('classifyFieldGeometry when nothing was recorded for the field', () => {
+  it('does not claim a match was attempted', () => {
+    // Measured on a real packet section: ten fields displayed, three with
+    // entries. Reporting the other seven as unmatched sent the reader looking
+    // for values on the page when nothing had been recorded about them.
+    expect(classifyFieldGeometry('27 Sep 2011', false, true, false)).toBe('no-data');
+  });
+
+  it('still prefers the absent-value reason, which is the more useful one', () => {
+    // Both hold for a field with no value and no entry; "nothing was extracted"
+    // is what the reader can act on.
+    expect(classifyFieldGeometry('None', false, true, false)).toBe('no-value');
+  });
+
+  it('keeps unmatched for a field that does have an entry', () => {
+    // An entry and no box is the case where matching ran and found nothing, and
+    // checking the value against the document is then the right advice.
+    expect(classifyFieldGeometry('27 Sep 2011', false, true, true)).toBe('unmatched');
+  });
+});
+
 describe('describeFieldGeometry', () => {
   it('names the cause rather than restating the absence', () => {
     expect(describeFieldGeometry('no-value')).toMatch(/No value was extracted/);
     expect(describeFieldGeometry('unmatched')).toMatch(/could not be matched to anything on the page/);
     expect(describeFieldGeometry('none-produced')).toMatch(/No bounding boxes were produced for this document/);
+    expect(describeFieldGeometry('no-data')).toMatch(/No confidence or bounding-box data was recorded/);
   });
 
   it('gives every state a sentence', () => {
     // A state with no wording renders an empty tooltip, which reads as a bug in
     // the viewer rather than an explanation.
-    (['located', 'no-value', 'unmatched', 'none-produced'] as const).forEach((state) => {
+    (['located', 'no-value', 'unmatched', 'none-produced', 'no-data'] as const).forEach((state) => {
       expect(describeFieldGeometry(state).length).toBeGreaterThan(10);
     });
   });
 });
 
 describe('summariseGeometryCoverage', () => {
-  it('counts the real six-of-ten split', () => {
+  it('counts the fields displayed, not the entries recorded', () => {
+    // The case that exposed this: one form section of a packet displays ten
+    // fields and carries explainability entries for three, so counting entries
+    // put "3 of 3" above ten rows. Every displayed field gets a row and a
+    // control whether or not anything was recorded about it.
+    const values = {
+      FormId: '1046835',
+      FormType: 'NOTIFICATION',
+      SubmitterName: 'Ruth Webster',
+      SubmitterId: 'None',
+      SubmissionDate: '27 Sep 2011',
+      Department: 'Chicago Police Department',
+      ProcessedBy: 'None',
+      ProcessingDate: 'None',
+      ApprovalStatus: 'None',
+      Comments: 'Completing the report.',
+    };
+    const explainability = [{ FormId: located(1), FormType: located(1), SubmitterName: located(0.99) }];
+
+    expect(summariseGeometryCoverage(values, explainability)).toEqual({ located: 3, total: 10 });
+  });
+
+  it('counts the six-of-ten split where every field has an entry', () => {
+    const values = Object.fromEntries(
+      [
+        'FormId',
+        'FormType',
+        'SubmitterName',
+        'SubmitterId',
+        'SubmissionDate',
+        'Department',
+        'ProcessedBy',
+        'ProcessingDate',
+        'ApprovalStatus',
+        'Comments',
+      ].map((k) => [k, 'v']),
+    );
     const explainability = [
       {
         FormId: located(),
@@ -146,10 +201,11 @@ describe('summariseGeometryCoverage', () => {
         Comments: located(),
       },
     ];
-    expect(summariseGeometryCoverage(explainability)).toEqual({ located: 6, total: 10 });
+    expect(summariseGeometryCoverage(values, explainability)).toEqual({ located: 6, total: 10 });
   });
 
   it('walks nested objects and arrays so a packet is not counted as one field', () => {
+    const values = { Payer: { Name: 'a', Address: 'b' }, LineItems: [{ Amount: 1 }, { Amount: 2 }], Total: 3 };
     const explainability = [
       {
         Payer: { Name: located(), Address: unlocated() },
@@ -157,7 +213,7 @@ describe('summariseGeometryCoverage', () => {
         Total: located(),
       },
     ];
-    expect(summariseGeometryCoverage(explainability)).toEqual({ located: 4, total: 5 });
+    expect(summariseGeometryCoverage(values, explainability)).toEqual({ located: 4, total: 5 });
   });
 
   it('counts only geometry the viewer can actually draw', () => {
@@ -165,28 +221,30 @@ describe('summariseGeometryCoverage', () => {
     // renderer builds a highlight only from an entry carrying both boundingBox
     // and page. Counting an entry missing either would report a field as
     // locatable whose row offers no way to locate it.
-    expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [] } }])).toEqual({ located: 0, total: 1 });
-    expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [{ page: 1 }] } }])).toEqual({ located: 0, total: 1 });
-    expect(summariseGeometryCoverage([{ Field: { confidence: 0.5, geometry: [{ boundingBox: { left: 0 } }] } }])).toEqual({
+    expect(summariseGeometryCoverage({ Field: 'v' }, [{ Field: { confidence: 0.5, geometry: [] } }])).toEqual({ located: 0, total: 1 });
+    expect(summariseGeometryCoverage({ Field: 'v' }, [{ Field: { confidence: 0.5, geometry: [{ page: 1 }] } }])).toEqual({
+      located: 0,
+      total: 1,
+    });
+    expect(summariseGeometryCoverage({ Field: 'v' }, [{ Field: { confidence: 0.5, geometry: [{ boundingBox: { left: 0 } }] } }])).toEqual({
       located: 0,
       total: 1,
     });
   });
 
-  it('reports nothing rather than zero-of-zero when there is no explainability at all', () => {
-    // Distinguishable by the caller: total 0 means "no per-field data", which is
-    // a different statement from "no field could be located".
-    expect(summariseGeometryCoverage(undefined)).toEqual({ located: 0, total: 0 });
-    expect(summariseGeometryCoverage([])).toEqual({ located: 0, total: 0 });
-    expect(summariseGeometryCoverage([{}])).toEqual({ located: 0, total: 0 });
+  it('reports the fields with none located rather than nothing at all', () => {
+    // total 0 means "no fields displayed", which the caller uses to omit the
+    // line entirely. A section with fields but no geometry is a different
+    // statement and must still be counted.
+    expect(summariseGeometryCoverage({ A: 'v', B: 'v' }, undefined)).toEqual({ located: 0, total: 2 });
+    expect(summariseGeometryCoverage({ A: 'v', B: 'v' }, [])).toEqual({ located: 0, total: 2 });
+    expect(summariseGeometryCoverage({}, [{}])).toEqual({ located: 0, total: 0 });
+    expect(summariseGeometryCoverage(undefined, [{}])).toEqual({ located: 0, total: 0 });
   });
 
-  it('does not mistake a confidence-bearing leaf for a container', () => {
-    // A leaf carrying both `confidence` and nested-looking keys is still one
-    // field; recursing into it would double-count.
-    expect(summariseGeometryCoverage([{ Field: { confidence: 0.9, geometry: box(), extra: { confidence: 0.1 } } }])).toEqual({
-      located: 1,
-      total: 1,
-    });
+  it('counts an absent value as a displayed field, since it has a row', () => {
+    // A field the model returned nothing for is still shown, still gets a
+    // control, and still belongs in the denominator.
+    expect(summariseGeometryCoverage({ A: 'None', B: '', C: null }, [{}])).toEqual({ located: 0, total: 3 });
   });
 });

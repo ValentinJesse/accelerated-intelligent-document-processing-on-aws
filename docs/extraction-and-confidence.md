@@ -1639,19 +1639,30 @@ that field can be located:
 | 🔍 **Show _field_ on the page** | The field has a box. Activating it highlights the value on the page image. |
 | ⓘ **Why _field_ cannot be shown on the page** | No box. The explanation distinguishes the two causes, which have different remedies. |
 
-The two causes:
+The causes, which have different remedies:
 
 - **No value was extracted.** There is nothing to locate. This is the common case,
   and it is not a geometry problem — if the field should have a value, the thing to
   look at is the extraction prompt or the document.
-- **A value that could not be matched to anything on the page.** Under `ocr_only`
-  this means the value is not present verbatim in the OCR text, which happens when
-  extraction canonicalizes it (a reformatted date) or infers it from elsewhere.
-  `llm_grounded` is the mode that addresses this class.
+- **No confidence or bounding-box data was recorded for the field.** The assessment
+  step covered some of the section's fields and not this one, so nothing was ever
+  looked for. Checking the value against the page cannot reveal this, which is why
+  it is stated separately: a packet section displaying ten fields with entries for
+  three is an ordinary shape.
+- **A value that could not be matched to anything on the page.** The field *does*
+  carry assessment data, and matching found nothing. Under `ocr_only` that means
+  the value is not present verbatim in the OCR text, which happens when extraction
+  canonicalizes it (a reformatted date) or infers it from elsewhere. `llm_grounded`
+  is the mode that addresses this class.
+- **No boxes at all for the document.** Set by `geometry.mode: off`, or labels
+  predating geometry. Stated once rather than per field, since the cause is
+  identical on every row.
 
 A section also states its coverage up front — *"6 of 10 fields can be shown on the
-page"* — so the split is visible without hovering every row. The count and the
-controls are derived from the same per-field data, so they cannot disagree.
+page"* — so the split is visible without hovering every row. The denominator is the
+fields the section **displays**, which is not always the number the assessment
+recorded data for: a field with no entry still has a row, still carries a control,
+and still counts.
 
 ### `ocr_only` (default) — OCR grounding via `pageData.json`
 
