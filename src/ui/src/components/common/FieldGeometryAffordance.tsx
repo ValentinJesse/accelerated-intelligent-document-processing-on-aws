@@ -29,13 +29,14 @@ interface FieldGeometryAffordanceProps {
   /** The box this row was given, if any. Passed rather than re-derived. */
   geometry?: unknown;
   /**
-   * Whether anything in this document carries a box.
+   * Whether anything in the **section** carries a box — the scope of the
+   * `explainability_info` callers pass, and a packet's sections differ.
    *
-   * False makes every field's own value irrelevant: with `geometry.mode: off`, or
-   * on labels that predate geometry, no row can be located and the cause is the
-   * same on all of them. Without this the reader is told on every row to check a
-   * value against the page, for a configuration condition no amount of checking
-   * would reveal.
+   * False means no row can be located and the cause is shared, so a field with a
+   * value gets that shared reason instead of being told to check its value
+   * against the page. A field with no value still gets the absent-value reason:
+   * that one is about the field and remains the more useful answer, which is why
+   * the classifier consults it first.
    */
   geometryAvailable?: boolean;
   /**

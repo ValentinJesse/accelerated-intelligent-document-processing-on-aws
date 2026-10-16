@@ -165,16 +165,17 @@ export const describeFieldGeometry = (state: FieldGeometryState): string => {
 };
 
 /**
- * Whether anything in this document carries a drawable box.
+ * Whether anything in the section carries a drawable box.
+ *
+ * Scoped to the section, because `explainability_info` is the section's: callers
+ * pass the one belonging to the section being viewed, and a packet's sections
+ * differ from each other.
  *
  * Read from `explainability_info` alone, and that is the point: the renderer
  * recurses, and every level recomputes what it needs from the props it holds.
  * `explainability_info` is handed down whole, so this answers the same at every
  * level — while anything derived from the local `value` does not, because at a
- * leaf the value is a string and a count over it is zero. Deriving this
- * document-level fact from a field-level count made every row of a box-less
- * document report "could not be matched to anything on the page" instead of
- * naming the configuration.
+ * leaf the value is a string and a count over it is zero.
  */
 export const hasAnyDrawableGeometry = (explainabilityInfo: unknown): boolean => {
   let found = false;

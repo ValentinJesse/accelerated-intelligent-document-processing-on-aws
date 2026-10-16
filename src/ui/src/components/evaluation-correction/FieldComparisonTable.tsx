@@ -151,7 +151,7 @@ const _getValueByPath = (obj: unknown, path: (string | number)[], filterStructur
  * Gets confidence and geometry info for a field from explainability_info
  * Handles the nested structure of explainability data
  */
-const getFieldExplainabilityInfo = (
+export const getFieldExplainabilityInfo = (
   path: (string | number)[],
   explainabilityInfo: unknown[] | null | undefined,
 ): FieldExplainabilityResult => {
@@ -209,7 +209,11 @@ const getFieldExplainabilityInfo = (
     }
   }
 
-  return { confidence, geometry, hasEntry: true };
+  // `Boolean(fieldInfo)`, not a constant: the navigation above nulls it out when
+  // the field has no entry, and claiming one anyway reports a never-assessed
+  // field as a value that could not be matched on the page — the opposite
+  // remedy, and the distinction this control exists to draw.
+  return { confidence, geometry, hasEntry: Boolean(fieldInfo) };
 };
 
 /**

@@ -441,7 +441,20 @@ export const getFieldConfidenceInfo = (
     return { hasConfidenceInfo: false, hasEntry: false };
   }
 
-  const fieldData = currentExplainabilityData[fieldName] as ConfidenceFieldData | null | undefined;
+  /**
+   * An array item's own entry is the node the path already reached.
+   *
+   * The renderer names a primitive list item `[0]` and passes the index in the
+   * path, so the navigation above has already arrived at the element; looking
+   * for a child key literally called "[0]" finds nothing, and the field reads as
+   * having no assessment entry when it has one. Array items that are objects are
+   * unaffected — their leaves are named fields resolved the usual way.
+   */
+  const isArrayItemKey = /^\[\d+\]$/.test(fieldName);
+  const fieldData = (isArrayItemKey ? currentExplainabilityData : currentExplainabilityData[fieldName]) as
+    | ConfidenceFieldData
+    | null
+    | undefined;
   if (!fieldData || typeof fieldData !== 'object') {
     return { hasConfidenceInfo: false, hasEntry: false };
   }

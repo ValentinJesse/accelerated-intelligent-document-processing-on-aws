@@ -1372,10 +1372,10 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   the per-field controls answer for one field each, and a reader
                   wanting to know what to expect had to hover every row.
 
-                  Rendered only where there is per-field data to count. With none at
-                  all, "0 of 0 located" would assert a coverage figure for a section
-                  that was never assessed, which is a different thing from one whose
-                  fields could not be located. */}
+                  Rendered whenever the section displays at least one field, and
+                  gated on that rather than on anything being recorded: "0 of 10" is
+                  the informative answer where nothing was, and only "0 of 0" — a
+                  section with no fields to describe — is worth withholding. */}
               {path.length === 0 && coverage.total > 0 && (
                 <ExtBox fontSize="body-s" color="text-body-secondary">
                   {/* Always the count, and never a claim about the document: a
@@ -1390,14 +1390,11 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       "6 of 10" above two rows is the same two-facts-no-way-to-choose
                       problem this caption exists to remove. */}
                   {geometryAvailable && filterMode !== 'none' && ' in this section'}
-                  {/* No "the rest carry no value, or no match was found" clause. It
-                      restated both causes on every partial section even where only
-                      one applied, and it cannot be narrowed from here: this count
-                      is derived from `explainability_info` alone, which says
-                      nothing about values — and deriving it from the value tree as
-                      well would be the second traversal that lets a caption and
-                      the rows disagree. Each row's own control names its own
-                      cause, which is where that belongs. */}
+                  {/* No clause naming the causes. There are four of them, only one
+                      applies to any given row, and which one requires that row's own
+                      entry and value — so a line about the section can only list
+                      them all or guess. Each row's control names its own cause,
+                      which is where the distinction can be made correctly. */}
                 </ExtBox>
               )}
             </ExtBox>

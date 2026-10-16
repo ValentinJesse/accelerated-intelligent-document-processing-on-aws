@@ -1613,7 +1613,7 @@ boxes in practice, and the viewers now say so per field (see
 | **`ocr_only`** *(default)* | Real OCR lines only | Almost always. The model is **not** asked for boxes, so no added prompt tokens, and OCR boxes beat LLM-estimated ones |
 | **`llm_grounded`** | LLM estimates, corrected against OCR | When values are not present verbatim in the OCR text — reformatted dates, figures read off a chart — so `ocr_only` matches too little |
 | **`llm`** | LLM estimates as-is | ⚠️ **Discouraged.** Same prompt and cost as `llm_grounded`, then skips the correction, so it is never the better of the two. Retained for existing configurations |
-| **`off`** | None | No geometry produced. The viewers stop offering to show fields on the page and say so, rather than reporting a cause per field |
+| **`off`** | None | No geometry produced. The viewers stop offering to locate fields and say why, scoped to the section rather than blaming the document or the mode |
 
 ```yaml
 extraction:
