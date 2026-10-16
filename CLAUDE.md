@@ -520,11 +520,63 @@ skipped them — the same class of gap as the SRT/dep-audit note below. Now on b
 `make lint-cicd` (which itself covers `cfn-lint`, `validate-buildspec`,
 `check-arn-partitions`, filtered-scan and data-plane-tag checks),
 `make typecheck`, `make api-test-static`, `make test-cicd -C lib/idp_common_pkg`,
-`make test-packages-cicd`, the UI vitest suite,
+`make test-packages-cicd`, `make coverage-all-cicd`,
+`make check-coverage-debt-cicd`, the UI vitest suite,
 `scripts/check_first_party_deps.py`,
 `scripts/sdlc/validate_service_role_permissions.py`, `make srt-scan` and
 `scripts/security/dep_audit.py`. The type gate is the whole-tree `make typecheck`;
 `make typecheck-pr` is a developer convenience and runs in neither CI.
+
+⚠️ **The coverage ratchet reads one report per tree, and the `-cicd` spelling is what
+makes that a requirement rather than a hope.** `make check-coverage-debt` with no
+argument names a tree it has no report for and exits **0** — correct for a developer
+who measured one tree, and for a long time the whole of what CI did. The only report
+either configuration produced was `lib/idp_common_pkg`'s, so the gate compared one of
+its nine registry trees, printed eight "not checked" lines and passed, over exactly
+the trees where coverage had been lost. A tree with no report lands in `unchecked`,
+and `unchecked` contributes to **neither** term of the exit code — so the gap was
+invisible in a job log, where a one-ninth run and a complete run read the same.
+
+Both CIs now run `make coverage-all-cicd` first, which measures the other trees
+concurrently, and then reach the ratchet through `make check-coverage-debt-cicd`,
+which passes `--require-all-trees`: a tree with no report is **refused by name** and
+the run reaches no verdict. The required list is derived from
+`check_coverage_debt.TREES` **inside the script**, so neither Makefile nor CI config
+holds a second copy of the registry's names and a tree added to it is required
+without an edit anywhere else. Issue #1256.
+
+The concurrency is **across** trees, and it is across them rather than only inside
+them because a tree may decline xdist. `Tree.serial` is what records that, with the
+measurement at the entry, and the thing to know is that it is **not** a statement
+about a suite being unparallelisable: `scripts` carried it on the belief that xdist
+under-collects a suite driving its subject as a subprocess, and when that was finally
+measured the figures were identical per file, serial against `-n 4`, so the flag came
+off. What actually under-collects a subprocess is the absence of subprocess
+instrumentation, not the worker count. **No tree declares it today**, and the same intuition was tried once
+more and measured down: the two Lambda handler fan-outs look like the case for it —
+many small pytest roots, so a root costs process startup rather than test execution —
+and at the worker count CI gives a tree that is a wash on one of them and distinctly
+faster in parallel on the other, with every file identical. The figures are at the
+entries. Each parallel tree gets an
+explicit share of the host, never `-n auto` — `auto` is per-process, so four
+concurrent trees each asking for it request four times the machine, which on a 4-CPU
+runner is a slow-down dressed up as parallelism. The job costs its slowest tree rather
+than the sum, and which tree that is moves; re-measure rather than quoting a figure.
+
+⚠️ **`--only <one tree>` hands that tree every CPU, so it measures a configuration
+nothing runs.** `--jobs` is clamped by the number of trees selected, so one tree
+collapses it to 1 and the worker share for one job is the whole machine. Pass
+`--workers N` to ask for the share CI would give that tree — without it, reproducing a
+CI figure means narrowing what `cpu_count()` sees with `taskset`, which is easy to
+forget and leaves two numbers that are not comparable.
+
+Two things about the baseline are worth knowing before touching it.
+`scripts/coverage_debt.json` is **generated**, and a floor is a lower bound, so a
+recorded figure a machine cannot reach red-lines the gate there and nowhere else —
+which is what `conditions` records exist to make visible. And `--write` regenerates a
+measured tree's file set **wholesale**, so it is the wrong remedy for the one finding
+that needs a single new entry: use **`--write-missing`**, which adds only entries the
+baseline lacks and by construction can neither raise nor lower an existing floor.
 
 The type gate in both CIs is the **whole-tree** `make typecheck`, not
 `make typecheck-pr`. The PR-scoped form is a developer convenience and is in
@@ -597,9 +649,9 @@ every draft pull request with no review having run.
 
 Three things about what it reads. GitHub can require job-level contexts only, never
 individual steps, so how the jobs are arranged decides the mapping:
-eight of the ten shared gates live in `developer-tests.yml` (four parallel jobs)
+ten of the twelve shared gates live in `developer-tests.yml` (four parallel jobs)
 and the other two in
-`security-checks.yml` (two), so the ten shared gates produce
+`security-checks.yml` (two), so the twelve shared gates produce
 six requireable contexts in total. ⚠️ That means **requiring only the lint context is weaker
 than it looks** — the test suites are their own contexts now, so all six have to be
 required; `test_check_branch_protection.py`'s `MUST_BE_REQUIRED` names all six so that
@@ -709,13 +761,26 @@ that pointer for everyone. One of this repo's own gates is such a writer
 resulting run is **green and about another tree**, which is why it cost several
 sessions a day each ([#1094](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1094)).
 
-`PYTEST_HERMETIC` in `make/hermetic_aws.mk` — the wrapper every pytest invocation in
-both Makefiles goes through — now exports an absolute `PYTHONPATH` naming every
-`lib/*` package root of the checkout that makefile belongs to, and
+`FIRST_PARTY_PIN` in `make/hermetic_aws.mk` exports an absolute `PYTHONPATH` naming
+every `lib/*` package root of the checkout that makefile belongs to, and
 `scripts/run_all_tests.py` passes the same value to every subprocess `make test`
 starts. The set is derived from `lib/*/pyproject.toml`, so a new package under `lib/`
 is covered without being listed; `FIRST_PARTY_PYTHONPATH=` suppresses the pin for the
 deliberate case of testing an installed copy.
+
+⚠️ **Two wrappers carry that pin, because one target cannot take the other half.**
+`PYTEST_HERMETIC` is the pin plus `HERMETIC_AWS`, and every offline pytest invocation
+in both Makefiles goes through it. `make test-integration` calls real AWS, so it
+cannot: `HERMETIC_AWS` strips the credentials those tests exist to use. It was a bare
+`$(PYTHON) -m pytest`, which dropped the **pin** along with the stripping — so the one
+suite that talks to real infrastructure was the one free to measure whichever checkout
+`site-packages` pointed at, which is #1094 on the target least likely to be noticed.
+It now uses `PYTEST_FIRST_PARTY`, the pin without the stripping
+([#1365](https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws/issues/1365)).
+Both directions are measured rather than read: `test_first_party_pythonpath.py` reads
+the command back from `make --dry-run` and asserts every first-party package imports
+from this checkout under it, and `test_offline_suites_are_hermetic.py` asserts a boto3
+client under that same command still resolves the region the environment supplies.
 
 ⚠️ **Running `pytest` directly, pin it yourself: every root, and absolute.** The
 packages import each other, so `PYTHONPATH=lib/idp_common_pkg` alone is refused by the
@@ -1430,7 +1495,7 @@ that domain:
 | `.claude/skills/documentation.md` | Documentation standards, two doc tiers, CHANGELOG, docs-site, and the "adding a Bedrock model" checklist |
 | `.claude/skills/add-model.md` | Adding or changing a selectable Bedrock model (model IDs, regions, limits, pricing, template enums, client routing, UI, both doc tiers, tests) — the full expanded checklist |
 | `.claude/skills/prepare-changelog.md` | Preparing the `[Unreleased]` CHANGELOG section for release — three-section shape (Added/Changed/Fixed), net-since-release entries (drop intra-cycle churn), compact entries with doc/PR links |
-| `.claude/skills/cut-release-changelog.md` | Cutting the release section at tag time — relabel `[Unreleased]` to the `VERSION` number (no date) and append the version-pinned `## Templates` URLs for the three published regions |
+| `.claude/skills/cut-release-changelog.md` | Cutting the release section at tag time — relabel `[Unreleased]` to the `VERSION` number (no date) and append the version-pinned `## Templates` URLs for the four published regions |
 
 > **Note:** `.claude/skills/` is canonical. The Cline assistant's
 > `.cline/skills/` files are **symlinks** to these (different filenames), so

@@ -435,6 +435,17 @@
         }
       ]
     },
+    "deleteConfigPrefixMapping": {
+      "args": [
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "prefix",
+          "non_null": true,
+          "type": "String"
+        }
+      ]
+    },
     "deleteConfigProfileRevision": {
       "args": [
         {
@@ -839,6 +850,17 @@
         }
       ]
     },
+    "getFilePresignedUrls": {
+      "args": [
+        {
+          "elem_non_null": true,
+          "is_list": true,
+          "name": "files",
+          "non_null": true,
+          "type": "FilePresignRequest"
+        }
+      ]
+    },
     "getFinetuningJob": {
       "args": [
         {
@@ -967,6 +989,13 @@
           "name": "objectKey",
           "non_null": false,
           "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "search",
+          "non_null": false,
+          "type": "String"
         }
       ]
     },
@@ -1092,6 +1121,9 @@
           "type": "String"
         }
       ]
+    },
+    "listConfigPrefixMappings": {
+      "args": []
     },
     "listConfigProfileRevisions": {
       "args": [
@@ -1343,6 +1375,52 @@
         }
       ]
     },
+    "putConfigPrefixMapping": {
+      "args": [
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "prefix",
+          "non_null": true,
+          "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "configProfile",
+          "non_null": true,
+          "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "configRevision",
+          "non_null": false,
+          "type": "Int"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "metadataPrecedence",
+          "non_null": false,
+          "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "enabled",
+          "non_null": false,
+          "type": "Boolean"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "description",
+          "non_null": false,
+          "type": "String"
+        }
+      ]
+    },
     "queryKnowledgeBase": {
       "args": [
         {
@@ -1467,6 +1545,31 @@
           "name": "testSetId",
           "non_null": true,
           "type": "String"
+        }
+      ]
+    },
+    "resolveConfigPrefixMapping": {
+      "args": [
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "objectKey",
+          "non_null": true,
+          "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "metadataProfile",
+          "non_null": false,
+          "type": "String"
+        },
+        {
+          "elem_non_null": false,
+          "is_list": false,
+          "name": "metadataRevision",
+          "non_null": false,
+          "type": "Int"
         }
       ]
     },
@@ -2557,6 +2660,22 @@
         "is_list": true,
         "name": "pageIds",
         "non_null": true,
+        "type": "String"
+      }
+    ],
+    "FilePresignRequest": [
+      {
+        "elem_non_null": false,
+        "is_list": false,
+        "name": "s3Uri",
+        "non_null": true,
+        "type": "String"
+      },
+      {
+        "elem_non_null": false,
+        "is_list": false,
+        "name": "versionId",
+        "non_null": false,
         "type": "String"
       }
     ],

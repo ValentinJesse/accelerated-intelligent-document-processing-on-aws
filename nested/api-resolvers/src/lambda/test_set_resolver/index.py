@@ -10,7 +10,10 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from idp_common.api_adapter import ResourceNotFound  # type: ignore
+from idp_common.api_adapter import (  # type: ignore
+    ResourceAccessDenied,
+    ResourceNotFound,
+)
 from idp_common.config_scope import (  # type: ignore
     ScopeLookupError,
     caller_email_from_claims,
@@ -181,7 +184,7 @@ _SNAPSHOT_CONCURRENCY = 16
 # the LIST pagination, the reservation, the version write and the pointer writes.
 #
 # What that arithmetic omits is the cost most likely to bind, and the reason the figure stays
-# unverified: at MemorySize 256 this function has a fraction of a vCPU, and sixteen Python
+# unverified: at MemorySize 1024 this function has about 0.6 vCPU, and sixteen Python
 # threads share one GIL, so 3000 SigV4 signings and response parses are **client-side CPU**
 # rather than network latency the fan-out can hide. Measure before raising it. If a real set
 # needs more, the lever is memory — which buys CPU — or the asynchronous snapshot the refusal
@@ -821,7 +824,15 @@ def _enforce_selection_scope(event, object_keys):
                 "Rejecting addDocumentsToTestSetByKey: a selected document is "
                 "missing, unfinished, or outside the caller's scope"
             )
-            raise PermissionError(_SELECTION_REFUSED)
+            # Per-object, so it is raised as ResourceAccessDenied: the caller holds
+            # Admin or Author (the dispatcher's floor admitted them) and it is the
+            # DOCUMENTS they selected that are refused. The dispatcher labels it
+            # `authzControl: "resource"`, which is what lets a consumer tell this
+            # apart from a group refusal — the same 403/Unauthorized carried both
+            # meanings, and the live RBAC matrix reported this check working as a
+            # group-check failure (issue #1308). Status, errorType and message are
+            # unchanged.
+            raise ResourceAccessDenied(_SELECTION_REFUSED)
 
 
 def add_documents_to_test_set_by_key(args, event=None):
@@ -1805,7 +1816,9 @@ def _harvest_active_label_job(test_set_id, meta):
     not fail the queue, which still works for already-labeled documents.
 
     All in-flight jobs share one time budget, since the caller is a single request
-    and copying results is S3-bound.
+    and copying results is S3-bound. That budget is the queue's share of its own
+    request, so the harvest stops in time for the queue to be read after it; the
+    workspace re-reads the queue while a job runs, and each read continues it.
     """
     # Every non-terminal job, not just the one the set's pointer names: a
     # one-document re-extract repoints it, and harvesting only the pointer would
@@ -1824,7 +1837,7 @@ def _harvest_active_label_job(test_set_id, meta):
             {"PK": f"testset#{test_set_id}", "SK": _label_job_sk(pointer)}
         )
 
-    deadline = time.monotonic() + HARVEST_TIME_BUDGET_SECONDS
+    deadline = time.monotonic() + QUEUE_HARVEST_TIME_BUDGET_SECONDS
     harvested = []
     for job in jobs:
         try:
@@ -2657,9 +2670,10 @@ def get_annotation_queue(args, event=None):
     if not meta:
         raise ResourceNotFound(f"Test set '{test_set_id}' not found")
 
+    deadline = time.monotonic() + SAMPLING_TIME_BUDGET_SECONDS
     label_job = _harvest_active_label_job(test_set_id, meta)
 
-    documents = _collect_queue_documents(test_set_id)
+    documents = _collect_queue_documents(test_set_id, deadline)
     claims = _claim_state_for_documents(test_set_id, meta, documents)
 
     caller = caller_email(event)
@@ -2786,30 +2800,33 @@ def get_annotation_queue(args, event=None):
     return result
 
 
-def _collect_queue_documents(test_set_id):
+def _collect_queue_documents(test_set_id, deadline):
     """Documents in the set with their label metadata, up to the queue cap.
 
-    Capped and time-bounded because each page reads every section on it from S3
-    (~24s per 200 documents), which times the Lambda out on a large set. A short
-    queue is workable, since annotators take documents from the front; a timeout
-    means the workspace cannot open. inspectedDocs reports how much was ranked.
+    Capped and time-bounded because each page reads every section on it from S3,
+    which outlasts the dispatcher on a set of multi-section packets. A short queue
+    is workable, since annotators take documents from the front; a timeout means the
+    workspace cannot open. inspectedDocs reports how much was ranked.
+
+    ``deadline`` is the request's, set before the label-job harvest, so the time the
+    harvest spends comes out of this budget rather than being added to it.
     """
     documents = []
     next_token = None
-    started = time.monotonic()
     while len(documents) < MAX_DOCS_FOR_ESTIMATE:
         page = get_test_set_documents(
             {
                 "testSetId": test_set_id,
                 "limit": min(200, MAX_DOCS_FOR_ESTIMATE - len(documents)),
                 "nextToken": next_token,
-            }
+            },
+            deadline=deadline,
         )
         documents.extend(page.get("documents") or [])
         next_token = page.get("nextToken")
         if not next_token:
             break
-        if time.monotonic() - started > SAMPLING_TIME_BUDGET_SECONDS:
+        if time.monotonic() > deadline:
             logger.warning(
                 f"getAnnotationQueue({test_set_id}): stopped collecting at "
                 f"{len(documents)} document(s) after "
@@ -3148,18 +3165,32 @@ def estimate_review_effort(args):
     return result
 
 
-# Cap on how many documents the estimator reads confidences for. Each document's
-# sections are read from S3, costing ~24s per 200-document page, so a larger cap
-# needs several pages and exceeds the resolver's 60s timeout. 200 keeps the call
-# inside one page and already pins the curve (10 reliability bins; document shape is
-# measured from at most 20 sections). The cost is a wider docs-to-review range on
-# very large sets, which sampledDocs and estimateConfidence report.
+# Cap on how many documents the estimator reads confidences for. Every section on a
+# page is read from S3, so a page costs in proportion to its sections rather than its
+# documents: at 256 MB, 8-10s for 200 single-section documents and ~26s for 200
+# four-section packets. 200 keeps the call inside one page and already pins the curve
+# (10 reliability bins; document shape is measured from at most 20 sections). The
+# cost is a wider docs-to-review range on very large sets, which sampledDocs and
+# estimateConfidence report.
 MAX_DOCS_FOR_ESTIMATE = 200
 
-# Hard stop for any operation that pages the document list, independent of the
-# document cap: a set whose pages are unusually slow must yield a narrower sample
-# rather than a timeout. Shared by the estimator and the annotation queue.
-SAMPLING_TIME_BUDGET_SECONDS = 25
+# Deadline on the reads behind any operation that samples the document list, so a
+# slow set yields a narrower sample rather than a timeout. Shared by the estimator
+# and the annotation queue. It is checked before every section read, not only
+# between pages, because the cap above makes the sample a single page.
+#
+# It has to expire inside the dispatcher's 20s (_RESOLVER_READ_TIMEOUT_SECONDS in
+# http_api_dispatcher): past that the caller already has a 504, however narrow the
+# sample became. The rest of the 20s pays for a cold start (~1.7s measured), the
+# reads before and after sampling, and the reads in flight when the deadline passes.
+# For the annotation queue the deadline is set before its label-job harvest, which
+# spends QUEUE_HARVEST_TIME_BUDGET_SECONDS of it.
+#
+# Not bounded by it: the listing of the set's whole baseline/ prefix that precedes
+# each page's section reads. That time is spent from this budget, but the deadline
+# is not checked inside it, and it grows with the size of the set rather than the
+# page.
+SAMPLING_TIME_BUDGET_SECONDS = 12
 
 # Ceiling on baseline sections read to characterise document shape for the effort
 # model. Each read is a separate S3 GET, and sets vary widely in sections per
@@ -3170,6 +3201,11 @@ MAX_SECTIONS_FOR_FIELD_SAMPLE = 40
 # several S3 calls per section, so a large set cannot finish in one pass; stopping
 # short leaves the job RUNNING and the next poll continues.
 HARVEST_TIME_BUDGET_SECONDS = 20
+
+# The annotation queue's harvest share of its own request. Kept well under
+# SAMPLING_TIME_BUDGET_SECONDS, which the queue measures from before the harvest, so
+# a harvest that uses all of its share still leaves the queue time to be read.
+QUEUE_HARVEST_TIME_BUDGET_SECONDS = 4
 
 # Document states the pipeline never leaves. A labeling job waiting on one of
 # these would never complete, and every caller that shows a job re-harvests on a
@@ -3214,7 +3250,7 @@ def _collect_doc_confidences(test_set_id):
     test_set_bucket = os.environ["TEST_SET_BUCKET"]
     documents = []
     next_token = None
-    started = time.monotonic()
+    deadline = time.monotonic() + SAMPLING_TIME_BUDGET_SECONDS
 
     while len(documents) < MAX_DOCS_FOR_ESTIMATE:
         page = get_test_set_documents(
@@ -3222,7 +3258,8 @@ def _collect_doc_confidences(test_set_id):
                 "testSetId": test_set_id,
                 "limit": min(200, MAX_DOCS_FOR_ESTIMATE - len(documents)),
                 "nextToken": next_token,
-            }
+            },
+            deadline=deadline,
         )
         documents.extend(page.get("documents") or [])
         next_token = page.get("nextToken")
@@ -3230,7 +3267,7 @@ def _collect_doc_confidences(test_set_id):
             break
         # A narrower sample still produces a usable estimate, and says so via
         # sampledDocs; a timeout produces nothing.
-        if time.monotonic() - started > SAMPLING_TIME_BUDGET_SECONDS:
+        if time.monotonic() > deadline:
             logger.warning(
                 f"estimateReviewEffort({test_set_id}): stopped sampling at "
                 f"{len(documents)} document(s) after "
@@ -3266,14 +3303,19 @@ def _collect_doc_confidences(test_set_id):
     # and this reads every section in the set one at a time.
     field_counts = []
     sections_read = 0
+
+    def field_sample_done():
+        return (
+            sections_read >= MAX_SECTIONS_FOR_FIELD_SAMPLE
+            or len(field_counts) >= 20
+            or time.monotonic() > deadline
+        )
+
     for doc in documents:
-        if sections_read >= MAX_SECTIONS_FOR_FIELD_SAMPLE or len(field_counts) >= 20:
+        if field_sample_done():
             break
         for section in doc.get("sections") or []:
-            if (
-                sections_read >= MAX_SECTIONS_FOR_FIELD_SAMPLE
-                or len(field_counts) >= 20
-            ):
+            if field_sample_done():
                 break
             key = section.get("baselineKey")
             if not key:
@@ -4418,7 +4460,7 @@ def get_test_sets():
         # Per-request reconcile budget. Cold-container invocations pay 2
         # paginated list_objects_v2 + 1 HeadObject per registered prefix
         # before the warm-container memo kicks in, and this resolver runs
-        # under a 60 s timeout with 256 MB. Cap the work here the same way
+        # under a 60 s timeout with 1024 MB. Cap the work here the same way
         # ``_reconcile_label_state`` caps its own probes (25 / 5 s) — the
         # remainder is picked up by the next poll, which is what the memo
         # is designed for. The listing paths do NOT skip on this budget;
@@ -4629,7 +4671,7 @@ def get_test_sets():
     return result
 
 
-def get_test_set_documents(args):
+def get_test_set_documents(args, deadline=None):
     """List the documents in a test set with their baseline (ground truth) sections.
 
     Paginated over the set's `input/` prefix; the S3 continuation token is
@@ -4637,6 +4679,16 @@ def get_test_set_documents(args):
     whole `baseline/` prefix is listed once (bulk) and section result.json
     keys are matched to their document in memory — one extra LIST per page
     regardless of page size, and it handles nested input file names.
+
+    `search` is matched against every document in the set rather than against the
+    page, because the page is the thing the caller cannot see past: a table that
+    filtered its own 50 rows reported "no results" for documents that were in the
+    set two pages along. See ``_search_test_set_documents``.
+
+    ``deadline`` is for internal callers sampling the set under a time budget. When
+    it passes mid-page, the page is cut to the leading documents none of whose
+    sections it skipped, and ``nextToken`` is ``None``, since resuming from the uncut
+    page's token would skip the documents dropped from it.
     """
     test_set_id = args["testSetId"]
     limit = args.get("limit") or 100
@@ -4644,6 +4696,10 @@ def get_test_set_documents(args):
     # Optional exact-match filter, so a deep-linked document detail page does not
     # page through the whole set.
     object_key = args.get("objectKey")
+    # Optional case-insensitive substring over the set's document names, for a
+    # search box. Ignored when `objectKey` is given, which is already the narrower
+    # of the two.
+    search = (args.get("search") or "").strip()
 
     # The id is derived from a validated name, so it must satisfy the same charset.
     # This also rejects '/' and '..', which could traverse outside the S3 prefix.
@@ -4651,6 +4707,15 @@ def get_test_set_documents(args):
         raise ValueError("Invalid test set id")
     if object_key and ".." in object_key:
         raise ValueError("Invalid object key")
+    # No document name approaches this, so a longer search is not a search. Bounded
+    # because the value is echoed into the log line below, and because an
+    # unbounded one is the only input here whose size a caller chooses freely.
+    #
+    # ValueError, not Exception: an over-long search is a malformed request, and
+    # #1304 made that distinction load-bearing — a bare Exception is answered as a
+    # 500, which reports a caller's bad input as a server fault.
+    if len(search) > _SEARCH_MAX_LENGTH:
+        raise ValueError("Search text is too long")
     limit = max(1, min(int(limit), 1000))
 
     item = db_client.get_item({"PK": f"testset#{test_set_id}", "SK": "metadata"})
@@ -4660,33 +4725,41 @@ def get_test_set_documents(args):
     test_set_bucket = os.environ["TEST_SET_BUCKET"]
     input_prefix = f"{test_set_id}/input/"
 
-    list_kwargs = {
-        "Bucket": test_set_bucket,
-        # The objectKey equality check below drops same-prefix siblings.
-        "Prefix": f"{input_prefix}{object_key}" if object_key else input_prefix,
-        "MaxKeys": limit,
-    }
-    if next_token:
-        list_kwargs["ContinuationToken"] = next_token
-    response = s3_client.list_objects_v2(**list_kwargs)
-
-    documents = []
-    for obj in response.get("Contents", []):
-        key = obj["Key"]
-        if key.endswith("/"):
-            continue  # skip folder placeholder objects
-        relative_name = key[len(input_prefix) :]
-        if object_key and relative_name != object_key:
-            continue
-        documents.append(
-            {
-                "objectKey": relative_name,
-                "inputKey": key,
-                "size": obj.get("Size"),
-                "lastModified": obj["LastModified"].isoformat(),
-                "sections": [],
-            }
+    match_count = None
+    search_truncated = None
+    if search and not object_key:
+        documents, response_next_token, match_count, search_truncated = (
+            _search_test_set_documents(
+                test_set_bucket, input_prefix, search, limit, next_token
+            )
         )
+    else:
+        # A token minted under a search is an offset into *that* search's matches
+        # and means nothing without it. Refused here rather than handed to S3,
+        # which would reject it as an opaque InvalidArgument and surface as
+        # "Failed to load test set documents" with no indication of why.
+        if next_token and next_token.startswith(_SEARCH_OFFSET_PREFIX):
+            raise ValueError("Invalid pagination token without a search")
+        list_kwargs = {
+            "Bucket": test_set_bucket,
+            # The objectKey equality check below drops same-prefix siblings.
+            "Prefix": f"{input_prefix}{object_key}" if object_key else input_prefix,
+            "MaxKeys": limit,
+        }
+        if next_token:
+            list_kwargs["ContinuationToken"] = next_token
+        response = s3_client.list_objects_v2(**list_kwargs)
+
+        documents = []
+        for obj in response.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue  # skip folder placeholder objects
+            relative_name = key[len(input_prefix) :]
+            if object_key and relative_name != object_key:
+                continue
+            documents.append(_document_row(obj, relative_name))
+        response_next_token = response.get("NextContinuationToken")
 
     if documents:
         # Bulk-list baseline section files once and match to this page's docs.
@@ -4721,11 +4794,19 @@ def get_test_set_documents(args):
                 )
             )
 
-        _attach_label_metadata(test_set_bucket, documents)
+        complete = _attach_label_metadata(test_set_bucket, documents, deadline)
+        if complete < len(documents):
+            logger.warning(
+                f"getTestSetDocuments({test_set_id}): time budget reached after "
+                f"reading {complete} of {len(documents)} document(s) on this page; "
+                "returning those"
+            )
+            documents = documents[:complete]
+            response_next_token = None
 
     result = {
         "documents": documents,
-        "nextToken": response.get("NextContinuationToken"),
+        "nextToken": response_next_token,
         # The set's whole size, not this page's. A paginated response that reports
         # only what it returned leaves the caller counting the page and calling it
         # the total: the UI showed "Documents (50)" and offered to "Label 50
@@ -4740,6 +4821,10 @@ def get_test_set_documents(args):
         # (publishing a version) has nothing else to read. Free here — the metadata
         # row is already in hand.
         "status": item.get("status"),
+        # Both `None` unless a search ran, so a caller can tell "no search" from
+        # "a search that matched nothing".
+        "matchCount": match_count,
+        "searchTruncated": search_truncated,
     }
 
     # Surfaced so a page load resumes polling an in-flight job. Labels are harvested
@@ -4750,12 +4835,141 @@ def get_test_set_documents(args):
 
     logger.info(
         f"getTestSetDocuments({test_set_id}): {len(documents)} documents"
+        # !r rather than the bare value: this is caller-supplied text, and repr
+        # escapes the newlines that would otherwise let it forge log lines.
+        f"{f' matching {search!r} ({match_count} in the set)' if match_count is not None else ''}"
         f"{' (more available)' if result['nextToken'] else ''}"
     )
     return result
 
 
-def _attach_label_metadata(test_set_bucket, documents):
+def _document_row(obj, relative_name):
+    """One listing row for an S3 input object, before sections are attached."""
+    return {
+        "objectKey": relative_name,
+        "inputKey": obj["Key"],
+        "size": obj.get("Size"),
+        "lastModified": obj["LastModified"].isoformat(),
+        "sections": [],
+    }
+
+
+# How many S3 keys one search will read before it stops and says so. At the page
+# size below that is 50 **sequential** LIST calls at the worst case — not free, and
+# the reason there is a budget at all rather than an unbounded walk; the bound is
+# well above any test set this has been built for, so the worst case is not the
+# ordinary one. Past it the returned page is still correct; `matchCount` becomes a
+# lower bound and `searchTruncated` says that it is.
+#
+# Note which direction the cost runs: a broad needle is *slower* to answer than a
+# narrow one, because every row the page returns costs one S3 GET per baseline
+# section in ``_attach_label_metadata`` while matching itself only reads key names.
+# If that is ever reported as a bug, this is why.
+_SEARCH_SCAN_KEY_BUDGET = 50_000
+
+# Keys per LIST call: S3's maximum, and the paginator's default. Named because the
+# budget above can only be honoured at this granularity, so the two belong
+# together rather than one of them being whatever default happens to be in force.
+_SEARCH_SCAN_PAGE_SIZE = 1000
+
+# Longest accepted `search`. S3 keys cap at 1024 bytes and a document name is a
+# fraction of that, so this is well clear of any real search while keeping the
+# value a bounded quantity.
+_SEARCH_MAX_LENGTH = 256
+
+# Search pages are an offset into the matches, not an S3 continuation token, and
+# the prefix is what keeps the two kinds of `nextToken` from being replayed as
+# each other. A continuation token resumes at a LIST page boundary: a 1000-key
+# page holding more than `limit` matches would lose every match after the first
+# `limit`, silently, which is the same class of bug as filtering one page.
+#
+# Named OFFSET rather than TOKEN, and it has to stay that way: Bandit's B105
+# matches an identifier's *name* against a password wordlist, which `TOKEN` is in,
+# so a module-level string assigned to such a name is a finding. SRT promotes
+# B105 to HIGH unconditionally and the test-code scope decision does not reach
+# this file — it is a Lambda deployment artifact — so the name alone blocks the
+# security gate, for a six-character constant that is not a credential.
+_SEARCH_OFFSET_PREFIX = "match:"
+
+
+def _search_test_set_documents(bucket, input_prefix, search, limit, next_token):
+    """Find the documents in a set whose name contains `search`, at any page depth.
+
+    Returns ``(documents, next_token, match_count, truncated)``.
+
+    S3 has no substring match, so the set's `input/` prefix is listed in full and
+    matched here. Only key *names* are read — no GET per document — so a search
+    costs one LIST per 1000 keys and hands back a page of at most `limit`
+    documents, which is what keeps the expensive part of this listing (the
+    per-section reads in ``_attach_label_metadata``) proportional to the page
+    rather than to the set.
+
+    `search` is never used as an S3 `Prefix`, so it needs no path validation: a
+    caller cannot reach outside `input_prefix` through it, and a leading-substring
+    search is not a prefix search.
+
+    A malformed token raises `ValueError`, not `Exception`, following #1304: the
+    dispatcher picks the HTTP status from the exception's class name, so a bare
+    `Exception` would answer 500 for what is plainly a bad request. The gate added
+    with #1304 cannot catch this direction — it matches not-found wording only, and
+    says so — which is why it is stated here.
+
+    Only the rows for the requested page are held, while every match is counted,
+    so memory is proportional to `limit` and the count is still the set's.
+    """
+    needle = search.lower()
+    offset = 0
+    if next_token:
+        if not next_token.startswith(_SEARCH_OFFSET_PREFIX):
+            raise ValueError("Invalid pagination token for a search")
+        try:
+            offset = max(0, int(next_token[len(_SEARCH_OFFSET_PREFIX) :]))
+        except ValueError as exc:
+            raise ValueError("Invalid pagination token for a search") from exc
+    end = offset + limit
+
+    documents = []
+    match_count = 0
+    scanned = 0
+    truncated = False
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(
+        Bucket=bucket,
+        Prefix=input_prefix,
+        PaginationConfig={"PageSize": _SEARCH_SCAN_PAGE_SIZE},
+    ):
+        for obj in page.get("Contents", []):
+            scanned += 1
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue  # skip folder placeholder objects
+            relative_name = key[len(input_prefix) :]
+            if needle not in relative_name.lower():
+                continue
+            if offset <= match_count < end:
+                documents.append(_document_row(obj, relative_name))
+            match_count += 1
+        if scanned >= _SEARCH_SCAN_KEY_BUDGET:
+            # Truncated only if S3 says keys remain. Reaching the budget on the
+            # last page means the scan finished, and reporting that as truncated
+            # would caption an exact count as a lower bound and ask the user to
+            # narrow a search that already saw the whole set.
+            truncated = bool(page.get("IsTruncated"))
+            break
+
+    # Only matches this scan actually reached are offered as a next page. Offset
+    # paging re-scans from the start and stops at the same budget, so a token past
+    # what was scanned would return the same rows forever; a truncated search says
+    # so instead, and the caller's remedy is a narrower search.
+    return (
+        documents,
+        f"{_SEARCH_OFFSET_PREFIX}{end}" if match_count > end else None,
+        match_count,
+        truncated,
+    )
+
+
+def _attach_label_metadata(test_set_bucket, documents, deadline=None):
     """Add labelSource, alert counts and minConfidence to each document on a page.
 
     Label state lives inside each section's baseline result.json, so those are read
@@ -4768,6 +4982,12 @@ def _attach_label_metadata(test_set_bucket, documents):
 
     Best-effort per section: an unreadable result.json is skipped rather than failing
     the listing.
+
+    ``deadline`` is a ``time.monotonic()`` value after which no further section is
+    read, except the first document's, so a page always yields at least one
+    document. Returns how many leading documents the deadline skipped no section of,
+    which is all of them when it never passed. A section whose read failed was
+    attempted, and counts as best-effort above.
     """
     tasks = []
     for doc in documents:
@@ -4780,15 +5000,23 @@ def _attach_label_metadata(test_set_bucket, documents):
             doc["confidenceThreshold"] = None
             doc["alertCount"] = None
             doc["fieldCount"] = None
-        return
+        return len(documents)
 
-    def read(key):
+    def read(task):
+        doc, section = task
+        if (
+            deadline is not None
+            and doc is not documents[0]
+            and time.monotonic() > deadline
+        ):
+            return doc, section, None, False
+        key = section["baselineKey"]
         try:
             body = s3_client.get_object(Bucket=test_set_bucket, Key=key)["Body"].read()
-            return json.loads(body)
+            return doc, section, json.loads(body), True
         except Exception as e:  # noqa: BLE001 — best-effort enrichment
             logger.warning(f"Could not read baseline label {key}: {e}")
-            return None
+            return doc, section, None, True
 
     per_doc = {
         id(doc): {
@@ -4807,11 +5035,14 @@ def _attach_label_metadata(test_set_bucket, documents):
         }
         for doc, _ in tasks
     }
+    unread_docs = set()
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(tasks), 16)
     ) as executor:
-        results = executor.map(lambda t: (t[0], t[1], read(t[1]["baselineKey"])), tasks)
-        for doc, section, result in results:
+        for doc, section, result, attempted in executor.map(read, tasks):
+            if not attempted:
+                unread_docs.add(id(doc))
+                continue
             if not result:
                 continue
             # The section's OWN class, distinct from the document-level
@@ -4908,6 +5139,11 @@ def _attach_label_metadata(test_set_bucket, documents):
         else:
             doc["alertCount"] = None
             doc["fieldCount"] = None
+
+    return next(
+        (i for i, doc in enumerate(documents) if id(doc) in unread_docs),
+        len(documents),
+    )
 
 
 def _is_valid_test_set_structure(s3_client, bucket, prefix):
@@ -5498,7 +5734,7 @@ _RECONCILE_TTL_SECONDS = 30
 # Per-request cap on reconcile probes, mirroring the label-state probe
 # budget (MAX_LABEL_STATE_PROBES / LABEL_STATE_PROBE_BUDGET_SECONDS above).
 # Reconcile does the same 2 x list_objects_v2 + 1 x HeadObject per prefix
-# on a cold container; the resolver's Timeout is 60 s and MemorySize 256 MB.
+# on a cold container; the resolver's Timeout is 60 s and MemorySize 1024 MB.
 # Beyond this budget, the remainder of the prefixes are picked up by the
 # next getTestSets call (which finds them in the warm-container memo when
 # it comes back for them).

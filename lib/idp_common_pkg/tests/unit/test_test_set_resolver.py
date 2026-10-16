@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, patch
@@ -83,6 +84,55 @@ def _seed_test_set(table, test_set_id, **extra):
     item = {"PK": f"testset#{test_set_id}", "SK": "metadata", "id": test_set_id}
     item.update(extra)
     table.put_item(Item=item)
+
+
+def _seed_packet_set(table, s3, test_set_id, docs, sections):
+    """A set of multi-section packets whose weakest field is in the last section.
+
+    Sections before the last score 0.9 and the last scores 0.1, so a document whose
+    minConfidence is 0.1 is one whose every section was read.
+    """
+    _seed_test_set(table, test_set_id, fileCount=docs)
+    names = [f"packet_{i:04d}.pdf" for i in range(docs)]
+    for name in names:
+        s3.put_object(
+            Bucket="test-set-bucket", Key=f"{test_set_id}/input/{name}", Body=b"x"
+        )
+        for sec in range(1, sections + 1):
+            confidence = 0.1 if sec == sections else 0.9
+            s3.put_object(
+                Bucket="test-set-bucket",
+                Key=f"{test_set_id}/baseline/{name}/sections/{sec}/result.json",
+                Body=json.dumps(
+                    {
+                        "labelSource": "draft-machine",
+                        "inference_result": {"f": "v"},
+                        "explainability_info": [{"f": {"confidence": confidence}}],
+                    }
+                ).encode(),
+            )
+    return names
+
+
+def _one_second_per_baseline_read(s3, monkeypatch):
+    """Make the resolver's clock read one second per baseline GET issued so far.
+
+    Patched on the client rather than on a resolver helper, so every reader of a
+    baseline pays whichever path it takes. Returns the keys read, in order.
+    """
+    lock = threading.Lock()
+    reads = []
+    real_get = s3.get_object
+
+    def get_object(**kwargs):
+        if "/baseline/" in kwargs.get("Key", ""):
+            with lock:
+                reads.append(kwargs["Key"])
+        return real_get(**kwargs)
+
+    monkeypatch.setattr(s3, "get_object", get_object)
+    monkeypatch.setattr(test_set_index.time, "monotonic", lambda: float(len(reads)))
+    return reads
 
 
 @pytest.fixture
@@ -1028,7 +1078,10 @@ class TestTestSetResolver:
 
             args = {"input": {"id": "nonexistent-id", "description": "new description"}}
 
-            with pytest.raises(Exception, match="Test set 'nonexistent-id' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound,
+                match="Test set 'nonexistent-id' not found",
+            ):
                 test_set_index.update_test_set(args)
 
     # -- Versioning -------------------------------------------------------
@@ -1159,7 +1212,9 @@ class TestTestSetResolver:
         assert meta["activeReference"] == 5
 
     def test_publish_nonexistent_test_set_raises(self, publish_table):
-        with pytest.raises(Exception, match="Test set 'ghost' not found"):
+        with pytest.raises(
+            test_set_index.ResourceNotFound, match="Test set 'ghost' not found"
+        ):
             test_set_index.publish_test_set_version({"input": {"testSetId": "ghost"}})
 
     def test_publish_race_on_deleted_test_set_raises(self, publish_table):
@@ -1176,7 +1231,9 @@ class TestTestSetResolver:
         with patch.object(
             test_set_index.db_client, "get_item", side_effect=delete_after_read
         ):
-            with pytest.raises(Exception, match="Test set 'ts1' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound, match="Test set 'ts1' not found"
+            ):
                 test_set_index.publish_test_set_version({"input": {"testSetId": "ts1"}})
 
         assert "Item" not in publish_table.get_item(
@@ -1277,7 +1334,9 @@ class TestTestSetResolver:
     def test_remove_documents_nonexistent_test_set_raises(self):
         with patch.object(test_set_index.db_client, "get_item") as mock_get:
             mock_get.return_value = None
-            with pytest.raises(Exception, match="Test set 'ghost' not found"):
+            with pytest.raises(
+                test_set_index.ResourceNotFound, match="Test set 'ghost' not found"
+            ):
                 test_set_index.remove_documents_from_test_set(
                     {"testSetId": "ghost", "fileNames": ["a.pdf"]}
                 )
@@ -2379,7 +2438,9 @@ class TestTestSetResolver:
     def test_get_draft_label_job_unknown_job_raises(self, labeling_env):
         table, _ = labeling_env
         _seed_test_set(table, "ts1")
-        with pytest.raises(Exception, match="Labeling job 'nope' not found"):
+        with pytest.raises(
+            test_set_index.ResourceNotFound, match="Labeling job 'nope' not found"
+        ):
             test_set_index.get_draft_label_job({"testSetId": "ts1", "jobId": "nope"})
 
     def test_attach_label_metadata_takes_the_worst_field_and_source(self, labeling_env):
@@ -2789,7 +2850,7 @@ class TestTestSetResolver:
             test_set_index.estimate_review_effort(
                 {"testSetId": "ts1", "targetAccuracy": 150}
             )
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             test_set_index.estimate_review_effort({"testSetId": "ghost"})
 
     def test_estimate_review_effort_includes_the_reliability_table(self, labeling_env):
@@ -3020,39 +3081,37 @@ class TestTestSetResolver:
     def test_estimate_stops_sampling_before_the_lambda_times_out(
         self, labeling_env, monkeypatch
     ):
-        """Regression: the estimate must return a narrower answer, never nothing.
+        """Regression (#1473): the estimate must return a narrower answer, not none.
 
-        Each document's sections are read from S3 to recover their confidence, so a
-        large sample costs multiple sequential pages of S3 reads and can exceed the
-        Lambda timeout. A time budget bounds the paging independently of the
-        document cap: a smaller sample still yields a usable estimate, and
-        sampledDocs reports how much was inspected.
+        The sample is a single page, so a budget checked only between pages was never
+        checked before the work was done. A set of four-section packets made that one
+        page cost ~26s against the dispatcher's 20s, and the estimate never arrived.
+        The budget has to stop the section reads themselves, and the field sample
+        after them.
         """
         table, s3 = labeling_env
-        _seed_test_set(table, "ts1", fileCount=600)
-        for i in range(5):
-            name = f"doc{i}.pdf"
-            s3.put_object(Bucket="test-set-bucket", Key=f"ts1/input/{name}", Body=b"x")
-            s3.put_object(
-                Bucket="test-set-bucket",
-                Key=f"ts1/baseline/{name}/sections/1/result.json",
-                Body=json.dumps(
-                    {
-                        "labelSource": "draft-machine",
-                        "explainability_info": [{"f": {"confidence": 0.5}}],
-                    }
-                ).encode(),
-            )
+        _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        budget = 40
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", budget)
+        reads = _one_second_per_baseline_read(s3, monkeypatch)
+        field_reads = []
+        real_count = test_set_index._count_baseline_fields
 
-        # Every page appears to take longer than the whole budget.
-        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 0)
+        def counting(bucket, key):
+            field_reads.append(key)
+            return real_count(bucket, key)
+
+        monkeypatch.setattr(test_set_index, "_count_baseline_fields", counting)
 
         result = test_set_index.estimate_review_effort({"testSetId": "ts1"})
 
-        # It returned rather than paging on: an answer, plus how much it saw.
-        assert result["totalDocs"] == 600
-        assert result["sampledDocs"] >= 1
-        assert result["docsToReview"] <= 600
+        assert result["totalDocs"] == 30
+        assert 1 <= result["sampledDocs"] < 30
+        assert result["docsToReview"] <= 30
+        assert len(reads) <= budget + 16, (
+            f"{len(reads)} of 120 sections read; reads continued past the budget"
+        )
+        assert field_reads == []
 
     def test_queue_stops_collecting_before_the_lambda_times_out(
         self, labeling_env, monkeypatch
@@ -3065,28 +3124,177 @@ class TestTestSetResolver:
         much was ranked.
         """
         table, s3 = labeling_env
-        _seed_test_set(table, "ts1", fileCount=600)
-        for i in range(4):
-            name = f"doc{i}.pdf"
-            s3.put_object(Bucket="test-set-bucket", Key=f"ts1/input/{name}", Body=b"x")
-            s3.put_object(
-                Bucket="test-set-bucket",
-                Key=f"ts1/baseline/{name}/sections/1/result.json",
-                Body=json.dumps(
-                    {
-                        "labelSource": "draft-machine",
-                        "explainability_info": [{"f": {"confidence": 0.4}}],
-                    }
-                ).encode(),
-            )
-
-        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 0)
+        _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        budget = 40
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", budget)
+        reads = _one_second_per_baseline_read(s3, monkeypatch)
 
         result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
 
-        assert result["totalDocs"] == 600
+        assert result["totalDocs"] == 30
+        assert 1 <= result["inspectedDocs"] < 30
+        assert len(result["documents"]) == result["inspectedDocs"]
+        assert len(reads) <= budget + 16
+
+    def test_queue_cut_by_the_budget_ranks_only_whole_documents(
+        self, labeling_env, monkeypatch
+    ):
+        """A document the budget cut short is left out, not ranked on part of it.
+
+        The budget runs out partway through a page, so some document is always
+        half-read when it does. Ranking that one would show the confidence and alert
+        count of the sections that happened to be read — here, a document scoring
+        0.9 whose weakest field, at 0.1, is in a section never opened.
+        """
+        table, s3 = labeling_env
+        names = _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 40)
+        _one_second_per_baseline_read(s3, monkeypatch)
+
+        result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
+
+        inspected = result["inspectedDocs"]
+        assert 1 <= inspected < 30
+        assert {d["objectKey"] for d in result["documents"]} == set(names[:inspected])
+        for doc in result["documents"]:
+            assert doc["sectionCount"] == 4
+            assert doc["minConfidence"] == pytest.approx(0.1), doc["objectKey"]
+
+    @staticmethod
+    def _queue_with_a_harvest_that_spends_its_share(table, s3, monkeypatch):
+        """A running labeling job whose harvest uses every second it is given.
+
+        Returns the baseline keys read and the deadlines the harvest was handed.
+        """
+        table.put_item(
+            Item={
+                "PK": "testset#ts1",
+                "SK": "labeljob#job1",
+                "testSetId": "ts1",
+                "jobId": "job1",
+                "status": "RUNNING",
+                "createdAt": "2026-01-01T00:00:00Z",
+            }
+        )
+        reads = _one_second_per_baseline_read(s3, monkeypatch)
+        spent = {"harvest": 0.0}
+        deadlines = []
+
+        def harvest(job, deadline=None):
+            deadlines.append(deadline)
+            spent["harvest"] = deadline
+            return job
+
+        monkeypatch.setattr(test_set_index, "_harvest_label_job", harvest)
+        monkeypatch.setattr(
+            test_set_index.time,
+            "monotonic",
+            lambda: spent["harvest"] + float(len(reads)),
+        )
+        return reads, deadlines
+
+    def test_queue_harvest_spends_the_queue_budget_rather_than_adding_to_it(
+        self, labeling_env, monkeypatch
+    ):
+        """Regression (#1473): one deadline covers the harvest and the queue read.
+
+        While a labeling job runs the queue advances it first, then reads the set.
+        The harvest's own 20s budget was spent before a fresh sampling budget
+        started, so the request could run 20s + 12s against the dispatcher's 20s —
+        on the workspace an annotator opens straight after starting draft labeling.
+        """
+        table, s3 = labeling_env
+        _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 40)
+        monkeypatch.setattr(test_set_index, "QUEUE_HARVEST_TIME_BUDGET_SECONDS", 30)
+        reads, deadlines = self._queue_with_a_harvest_that_spends_its_share(
+            table, s3, monkeypatch
+        )
+
+        result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
+
+        assert deadlines == [30.0]
+        assert len(reads) <= (40 - 30) + 16, (
+            f"{len(reads)} sections read after a 30s harvest; the queue's budget "
+            "restarted when the harvest finished"
+        )
         assert result["inspectedDocs"] >= 1
-        assert len(result["documents"]) >= 1
+        assert result["labelJobStatus"] == "RUNNING"
+
+    def test_queue_always_ranks_at_least_one_document(self, labeling_env, monkeypatch):
+        """A queue whose budget is gone before its reads start still has a front.
+
+        An empty queue with the whole set remaining gives the annotator nothing to
+        open and no error to act on. The first document is read whatever the clock
+        says, so the workspace always has one to work.
+        """
+        table, s3 = labeling_env
+        names = _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 20)
+        monkeypatch.setattr(test_set_index, "QUEUE_HARVEST_TIME_BUDGET_SECONDS", 30)
+        reads, _ = self._queue_with_a_harvest_that_spends_its_share(
+            table, s3, monkeypatch
+        )
+
+        result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
+
+        assert result["inspectedDocs"] == 1
+        assert [d["objectKey"] for d in result["documents"]] == [names[0]]
+        assert result["documents"][0]["minConfidence"] == pytest.approx(0.1)
+        assert len(reads) == 4
+
+    def test_document_listing_is_not_time_bounded(self, labeling_env, monkeypatch):
+        """The budget belongs to the samplers; paging the set returns every document.
+
+        getTestSetDocuments is also the Test Studio document table, which pages
+        through the whole set and must not silently lose rows to a clock it never
+        asked for.
+        """
+        table, s3 = labeling_env
+        _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 0)
+        reads = _one_second_per_baseline_read(s3, monkeypatch)
+
+        page = test_set_index.get_test_set_documents({"testSetId": "ts1", "limit": 30})
+
+        assert len(page["documents"]) == 30
+        assert len(reads) == 120
+        for doc in page["documents"]:
+            assert doc["minConfidence"] == pytest.approx(0.1), doc["objectKey"]
+
+    def test_sampling_budget_expires_inside_the_dispatcher_bound(self):
+        """The budget has to run out while the dispatcher is still waiting.
+
+        The dispatcher stops waiting for this resolver at
+        ``_RESOLVER_READ_TIMEOUT_SECONDS`` and answers 504. A 25s budget against its
+        20s made every sample that used its budget a 504 however narrow it became
+        (#1473). What remains of the 20s pays for a cold start (up to ~1.7s
+        measured), the reads before and after sampling, and the section reads still
+        in flight when the budget runs out.
+
+        The annotation queue's label-job harvest is spent from the same budget, so
+        its share has to leave the queue's own reads the larger part of it.
+        """
+        dispatcher = pathlib.Path(__file__).resolve().parents[4] / (
+            "nested/api-resolvers/src/lambda/http_api_dispatcher/index.py"
+        )
+        assert dispatcher.exists(), f"dispatcher source not at {dispatcher}"
+        match = re.search(
+            r"^_RESOLVER_READ_TIMEOUT_SECONDS = (\d+)$",
+            dispatcher.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        assert match, "dispatcher read timeout not found"
+        read_timeout = int(match.group(1))
+        headroom = read_timeout - test_set_index.SAMPLING_TIME_BUDGET_SECONDS
+        assert headroom >= 5, (
+            f"sampling budget leaves {headroom}s of the dispatcher's {read_timeout}s"
+        )
+        harvest = test_set_index.QUEUE_HARVEST_TIME_BUDGET_SECONDS
+        assert harvest <= test_set_index.SAMPLING_TIME_BUDGET_SECONDS / 2, (
+            f"the queue's {harvest}s harvest share leaves its reads less than half "
+            "of the budget"
+        )
 
     def test_field_sample_is_bounded_when_no_baseline_carries_fields(
         self, labeling_env, monkeypatch
@@ -4737,7 +4945,7 @@ class TestTestSetResolver:
     def test_an_unknown_test_set_is_refused(self, labeling_env):
         _table, _s3 = labeling_env
 
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             test_set_index.open_test_set_annotation_draft(
                 {"input": {"testSetId": "nope"}}
             )
@@ -9000,7 +9208,7 @@ class TestAddDocumentsToTestSetByKey:
             self._run({"testSetId": "my-set", "objectKeys": ["a.pdf"]}, item=item)
 
     def test_refuses_a_missing_set(self):
-        with pytest.raises(Exception, match="not found"):
+        with pytest.raises(test_set_index.ResourceNotFound, match="not found"):
             self._run({"testSetId": "nope", "objectKeys": ["a.pdf"]}, item={})
 
     @staticmethod
@@ -9307,3 +9515,400 @@ class TestResolverPathsKeyLikeTheStoredCurve:
                 "idp_common.evaluation.curve_store"
             ).list_child_path
         )
+
+
+class TestDocumentSearchCoversTheWholeSet:
+    """`search` on getTestSetDocuments is answered about the set, not about a page.
+
+    The documents table is paginated server-side at 50 rows, with an opaque S3
+    continuation token, so the browser holds one page and nothing else. Its search
+    box used to filter that page, which answers a question about 50 documents in
+    the voice of a question about the set: a document two pages along came back as
+    "no results" (#1323). These tests pin the properties that distinguish the two,
+    because every one of them is satisfied by a page-scoped filter on a set that
+    happens to fit in one page — which is the only size most tests use.
+    """
+
+    def _seed(self, table, s3, names, **extra):
+        _seed_test_set(table, "ts1", fileCount=len(names), **extra)
+        for name in names:
+            s3.put_object(Bucket="test-set-bucket", Key=f"ts1/input/{name}", Body=b"x")
+
+    def test_a_match_beyond_the_first_page_is_found(self, labeling_env):
+        """The reported bug. The match sits on page 3 at this limit, so a filter
+        over the rows a caller already holds returns nothing for it."""
+        table, s3 = labeling_env
+        names = [f"doc{i:03d}.pdf" for i in range(100)] + ["needle-statement.pdf"]
+        self._seed(table, s3, names)
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "limit": 50, "search": "needle"}
+        )
+
+        assert [d["objectKey"] for d in page["documents"]] == ["needle-statement.pdf"]
+        assert page["matchCount"] == 1
+        assert page["nextToken"] is None, "one match is one page of matches"
+
+    def test_the_match_count_describes_the_set_not_the_page(self, labeling_env):
+        """The count a search box shows has to be the set's, or it reads as
+        "this is everything that matches" while meaning "this page"."""
+        table, s3 = labeling_env
+        self._seed(table, s3, [f"statement-{i:03d}.pdf" for i in range(70)])
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "limit": 50, "search": "statement"}
+        )
+
+        assert len(page["documents"]) == 50, "the page is still a page"
+        assert page["matchCount"] == 70, "but the count is the set's"
+        assert page["totalCount"] == 70, "and totalCount still means the set"
+
+    def test_paging_runs_over_the_matches_and_covers_every_one(self, labeling_env):
+        """Search precedes pagination: page 2 is matches 51-70, not documents 51-70.
+
+        Pinned by walking the pages and asserting the union is exactly the match
+        set, with no key returned twice. A continuation token would resume at a
+        1000-key LIST boundary instead and silently drop matches inside a page it
+        had already read past.
+        """
+        table, s3 = labeling_env
+        names = [f"statement-{i:03d}.pdf" for i in range(70)]
+        self._seed(table, s3, names + ["unrelated.txt"])
+
+        seen = []
+        token = None
+        for _ in range(5):  # bounded, so a looping token fails rather than hangs
+            page = test_set_index.get_test_set_documents(
+                {
+                    "testSetId": "ts1",
+                    "limit": 50,
+                    "search": "statement",
+                    "nextToken": token,
+                }
+            )
+            seen.extend(d["objectKey"] for d in page["documents"])
+            token = page["nextToken"]
+            if not token:
+                break
+
+        assert token is None, "paging terminated"
+        assert sorted(seen) == sorted(names)
+        assert len(seen) == len(set(seen)), "no document returned on two pages"
+
+    def test_the_search_is_case_insensitive_and_matches_mid_name(self, labeling_env):
+        """Same semantics the client-side filter had, so the fix does not also
+        change what counts as a match: lowercased substring, not a prefix."""
+        table, s3 = labeling_env
+        self._seed(table, s3, ["Q3-BankStatement-2024.pdf", "invoice.pdf"])
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "bankstatement"}
+        )
+
+        assert [d["objectKey"] for d in page["documents"]] == [
+            "Q3-BankStatement-2024.pdf"
+        ]
+
+    def test_a_search_matching_nothing_is_distinguishable_from_no_search(
+        self, labeling_env
+    ):
+        """`matchCount` is None without a search and 0 for a search that missed.
+
+        A caller that cannot tell these apart has to choose between captioning an
+        unsearched table "0 matching" and captioning an empty result with the set's
+        size.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf", "b.pdf"])
+
+        missed = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "zzz"}
+        )
+        assert missed["documents"] == []
+        assert missed["matchCount"] == 0
+
+        unsearched = test_set_index.get_test_set_documents({"testSetId": "ts1"})
+        assert len(unsearched["documents"]) == 2
+        assert unsearched["matchCount"] is None
+        assert unsearched["searchTruncated"] is None
+
+    def test_a_blank_search_is_not_a_search(self, labeling_env):
+        """Whitespace is what the box holds between a cleared search and a new one.
+        Treating it as a match-everything search would make `matchCount` claim a
+        count the scan budget cannot promise on a large set."""
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf", "b.pdf"])
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "   "}
+        )
+
+        assert len(page["documents"]) == 2
+        assert page["matchCount"] is None
+
+    def test_an_exact_object_key_still_wins_over_a_search(self, labeling_env):
+        """objectKey is the deep-link path and the narrower of the two. It also
+        uses the S3 Prefix, so letting a search override it would turn a one-key
+        lookup into a scan of the set."""
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf", "ab.pdf"])
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "objectKey": "a.pdf", "search": "ab"}
+        )
+
+        assert [d["objectKey"] for d in page["documents"]] == ["a.pdf"]
+        assert page["matchCount"] is None
+
+    def test_sections_and_label_state_are_attached_to_a_searched_page(
+        self, labeling_env
+    ):
+        """A searched page is a page: it goes through the same hydration, so the
+        columns that need baseline reads are populated. A search path that skipped
+        it would show every matched row as unlabeled."""
+        table, s3 = labeling_env
+        self._seed(table, s3, ["statement.pdf"])
+        s3.put_object(
+            Bucket="test-set-bucket",
+            Key="ts1/baseline/statement.pdf/sections/1/result.json",
+            Body=json.dumps(
+                {
+                    "labelSource": "reviewed-human",
+                    "document_class": {"type": "BankStatement"},
+                    "inference_result": {"f": "v"},
+                }
+            ).encode(),
+        )
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "statement"}
+        )
+
+        doc = page["documents"][0]
+        assert [s["sectionId"] for s in doc["sections"]] == ["1"]
+        assert doc["sections"][0]["documentClass"] == "BankStatement"
+        assert doc["labelSource"] == "reviewed-human"
+
+    def test_only_the_requested_page_is_hydrated(self, labeling_env):
+        """The expensive part of this listing is one S3 GET per section per
+        document (``_attach_label_metadata``), and a whole-set search must not make
+        it whole-set work. Counting matches is a LIST-only walk; reading them is
+        not, so the GETs stay proportional to `limit`.
+        """
+        table, s3 = labeling_env
+        names = [f"statement-{i:03d}.pdf" for i in range(60)]
+        self._seed(table, s3, names)
+        for name in names:
+            s3.put_object(
+                Bucket="test-set-bucket",
+                Key=f"ts1/baseline/{name}/sections/1/result.json",
+                Body=json.dumps({"labelSource": "draft-machine"}).encode(),
+            )
+
+        with patch.object(
+            test_set_index,
+            "_attach_label_metadata",
+            wraps=test_set_index._attach_label_metadata,
+        ) as hydrate:
+            page = test_set_index.get_test_set_documents(
+                {"testSetId": "ts1", "limit": 10, "search": "statement"}
+            )
+
+        assert page["matchCount"] == 60, "all 60 counted"
+        hydrated = hydrate.call_args[0][1]
+        assert len(hydrated) == 10, "but only the page read"
+
+    def test_a_token_that_is_not_a_search_offset_is_refused_by_a_search(
+        self, labeling_env
+    ):
+        """A search will only page on a token a search minted.
+
+        The two kinds are not interchangeable: one is an offset into a match list,
+        the other an S3 continuation token. Anything that is not an offset is
+        refused rather than parsed hopefully, because `int()` on a continuation
+        token raises where the caller cannot see it. The reverse direction — a
+        search offset replayed with no search — is
+        `test_a_search_token_is_refused_when_the_search_is_gone`.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf"])
+
+        with pytest.raises(Exception, match="Invalid pagination token"):
+            test_set_index.get_test_set_documents(
+                {"testSetId": "ts1", "search": "a", "nextToken": "not-an-offset"}
+            )
+
+    def test_the_scan_budget_reports_itself_rather_than_overstating_the_count(
+        self, labeling_env, monkeypatch
+    ):
+        """Past the budget the page is still right, and the count becomes a floor.
+
+        The honest failure for an unbounded scan is a Lambda timeout, which tells
+        the user nothing. `searchTruncated` is what lets the caller say "N+" and
+        ask for a narrower search instead of reporting a lower bound as a total.
+        The budget and the LIST page size are lowered here rather than seeding
+        50,000 objects.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, [f"statement-{i:03d}.pdf" for i in range(20)])
+        monkeypatch.setattr(test_set_index, "_SEARCH_SCAN_KEY_BUDGET", 5)
+        monkeypatch.setattr(test_set_index, "_SEARCH_SCAN_PAGE_SIZE", 5)
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "limit": 50, "search": "statement"}
+        )
+
+        assert page["searchTruncated"] is True
+        assert page["matchCount"] < 20, "a floor, not the set's count"
+        assert page["nextToken"] is None, (
+            "and no next page, because the 5 matches found do not exceed this "
+            "page's end (offset 0 + limit 50) — not because the scan was cut "
+            "short. A truncated search WITH more matches than `limit` does hand "
+            "out a token, and paging it is correct: `match_count > end` is "
+            "evaluated against the matches the scan actually reached, so every "
+            "page it offers is one it can serve"
+        )
+
+    def test_reaching_the_budget_on_the_last_page_is_not_truncation(
+        self, labeling_env, monkeypatch
+    ):
+        """Spending the whole budget is not the same as leaving keys unread.
+
+        A scan that exhausts the prefix on the same page it reaches the budget is
+        complete: S3 reports `IsTruncated` false, so the count is exact rather than
+        a floor. Captioning it "20+" would state a lower bound where an exact count
+        is known, and would tell the user to narrow a search that already saw the
+        whole set. Every set small enough to list in one call takes this path.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, [f"statement-{i:02d}.pdf" for i in range(20)])
+        monkeypatch.setattr(test_set_index, "_SEARCH_SCAN_KEY_BUDGET", 20)
+        monkeypatch.setattr(test_set_index, "_SEARCH_SCAN_PAGE_SIZE", 20)
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "limit": 50, "search": "statement"}
+        )
+
+        assert page["searchTruncated"] is False
+        assert page["matchCount"] == 20
+
+    def test_a_search_token_is_refused_when_the_search_is_gone(self, labeling_env):
+        """The other direction of the same confusion, and the reachable one.
+
+        An offset into a match list means nothing without the search that produced
+        it. Handed to S3 as a continuation token it comes back as an opaque
+        InvalidArgument, which the page renders as "Failed to load test set
+        documents" — a load error for what is really a bad request.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf"])
+
+        with pytest.raises(Exception, match="Invalid pagination token"):
+            test_set_index.get_test_set_documents(
+                {"testSetId": "ts1", "nextToken": "match:50"}
+            )
+
+    def test_the_search_never_reaches_s3_as_a_prefix(self, labeling_env):
+        """`search` is matched in memory, so it cannot address S3.
+
+        `objectKey` is interpolated into the LIST `Prefix` and is therefore checked
+        for '..'; `search` is not, and this is what that asymmetry rests on. A
+        traversal string is an ordinary needle that matches no document name rather
+        than a path, and a leading substring is not a prefix search.
+        """
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf", "b.pdf"])
+
+        escaped = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "../../other-set/input/"}
+        )
+        assert escaped["documents"] == []
+        assert escaped["matchCount"] == 0
+
+        # And a name that genuinely contains the needle is still found, so the above
+        # is "no match" rather than "search is broken".
+        s3.put_object(
+            Bucket="test-set-bucket", Key="ts1/input/weird..name.pdf", Body=b"x"
+        )
+        found = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": ".."}
+        )
+        assert [d["objectKey"] for d in found["documents"]] == ["weird..name.pdf"]
+
+    def test_a_search_matches_a_nested_document_name(self, labeling_env):
+        """Input names can hold '/' — the listing already handles nested names, and
+        the search runs on the same relative name, not on the raw key. Matching the
+        key instead would let the set id or the 'input/' segment match."""
+        table, s3 = labeling_env
+        _seed_test_set(table, "ts1", fileCount=1)
+        s3.put_object(
+            Bucket="test-set-bucket", Key="ts1/input/sub/dir/stmt.pdf", Body=b"x"
+        )
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "sub/dir"}
+        )
+        assert [d["objectKey"] for d in page["documents"]] == ["sub/dir/stmt.pdf"]
+
+        # 'input' is in every key and in no document name, so matching it must find
+        # nothing. A search over raw keys would return the whole set here.
+        assert (
+            test_set_index.get_test_set_documents(
+                {"testSetId": "ts1", "search": "input"}
+            )["matchCount"]
+            == 0
+        )
+
+    def test_a_search_that_matches_nothing_does_not_fall_back_to_the_set(
+        self, labeling_env
+    ):
+        """The failure mode worth naming: a search box that answers "here is
+        everything" when it finds nothing is worse than one that answers "no
+        results", because the user reads the first rows as matches."""
+        table, s3 = labeling_env
+        self._seed(table, s3, [f"doc{i}.pdf" for i in range(10)])
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "no-such-document"}
+        )
+
+        assert page["documents"] == []
+        assert page["totalCount"] == 10, "the set is still reported as 10"
+
+    def test_folder_placeholder_objects_are_not_matched(self, labeling_env):
+        """A console-created prefix is a zero-byte key ending in '/'. The unsearched
+        listing skips those; the searched one has to skip them too, or a search for
+        a folder name returns a row with no document behind it."""
+        table, s3 = labeling_env
+        _seed_test_set(table, "ts1", fileCount=1)
+        s3.put_object(Bucket="test-set-bucket", Key="ts1/input/batch1/", Body=b"")
+        s3.put_object(Bucket="test-set-bucket", Key="ts1/input/batch1/a.pdf", Body=b"x")
+
+        page = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "batch1"}
+        )
+
+        assert [d["objectKey"] for d in page["documents"]] == ["batch1/a.pdf"]
+        assert page["matchCount"] == 1
+
+    def test_an_oversized_search_is_refused(self, labeling_env):
+        """The search is the one input here whose size the caller picks freely, and
+        it is echoed into the log line. A document name cannot approach this
+        length, so a longer value is not a search anybody typed."""
+        table, s3 = labeling_env
+        self._seed(table, s3, ["a.pdf"])
+
+        with pytest.raises(Exception, match="Search text is too long"):
+            test_set_index.get_test_set_documents(
+                {
+                    "testSetId": "ts1",
+                    "search": "x" * (test_set_index._SEARCH_MAX_LENGTH + 1),
+                }
+            )
+
+        # The boundary itself is accepted, so the limit is a limit rather than an
+        # off-by-one that rejects a legitimate long name.
+        at_limit = test_set_index.get_test_set_documents(
+            {"testSetId": "ts1", "search": "x" * test_set_index._SEARCH_MAX_LENGTH}
+        )
+        assert at_limit["matchCount"] == 0
