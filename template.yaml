@@ -820,7 +820,8 @@ Parameters:
       used for the "update available" check shown in the Web UI Deployment
       Info section. Leave empty to disable the check (default for headless
       / private-network deployments). For the public release, point this at
-      the regional aws-ml-blog bucket — e.g. aws-ml-blog-us-west-2.
+      that Region's release bucket — e.g. aws-ml-blog-us-west-2, or
+      aws-bigdata-blog-replica-ca-central-1 in Canada.
 
   PublicArtifactsPrefix:
     Type: String

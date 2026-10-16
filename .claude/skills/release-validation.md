@@ -34,7 +34,7 @@ all eight have a row in the record — including any that could not run, with th
 > transform. Check the template's `Description` says `(v<VERSION>)` before you start.
 >
 > **This skill validates a release; it does not publish one.** The publish procedure —
-> `scripts/aws-release.sh`, the three public buckets, the mutable vs version-pinned keys,
+> `scripts/aws-release.sh`, the four public buckets, the mutable vs version-pinned keys,
 > and the failure/recovery paths — is in `docs/release-runbook.md`. If the artifact under
 > test does not exist yet, that runbook is what produces it.
 
