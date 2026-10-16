@@ -1816,7 +1816,9 @@ def _harvest_active_label_job(test_set_id, meta):
     not fail the queue, which still works for already-labeled documents.
 
     All in-flight jobs share one time budget, since the caller is a single request
-    and copying results is S3-bound.
+    and copying results is S3-bound. That budget is the queue's share of its own
+    request, so the harvest stops in time for the queue to be read after it; the
+    workspace re-reads the queue while a job runs, and each read continues it.
     """
     # Every non-terminal job, not just the one the set's pointer names: a
     # one-document re-extract repoints it, and harvesting only the pointer would
@@ -1835,7 +1837,7 @@ def _harvest_active_label_job(test_set_id, meta):
             {"PK": f"testset#{test_set_id}", "SK": _label_job_sk(pointer)}
         )
 
-    deadline = time.monotonic() + HARVEST_TIME_BUDGET_SECONDS
+    deadline = time.monotonic() + QUEUE_HARVEST_TIME_BUDGET_SECONDS
     harvested = []
     for job in jobs:
         try:
@@ -2668,9 +2670,10 @@ def get_annotation_queue(args, event=None):
     if not meta:
         raise ResourceNotFound(f"Test set '{test_set_id}' not found")
 
+    deadline = time.monotonic() + SAMPLING_TIME_BUDGET_SECONDS
     label_job = _harvest_active_label_job(test_set_id, meta)
 
-    documents = _collect_queue_documents(test_set_id)
+    documents = _collect_queue_documents(test_set_id, deadline)
     claims = _claim_state_for_documents(test_set_id, meta, documents)
 
     caller = caller_email(event)
@@ -2797,17 +2800,19 @@ def get_annotation_queue(args, event=None):
     return result
 
 
-def _collect_queue_documents(test_set_id):
+def _collect_queue_documents(test_set_id, deadline):
     """Documents in the set with their label metadata, up to the queue cap.
 
     Capped and time-bounded because each page reads every section on it from S3,
     which outlasts the dispatcher on a set of multi-section packets. A short queue
     is workable, since annotators take documents from the front; a timeout means the
     workspace cannot open. inspectedDocs reports how much was ranked.
+
+    ``deadline`` is the request's, set before the label-job harvest, so the time the
+    harvest spends comes out of this budget rather than being added to it.
     """
     documents = []
     next_token = None
-    deadline = time.monotonic() + SAMPLING_TIME_BUDGET_SECONDS
     while len(documents) < MAX_DOCS_FOR_ESTIMATE:
         page = get_test_set_documents(
             {
@@ -3178,6 +3183,13 @@ MAX_DOCS_FOR_ESTIMATE = 200
 # http_api_dispatcher): past that the caller already has a 504, however narrow the
 # sample became. The rest of the 20s pays for a cold start (~1.7s measured), the
 # reads before and after sampling, and the reads in flight when the deadline passes.
+# For the annotation queue the deadline is set before its label-job harvest, which
+# spends QUEUE_HARVEST_TIME_BUDGET_SECONDS of it.
+#
+# Not bounded by it: the listing of the set's whole baseline/ prefix that precedes
+# each page's section reads. That time is spent from this budget, but the deadline
+# is not checked inside it, and it grows with the size of the set rather than the
+# page.
 SAMPLING_TIME_BUDGET_SECONDS = 12
 
 # Ceiling on baseline sections read to characterise document shape for the effort
@@ -3189,6 +3201,11 @@ MAX_SECTIONS_FOR_FIELD_SAMPLE = 40
 # several S3 calls per section, so a large set cannot finish in one pass; stopping
 # short leaves the job RUNNING and the next poll continues.
 HARVEST_TIME_BUDGET_SECONDS = 20
+
+# The annotation queue's harvest share of its own request. Kept well under
+# SAMPLING_TIME_BUDGET_SECONDS, which the queue measures from before the harvest, so
+# a harvest that uses all of its share still leaves the queue time to be read.
+QUEUE_HARVEST_TIME_BUDGET_SECONDS = 4
 
 # Document states the pipeline never leaves. A labeling job waiting on one of
 # these would never complete, and every caller that shows a job re-harvests on a
@@ -4669,9 +4686,9 @@ def get_test_set_documents(args, deadline=None):
     set two pages along. See ``_search_test_set_documents``.
 
     ``deadline`` is for internal callers sampling the set under a time budget. When
-    it passes mid-page, the page is cut to the documents whose sections were all
-    read and ``nextToken`` is ``None``, since resuming from the uncut page's token
-    would skip the documents dropped from it.
+    it passes mid-page, the page is cut to the leading documents none of whose
+    sections it skipped, and ``nextToken`` is ``None``, since resuming from the uncut
+    page's token would skip the documents dropped from it.
     """
     test_set_id = args["testSetId"]
     limit = args.get("limit") or 100
@@ -4967,8 +4984,10 @@ def _attach_label_metadata(test_set_bucket, documents, deadline=None):
     the listing.
 
     ``deadline`` is a ``time.monotonic()`` value after which no further section is
-    read. Returns how many leading documents had every section read, which is all of
-    them when no deadline passed.
+    read, except the first document's, so a page always yields at least one
+    document. Returns how many leading documents the deadline skipped no section of,
+    which is all of them when it never passed. A section whose read failed was
+    attempted, and counts as best-effort above.
     """
     tasks = []
     for doc in documents:
@@ -4985,7 +5004,11 @@ def _attach_label_metadata(test_set_bucket, documents, deadline=None):
 
     def read(task):
         doc, section = task
-        if deadline is not None and time.monotonic() > deadline:
+        if (
+            deadline is not None
+            and doc is not documents[0]
+            and time.monotonic() > deadline
+        ):
             return doc, section, None, False
         key = section["baselineKey"]
         try:

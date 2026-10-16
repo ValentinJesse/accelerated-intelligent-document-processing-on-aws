@@ -3139,7 +3139,7 @@ class TestTestSetResolver:
     def test_queue_cut_by_the_budget_ranks_only_whole_documents(
         self, labeling_env, monkeypatch
     ):
-        """A document is ranked on all of its sections or left out of the queue.
+        """A document the budget cut short is left out, not ranked on part of it.
 
         The budget runs out partway through a page, so some document is always
         half-read when it does. Ranking that one would show the confidence and alert
@@ -3159,6 +3159,89 @@ class TestTestSetResolver:
         for doc in result["documents"]:
             assert doc["sectionCount"] == 4
             assert doc["minConfidence"] == pytest.approx(0.1), doc["objectKey"]
+
+    @staticmethod
+    def _queue_with_a_harvest_that_spends_its_share(table, s3, monkeypatch):
+        """A running labeling job whose harvest uses every second it is given.
+
+        Returns the baseline keys read and the deadlines the harvest was handed.
+        """
+        table.put_item(
+            Item={
+                "PK": "testset#ts1",
+                "SK": "labeljob#job1",
+                "testSetId": "ts1",
+                "jobId": "job1",
+                "status": "RUNNING",
+                "createdAt": "2026-01-01T00:00:00Z",
+            }
+        )
+        reads = _one_second_per_baseline_read(s3, monkeypatch)
+        spent = {"harvest": 0.0}
+        deadlines = []
+
+        def harvest(job, deadline=None):
+            deadlines.append(deadline)
+            spent["harvest"] = deadline
+            return job
+
+        monkeypatch.setattr(test_set_index, "_harvest_label_job", harvest)
+        monkeypatch.setattr(
+            test_set_index.time,
+            "monotonic",
+            lambda: spent["harvest"] + float(len(reads)),
+        )
+        return reads, deadlines
+
+    def test_queue_harvest_spends_the_queue_budget_rather_than_adding_to_it(
+        self, labeling_env, monkeypatch
+    ):
+        """Regression (#1473): one deadline covers the harvest and the queue read.
+
+        While a labeling job runs the queue advances it first, then reads the set.
+        The harvest's own 20s budget was spent before a fresh sampling budget
+        started, so the request could run 20s + 12s against the dispatcher's 20s —
+        on the workspace an annotator opens straight after starting draft labeling.
+        """
+        table, s3 = labeling_env
+        _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 40)
+        monkeypatch.setattr(test_set_index, "QUEUE_HARVEST_TIME_BUDGET_SECONDS", 30)
+        reads, deadlines = self._queue_with_a_harvest_that_spends_its_share(
+            table, s3, monkeypatch
+        )
+
+        result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
+
+        assert deadlines == [30.0]
+        assert len(reads) <= (40 - 30) + 16, (
+            f"{len(reads)} sections read after a 30s harvest; the queue's budget "
+            "restarted when the harvest finished"
+        )
+        assert result["inspectedDocs"] >= 1
+        assert result["labelJobStatus"] == "RUNNING"
+
+    def test_queue_always_ranks_at_least_one_document(self, labeling_env, monkeypatch):
+        """A queue whose budget is gone before its reads start still has a front.
+
+        An empty queue with the whole set remaining gives the annotator nothing to
+        open and no error to act on. The first document is read whatever the clock
+        says, so the workspace always has one to work.
+        """
+        table, s3 = labeling_env
+        names = _seed_packet_set(table, s3, "ts1", docs=30, sections=4)
+        monkeypatch.setattr(test_set_index, "SAMPLING_TIME_BUDGET_SECONDS", 20)
+        monkeypatch.setattr(test_set_index, "QUEUE_HARVEST_TIME_BUDGET_SECONDS", 30)
+        reads, _ = self._queue_with_a_harvest_that_spends_its_share(
+            table, s3, monkeypatch
+        )
+
+        result = test_set_index.get_annotation_queue({"testSetId": "ts1"}, None)
+
+        assert result["inspectedDocs"] == 1
+        assert [d["objectKey"] for d in result["documents"]] == [names[0]]
+        assert result["documents"][0]["minConfidence"] == pytest.approx(0.1)
+        assert len(reads) == 4
 
     def test_document_listing_is_not_time_bounded(self, labeling_env, monkeypatch):
         """The budget belongs to the samplers; paging the set returns every document.
@@ -3188,10 +3271,14 @@ class TestTestSetResolver:
         (#1473). What remains of the 20s pays for a cold start (up to ~1.7s
         measured), the reads before and after sampling, and the section reads still
         in flight when the budget runs out.
+
+        The annotation queue's label-job harvest is spent from the same budget, so
+        its share has to leave the queue's own reads the larger part of it.
         """
         dispatcher = pathlib.Path(__file__).resolve().parents[4] / (
             "nested/api-resolvers/src/lambda/http_api_dispatcher/index.py"
         )
+        assert dispatcher.exists(), f"dispatcher source not at {dispatcher}"
         match = re.search(
             r"^_RESOLVER_READ_TIMEOUT_SECONDS = (\d+)$",
             dispatcher.read_text(encoding="utf-8"),
@@ -3202,6 +3289,11 @@ class TestTestSetResolver:
         headroom = read_timeout - test_set_index.SAMPLING_TIME_BUDGET_SECONDS
         assert headroom >= 5, (
             f"sampling budget leaves {headroom}s of the dispatcher's {read_timeout}s"
+        )
+        harvest = test_set_index.QUEUE_HARVEST_TIME_BUDGET_SECONDS
+        assert harvest <= test_set_index.SAMPLING_TIME_BUDGET_SECONDS / 2, (
+            f"the queue's {harvest}s harvest share leaves its reads less than half "
+            "of the budget"
         )
 
     def test_field_sample_is_bounded_when_no_baseline_carries_fields(
