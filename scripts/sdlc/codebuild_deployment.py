@@ -487,6 +487,27 @@ STARTUP_SWEEPS = (
         ),
     ),
     StartupSweep(
+        func="cleanup_stale_idp_roles",
+        label="Leaked idp- IAM role sweep",
+        fails_run=True,
+        why=(
+            "Fatal, and it has to run BEFORE the policy sweep below rather than "
+            "beside it. These roles are not a teardown failure: "
+            "nested/bedrockkb declares two of them `DeletionPolicy: Retain` so "
+            "that a customer's deployer need not hold `iam:DeleteRole` (#315), "
+            "so CloudFormation leaks them BY DESIGN on every run and no stack "
+            "owns them afterwards. They cost two quotas at once — "
+            "RolesPerAccount, where exhaustion fails every deploy in the "
+            "account and 2,019 were standing when this was written, and "
+            "PoliciesPerAccount, because a retained role NAMES its run's "
+            "boundary policy and DeletePolicy refuses while one does. That "
+            "second one is the ordering: the policy sweep was selecting those "
+            "policies correctly and reporting `Reaped 0/578` because IAM "
+            "refused every delete, so an inert role sweep makes an inert policy "
+            "sweep too."
+        ),
+    ),
+    StartupSweep(
         func="cleanup_stale_idp_policies",
         label="Orphaned idp- IAM policy sweep",
         fails_run=True,
@@ -1089,6 +1110,92 @@ def _policy_attachment_detail(iam_client, policy_arn):
     return f" (attached to: {shown})"
 
 
+def _roles_holding_policy_as_boundary(iam_client, policy_arn):
+    """Role names using ``policy_arn`` as their permissions boundary.
+
+    ⚠️ ``PolicyUsageFilter="PermissionsBoundary"`` is the whole point, and the
+    distinction it draws is the one that hid this leak for three months.
+    ``list_policies`` reports **two independent counters** —
+    ``AttachmentCount`` for roles the policy is *attached* to, and
+    ``PermissionsBoundaryUsageCount`` for roles that name it as their *boundary*
+    — and ``DeletePolicy`` refuses while **either** is non-zero. Every orphaned
+    boundary policy in this account reads ``AttachmentCount: 0``, which looks
+    exactly like "nothing holds this" to anyone checking the obvious counter,
+    while being held by 2-3 roles through the other one.
+
+    Returns [] on an API error: the caller is deciding what to delete, so an
+    unreadable answer must not read as "no roles hold it" — it falls through to
+    ``DeletePolicy``, which stays the only authority on whether the policy went.
+    """
+    try:
+        paginator = iam_client.get_paginator("list_entities_for_policy")
+        names = []
+        for page in paginator.paginate(
+            PolicyArn=policy_arn, PolicyUsageFilter="PermissionsBoundary"
+        ):
+            names += [
+                role.get("RoleName", "")
+                for role in page.get("PolicyRoles", [])
+                if role.get("RoleName")
+            ]
+        return names
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _delete_iam_role(iam_client, role_name):
+    """Delete one IAM role, clearing what IAM requires first. Returns (gone, detail).
+
+    ``DeleteRole`` refuses while a role has inline policies, attached managed
+    policies or an instance-profile membership, so all three are cleared first.
+    `gone` is True when the role is no longer there, which includes the case
+    where it never was.
+
+    Scoped by the caller, never by this function: it deletes whatever role it is
+    given. Both callers select from an `idp-` run prefix, which is also the bound
+    on the CodeBuild role's own `iam:*` grant (`role/idp-*`), so a selection bug
+    here cannot reach a role outside this harness's own runs.
+    """
+    try:
+        for page in iam_client.get_paginator("list_attached_role_policies").paginate(
+            RoleName=role_name
+        ):
+            for policy in page.get("AttachedPolicies", []):
+                iam_client.detach_role_policy(
+                    RoleName=role_name, PolicyArn=policy["PolicyArn"]
+                )
+        for page in iam_client.get_paginator("list_role_policies").paginate(
+            RoleName=role_name
+        ):
+            for name in page.get("PolicyNames", []):
+                iam_client.delete_role_policy(RoleName=role_name, PolicyName=name)
+        for page in iam_client.get_paginator(
+            "list_instance_profiles_for_role"
+        ).paginate(RoleName=role_name):
+            for profile in page.get("InstanceProfiles", []):
+                iam_client.remove_role_from_instance_profile(
+                    InstanceProfileName=profile["InstanceProfileName"],
+                    RoleName=role_name,
+                )
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == "NoSuchEntity":
+            return True, "not present"
+        # Reported, not raised: DeleteRole below is the authority on whether the
+        # role went, and it may still succeed (a role with nothing attached
+        # reaches here only because a LISTING failed).
+        print(f"  ⚠️ {role_name}: could not fully clear before delete — {e}")
+
+    try:
+        iam_client.delete_role(RoleName=role_name)
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        code = _aws_error_code(e)
+        if code == "NoSuchEntity":
+            return True, "not present"
+        return False, str(e)
+
+
 def _delete_managed_policy(iam_client, policy_arn):
     """Delete one customer-managed policy. Returns (gone, detail).
 
@@ -1274,6 +1381,36 @@ def cleanup_iam_resources(stack_name):
         iam_client = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
         account_id = boto3.client("sts").get_caller_identity()["Account"]
         boundary_arn = f"arn:aws:iam::{account_id}:policy/{boundary_name}"
+        # ⚠️ The boundary cannot be deleted while any role still NAMES it as a
+        # boundary, and this deploy leaves two that do, on purpose.
+        # `nested/bedrockkb/template.yaml` declares StartIngestionJobFunctionRole
+        # and DataSourceSchedulerRole `DeletionPolicy: Retain` so that deleting
+        # the stack does not require the deployer's `iam:DeleteRole` (issue
+        # #315) — right for a customer, and the reason given there,
+        # "orphaning it is harmless", is true of the role and false of what it
+        # holds: each retained role pins this run's boundary policy permanently.
+        #
+        # So the retained roles go first, HERE in the CI harness rather than by
+        # changing the template, which would reopen #315 for every deployer.
+        # Selected by boundary usage rather than by name, so the set is exactly
+        # the roles that would block the delete, and a third retained role added
+        # to any nested stack later is covered without being named.
+        #
+        # Left behind, this cost 2,019 roles (~40% of the account's 5,000 role
+        # quota, oldest 2026-04-20) and 582 undeletable boundary policies, while
+        # teardown logged one `⚠️ Permissions boundary not deleted` line a run
+        # and the policy sweep reported `Reaped 0/578`. Role exhaustion fails
+        # EVERY deploy in the account.
+        held_by = _roles_holding_policy_as_boundary(iam_client, boundary_arn)
+        for role_name in sorted(held_by):
+            role_gone, role_detail = _delete_iam_role(iam_client, role_name)
+            if role_gone:
+                print(f"[{stack_name}] ✅ Deleted retained role: {role_name}")
+            else:
+                print(
+                    f"[{stack_name}] ⚠️ Retained role not deleted: {role_name} "
+                    f"— {role_detail}"
+                )
         gone, detail = _delete_managed_policy(iam_client, boundary_arn)
         if gone:
             suffix = f" ({detail})" if detail else ""
@@ -7042,6 +7179,132 @@ def cleanup_stale_idp_policies():
         )
 
 
+IDP_ROLE_STALE_AGE_SECONDS = 6 * 3600  # 6h, matching the policy gate
+
+#: Roles deleted per run by `cleanup_stale_idp_roles`. Bounded because the
+#: backlog this reaper was written against was 2,019 roles and clearing one costs
+#: ~6 IAM calls, so an unbounded first pass would spend ~12,000 mutating calls
+#: against a throttled API before the deploy it precedes had started. The sweep is
+#: convergent, not immediate: each run takes a bite and reports what remains, so
+#: the backlog drains over successive runs with no run paying for all of it.
+IDP_MAX_ROLE_REAPS = int(os.environ.get("IDP_MAX_ROLE_REAPS", "200"))
+
+
+def cleanup_stale_idp_roles():
+    """Reap `idp-MMDD-HHMMSS*` IAM roles whose run has no CloudFormation stack left.
+
+    These are not teardown failures. `nested/bedrockkb/template.yaml` declares
+    two roles `DeletionPolicy: Retain` so that deleting the stack does not
+    require the deployer's `iam:DeleteRole` (issue #315) — correct for a
+    customer, and it means CloudFormation leaves them behind by design on every
+    single run. Nothing in the account owns them afterwards, so no stack sweep
+    can see them, exactly as for the orphaned policies above.
+
+    Two quotas, and the second is why this is fatal rather than tidy:
+
+      * **RolesPerAccount (5,000).** 2,019 leaked `idp-` roles across 452 run
+        prefixes were standing when this was written, oldest 2026-04-20, growing
+        ~6/run. Role exhaustion fails EVERY deploy in the account, not just this
+        harness's.
+      * **PoliciesPerAccount.** A retained role NAMES its run's
+        `<stack>-PermissionsBoundary` as its boundary, and `DeletePolicy` refuses
+        while any role does, so each retained role also pins a managed policy
+        permanently. That is why 582 of those were standing with
+        `AttachmentCount: 0` and `cleanup_stale_idp_policies` reported
+        `Reaped 0/578`: it was selecting them correctly and IAM was refusing
+        every delete. Reaping roles here is what lets that sweep work at all,
+        so the two run in this order.
+
+    Safety — a role is deleted only if ALL of:
+      * its name carries a run prefix (idp-MMDD-HHMMSS), which is also the bound
+        on this role's own `iam:*` grant (`role/idp-*`),
+      * that run has NO surviving CloudFormation stack — so an in-flight run, and
+        a stack deliberately retained for inspection, are both untouchable, and
+      * its age is KNOWN and exceeds IDP_ROLE_STALE_AGE_SECONDS.
+
+    Every one of those fails CLOSED, the age one included, on the same reasoning
+    `cleanup_stale_idp_policies` sets out: an age that cannot be established is
+    not the same claim as being old enough to delete.
+
+    Never raises. A role that would not delete is named and left for the next
+    run; the ENUMERATIONS failing is a finding, because then nothing was
+    considered.
+    """
+    print("🧹 Cleaning up leaked idp- IAM roles (role quota leak guard)...")
+
+    try:
+        iam = boto3.client("iam", config=_THROTTLE_RETRY_CONFIG)
+        now = datetime.now(tz=timezone.utc)
+        protected = _live_idp_run_prefixes()
+
+        stale, skipped_protected, skipped_young = [], 0, 0
+        age_unestablishable = []
+        for page in iam.get_paginator("list_roles").paginate():
+            for role in page.get("Roles", []):
+                name = role.get("RoleName", "")
+                match = _IDP_RUN_PREFIX_RE.match(name)
+                if not match:
+                    continue
+                if match.group(1) in protected:
+                    skipped_protected += 1
+                    continue
+                age = _listing_age_seconds(role.get("CreateDate"), now)
+                if age is None:
+                    age_unestablishable.append(name)
+                    continue
+                if age < IDP_ROLE_STALE_AGE_SECONDS:
+                    skipped_young += 1
+                    continue
+                stale.append(name)
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "could not enumerate the account's IAM roles (or the live stacks "
+            "that protect them), so 0 of an unknown number of leaked idp- roles "
+            "were considered and none was deleted — each one is permanent, since "
+            f"no stack owns it, and each pins a managed policy too: {e}"
+        )
+
+    try:
+        if skipped_protected or skipped_young:
+            print(
+                f"  ({skipped_protected} protected by a live stack, "
+                f"{skipped_young} younger than the age gate — skipped)"
+            )
+        _report_age_unestablishable(
+            age_unestablishable,
+            "the age gate cannot be satisfied, and this path strips a role's "
+            "inline and attached policies before deleting it",
+        )
+        if not stale:
+            print("✅ No leaked idp- IAM roles to reap")
+            return []
+
+        batch = sorted(stale)[:IDP_MAX_ROLE_REAPS]
+        deleted = 0
+        for name in batch:
+            gone, detail = _delete_iam_role(iam, name)
+            if gone:
+                deleted += 1
+            else:
+                print(f"[{name}] ⚠️ role NOT deleted — {detail}")
+        remaining = len(stale) - deleted
+        print(f"✅ Reaped {deleted}/{len(batch)} leaked idp- IAM role(s)")
+        if remaining > 0:
+            # Named every run so the backlog's direction is visible in a job log.
+            # A figure that stops falling means this sweep has stopped working,
+            # which is otherwise indistinguishable from it having nothing to do.
+            print(
+                f"  ℹ️ {remaining} leaked role(s) still standing (capped at "
+                f"{IDP_MAX_ROLE_REAPS}/run) — the next run takes the next batch"
+            )
+        return []
+    except Exception as e:  # noqa: BLE001
+        return _sweep_finding(
+            "the leaked idp- IAM role sweep gave out part-way through the roles "
+            f"it selected, so an unknown number were never deleted: {e}"
+        )
+
+
 def validate_apigw_global_hosting(stack_name):
     """Assert the deployed stack serves the Web UI on a GLOBAL (REGIONAL) REST API.
 
@@ -8623,6 +8886,14 @@ def main():
     # protection: a policy is only reaped once its run has no stacks left, so
     # this converges the ones a retained failure deliberately left behind (and
     # the ones already orphaned by runs that predate the verification below).
+    # Roles BEFORE policies, and the order is load-bearing rather than tidy: a
+    # role retained by `DeletionPolicy: Retain` NAMES its run's boundary policy
+    # as its permissions boundary, and IAM refuses DeletePolicy while any role
+    # does — so the policy sweep below was selecting its targets correctly and
+    # reporting `Reaped 0/578`. Reaping the roles is what lets it delete
+    # anything, so a run that did them the other way round would reclaim the
+    # roles and still leak every policy until the NEXT run.
+    stale_role_findings = cleanup_stale_idp_roles()
     stale_policy_findings = cleanup_stale_idp_policies()
     # Evidence bundles from runs long since diagnosed. Not reaped by an S3
     # lifecycle rule because the bucket is not managed by this repository.
@@ -8635,6 +8906,7 @@ def main():
         "cleanup_stale_apigw_test_vpcs": apigw_vpc_sweep_findings,
         "cleanup_stale_idp_stacks": stale_stack_findings,
         "cleanup_stale_idp_buckets": stale_bucket_findings,
+        "cleanup_stale_idp_roles": stale_role_findings,
         "cleanup_stale_idp_policies": stale_policy_findings,
         "cleanup_stale_ci_diagnostics": diagnostics_sweep_findings,
     }
@@ -8910,6 +9182,12 @@ def main():
         stack_success = False
         reason = _report_sweep_not_completed(
             "cleanup_stale_idp_buckets", stale_bucket_findings
+        )
+        failure_reason = _first_failure_reason(failure_reason, reason)
+    if stale_role_findings:
+        stack_success = False
+        reason = _report_sweep_not_completed(
+            "cleanup_stale_idp_roles", stale_role_findings
         )
         failure_reason = _first_failure_reason(failure_reason, reason)
     if stale_policy_findings:
