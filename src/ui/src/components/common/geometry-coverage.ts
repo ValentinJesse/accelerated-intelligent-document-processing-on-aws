@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Why a field can or cannot be shown on the page, and how much of a section can.
+ * Whether a field has a bounding box, why not when it has none, and how many of
+ * a section do.
  *
  * A field is located by matching its extracted value to the document — under the
  * default `extraction.geometry.mode: ocr_only` by matching it to a line of OCR
@@ -18,7 +19,7 @@
 
 /** A field's relationship to the page, as the viewer can determine it. */
 export type FieldGeometryState =
-  /** Has a box: the locate control is offered. */
+  /** Has a box, so it can be highlighted on the page image. */
   | 'located'
   /** Nothing was extracted, so there is nothing to point at. */
   | 'no-value'
@@ -126,19 +127,26 @@ export const classifyFieldGeometry = (
   return hasFieldData ? 'unmatched' : 'no-data';
 };
 
-/** One sentence per state, for the row that carries no locate control. */
+/**
+ * One short line per state, for the row that carries no locate control.
+ *
+ * Kept to a phrase because it renders in a popover beside a field: the reader
+ * needs which of the four causes applies, not an explanation of geometry. None
+ * of them says anything about the value, which is displayed either way — what is
+ * missing in every case is its *position*.
+ */
 export const describeFieldGeometry = (state: FieldGeometryState): string => {
   switch (state) {
     case 'no-value':
-      return 'No value was extracted for this field, so there is nothing to locate on the page.';
+      return 'No value extracted, so no bounding box.';
     case 'unmatched':
-      return 'This value could not be matched to anything on the page, so it cannot be shown there. Check the extracted value against the document.';
+      return 'Value not found in the page text, so no bounding box.';
     case 'none-produced':
-      return 'No bounding boxes were produced for this document, so no field can be shown on the page. This is set by extraction.geometry.mode in the configuration.';
+      return 'No bounding boxes in this document (extraction.geometry.mode).';
     case 'no-data':
-      return 'No confidence or bounding-box data was recorded for this field, so there is nothing to locate it by. The assessment step covered some of this section’s fields and not this one.';
+      return 'No bounding box recorded — the assessment step skipped this field.';
     default:
-      return 'Show this field on the page.';
+      return 'Highlight this field on the page image.';
   }
 };
 
@@ -181,7 +189,7 @@ export interface GeometryCoverage {
 }
 
 /**
- * How much of a section can be shown on the page.
+ * How many of a section’s fields have a bounding box.
  *
  * ⚠️ **The denominator is the fields displayed, which means the value tree.**
  * Counting `explainability_info` leaves instead looks right — it is where the

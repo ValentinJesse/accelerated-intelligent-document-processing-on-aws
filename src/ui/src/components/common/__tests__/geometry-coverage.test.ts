@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Which fields can be shown on the page, and why the rest cannot.
+ * Which fields have a bounding box, and why the rest cannot.
  *
  * Requested as [#1327]: the viewer offered a locate control on some rows and
  * nothing on the others, with no statement of the rule and no count, so a reader
@@ -134,10 +134,10 @@ describe('classifyFieldGeometry when nothing was recorded for the field', () => 
 
 describe('describeFieldGeometry', () => {
   it('names the cause rather than restating the absence', () => {
-    expect(describeFieldGeometry('no-value')).toMatch(/No value was extracted/);
-    expect(describeFieldGeometry('unmatched')).toMatch(/could not be matched to anything on the page/);
-    expect(describeFieldGeometry('none-produced')).toMatch(/No bounding boxes were produced for this document/);
-    expect(describeFieldGeometry('no-data')).toMatch(/No confidence or bounding-box data was recorded/);
+    expect(describeFieldGeometry('no-value')).toMatch(/No value extracted, so no bounding box/);
+    expect(describeFieldGeometry('unmatched')).toMatch(/Value not found in the page text/);
+    expect(describeFieldGeometry('none-produced')).toMatch(/No bounding boxes in this document/);
+    expect(describeFieldGeometry('no-data')).toMatch(/No bounding box recorded/);
   });
 
   it('gives every state a sentence', () => {

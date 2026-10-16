@@ -134,7 +134,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
     const isCollapsed = collapsedPaths.has(pathKey);
 
     /**
-     * How many of this section's fields can be shown on the page.
+     * How many of this section's fields have a bounding box.
      *
      * Computed at every level and rendered only at the root, which is cheap (one
      * walk of `explainability_info`, no React work) and keeps the count out of
@@ -1375,7 +1375,7 @@ const FormFieldRenderer = memo<Record<string, any>>(
                   {groupEvalResult.reason && ` - ${groupEvalResult.reason}`}
                 </ExtBox>
               )}
-              {/* How much of this section can be shown on the page, at the root only.
+              {/* How much of this section has bounding boxes, at the root only.
                   Stated up front because the alternative is learning it by clicking:
                   the per-field controls answer for one field each, and a reader
                   wanting to know what to expect had to hover every row.
@@ -1387,8 +1387,8 @@ const FormFieldRenderer = memo<Record<string, any>>(
               {path.length === 0 && coverage.total > 0 && (
                 <ExtBox fontSize="body-s" color="text-body-secondary">
                   {!geometryAvailable
-                    ? 'No field can be shown on the page: this document carries no bounding boxes'
-                    : `${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} can be shown on the page`}
+                    ? 'No field has a bounding box in this document'
+                    : `${coverage.located} of ${coverage.total} field${coverage.total === 1 ? '' : 's'} have a bounding box`}
                   {/* "in this section" once a filter is on, because the count is of
                       the section and the rows are a subset of it. Without that the
                       caption reads as a statement about what is on screen, and

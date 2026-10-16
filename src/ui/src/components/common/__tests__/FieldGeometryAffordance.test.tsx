@@ -73,20 +73,20 @@ const renderSection = (overrides: Record<string, unknown> = {}) =>
     />,
   );
 
-const locateControls = () => screen.queryAllByRole('button', { name: /Show .* on the page/i });
-const reasonControls = () => screen.queryAllByRole('button', { name: /Why .* cannot be shown on the page/i });
+const locateControls = () => screen.queryAllByRole('button', { name: /Highlight .* on the page image/i });
+const reasonControls = () => screen.queryAllByRole('button', { name: /Why .* has no bounding box/i });
 
 describe('a section that can only partly be shown on the page', () => {
   it('offers a locate control for exactly the fields that have a box', () => {
     renderSection();
 
     expect(locateControls().map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Show FormId on the page',
-      'Show FormType on the page',
-      'Show SubmitterId on the page',
-      'Show SubmissionDate on the page',
-      'Show Department on the page',
-      'Show Comments on the page',
+      'Highlight FormId on the page image',
+      'Highlight FormType on the page image',
+      'Highlight SubmitterId on the page image',
+      'Highlight SubmissionDate on the page image',
+      'Highlight Department on the page image',
+      'Highlight Comments on the page image',
     ]);
   });
 
@@ -102,7 +102,7 @@ describe('a section that can only partly be shown on the page', () => {
 
     // The agreement is the point: both come from explainability_info, so there is
     // one source of truth rather than a caption and a renderer that can drift.
-    expect(screen.getByText(/^6 of 10 fields can be shown on the page$/)).toBeInTheDocument();
+    expect(screen.getByText(/^6 of 10 fields have a bounding box$/)).toBeInTheDocument();
     expect(locateControls()).toHaveLength(6);
   });
 
@@ -110,14 +110,14 @@ describe('a section that can only partly be shown on the page', () => {
     renderSection();
 
     // Clicked, not inspected. The label is identical in both states — "Why
-    // <field> cannot be shown on the page" — so an assertion on it cannot see
+    // <field> has no bounding box" — so an assertion on it cannot see
     // which reason is given, and cannot see a control that opens nothing at all.
     // The four fields here carry the pipeline's stringified None, and telling the
     // reader to go looking on the page would send them after a value that was
     // never extracted.
-    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName has no bounding box/i }));
 
-    expect(screen.getByText(/No value was extracted for this field/i)).toBeInTheDocument();
+    expect(screen.getByText(/No value extracted, so no bounding box/i)).toBeInTheDocument();
   });
 
   it('distinguishes a value that could not be found from one that was never extracted', async () => {
@@ -128,9 +128,9 @@ describe('a section that can only partly be shown on the page', () => {
       value: { ...INFERENCE_RESULT, SubmitterName: '24 AUG 11' },
     });
 
-    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName has no bounding box/i }));
 
-    expect(screen.getByText(/could not be matched to anything on the page/i)).toBeInTheDocument();
+    expect(screen.getByText(/Value not found in the page text/i)).toBeInTheDocument();
   });
 
   it('does not also locate the field when the explanation is opened', async () => {
@@ -141,9 +141,9 @@ describe('a section that can only partly be shown on the page', () => {
     const onFieldFocus = vi.fn();
     renderSection({ onFieldFocus });
 
-    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName cannot be shown on the page/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Why SubmitterName has no bounding box/i }));
 
-    expect(screen.getByText(/No value was extracted for this field/i)).toBeInTheDocument();
+    expect(screen.getByText(/No value extracted, so no bounding box/i)).toBeInTheDocument();
     expect(onFieldFocus).not.toHaveBeenCalled();
   });
 
@@ -154,7 +154,7 @@ describe('a section that can only partly be shown on the page', () => {
     // bounding boxes, which is the reading this caption exists to prevent.
     renderSection({ explainabilityInfo: null });
 
-    expect(screen.getByText(/0 of 10 fields can be shown on the page/)).toBeInTheDocument();
+    expect(screen.getByText(/0 of 10 fields have a bounding box/)).toBeInTheDocument();
   });
 
   it('omits the count when the section displays no fields at all', () => {
@@ -162,7 +162,7 @@ describe('a section that can only partly be shown on the page', () => {
     // has no rows to find anything about.
     renderSection({ value: {} });
 
-    expect(screen.queryByText(/can be shown on the page/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/have a bounding box/)).not.toBeInTheDocument();
   });
 
   it('does not caption a nested group, which would read as the whole section', () => {
@@ -170,6 +170,6 @@ describe('a section that can only partly be shown on the page', () => {
     // the section while sitting under a group heading.
     renderSection({ path: ['Payer'], displayPath: ['Payer'] });
 
-    expect(screen.queryByText(/can be shown on the page/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/have a bounding box/)).not.toBeInTheDocument();
   });
 });

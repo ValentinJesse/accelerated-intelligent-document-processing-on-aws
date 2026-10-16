@@ -59,7 +59,7 @@ describe('FormFieldRenderer accessibility', () => {
     const onFieldFocus = vi.fn();
     renderField({ onFieldFocus });
 
-    const locate = screen.getByRole('button', { name: /Show AccountNumber on the page/i });
+    const locate = screen.getByRole('button', { name: /Highlight AccountNumber on the page image/i });
     await userEvent.click(locate);
 
     expect(onFieldFocus).toHaveBeenCalledWith(GEOMETRY);
@@ -72,13 +72,13 @@ describe('FormFieldRenderer accessibility', () => {
     // field geometry available — bounding-box highlighting is disabled" and a
     // magnifier on every field regardless. A control that cannot do the thing it
     // depicts is worse than no control.
-    expect(screen.queryByRole('button', { name: /Show AccountNumber on the page/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Highlight AccountNumber on the page image/i })).not.toBeInTheDocument();
 
     // An empty slot is not the answer either: it is indistinguishable from a
     // viewer that does not do bounding boxes, which is what left a reader unable
     // to tell an unlocatable field from a broken feature ([#1327]). The slot
     // carries the reason instead.
-    expect(screen.getByRole('button', { name: /Why AccountNumber cannot be shown on the page/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Why AccountNumber has no bounding box/i })).toBeInTheDocument();
   });
 
   it('still selects the field on focus when there is no bounding box to show', async () => {
@@ -99,7 +99,7 @@ describe('FormFieldRenderer accessibility', () => {
     renderField({ isReadOnly: true });
 
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Show AccountNumber on the page/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Highlight AccountNumber on the page image/i })).toBeInTheDocument();
   });
 
   it('selects the field when the input takes focus, so keyboard users get what clicking gives', async () => {

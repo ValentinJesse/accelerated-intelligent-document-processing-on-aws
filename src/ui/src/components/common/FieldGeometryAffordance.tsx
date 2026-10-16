@@ -65,7 +65,7 @@ const FieldGeometryAffordance = ({
       <Button
         variant="inline-icon"
         iconName="search"
-        ariaLabel={`Show ${fieldKey} on the page`}
+        ariaLabel={`Highlight ${fieldKey} on the page image`}
         onClick={(e) => {
           // Stops the row's own click handler running a second locate.
           e.stopPropagation();
@@ -101,7 +101,7 @@ const FieldGeometryAffordance = ({
             field the model found nothing for is an ordinary outcome, and one whose
             value is not on the page may simply have been inferred from elsewhere in
             the document. */}
-        <Button variant="inline-icon" iconName="status-info" ariaLabel={`Why ${fieldKey} cannot be shown on the page`} />
+        <Button variant="inline-icon" iconName="status-info" ariaLabel={`Why ${fieldKey} has no bounding box`} />
       </Popover>
     </span>
   );

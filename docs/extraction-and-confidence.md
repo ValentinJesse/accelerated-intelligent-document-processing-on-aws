@@ -1632,12 +1632,13 @@ extraction:
 Wherever extracted fields are displayed — the document viewer, the human-review
 editor, Test Studio's ground-truth editor and the evaluation-correction table —
 each field carries one of two controls, so you can tell before clicking whether
-that field can be located:
+that field can be located on the page image. Neither is about the value, which is
+displayed either way — they are about whether its *position* is known:
 
 | control | meaning |
 |---|---|
-| 🔍 **Show _field_ on the page** | The field has a box. Activating it highlights the value on the page image. |
-| ⓘ **Why _field_ cannot be shown on the page** | No box. The explanation distinguishes the two causes, which have different remedies. |
+| 🔍 **Highlight _field_ on the page image** | The field has a bounding box. Activating it outlines the value on the page image. |
+| ⓘ **Why _field_ has no bounding box** | The explanation names which of the four causes applies, since they have different remedies. |
 
 The causes, which have different remedies:
 
@@ -1658,8 +1659,8 @@ The causes, which have different remedies:
   predating geometry. Stated once rather than per field, since the cause is
   identical on every row.
 
-A section also states its coverage up front — *"6 of 10 fields can be shown on the
-page"* — so the split is visible without hovering every row. The denominator is the
+A section also states its coverage up front — *"6 of 10 fields have a bounding
+box"* — so the split is visible without hovering every row. The denominator is the
 fields the section **displays**, which is not always the number the assessment
 recorded data for: a field with no entry still has a row, still carries a control,
 and still counts.
