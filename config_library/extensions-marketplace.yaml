@@ -125,12 +125,12 @@ features:
     # Seed/fallback only — the live value comes from latest.json at runtime.
     latestVersion: "0.1.0"
     # Published by the closed-source release tooling to the three
-    # `aws-ml-blog-<region>` buckets — us-west-2, us-east-1, eu-central-1 — under
-    # a separate `artifacts/genai-idp-mp/` prefix, so neither release process can
-    # overwrite the other's keys. This is a deliberately smaller set than the
-    # host's own publish list, which also covers ca-central-1 and a second bucket
-    # basename there; do not widen this by reading scripts/aws-release.sh, or you
-    # will advertise an extension artifact nobody published.
+    # `aws-ml-blog-<region>` buckets listed below — us-west-2, us-east-1,
+    # eu-central-1 — under a separate `artifacts/genai-idp-mp/` prefix, so neither
+    # release process can overwrite the other's keys. The marketplace publisher
+    # writes only these three; the host's own publish list (scripts/aws-release.sh)
+    # is larger and uses a second bucket basename in ca-central-1, so do not widen
+    # this set from that script or you will advertise an artifact nobody published.
     #
     # These objects are public-read by necessity, not by preference: the
     # registered Quick Launch template URL is fetched by AWS Seller Ops during
@@ -181,7 +181,8 @@ features:
     latestVersion: "0.1.1"
     # Same public buckets, regions and `artifacts/genai-idp-mp/` prefix as Auto
     # Optimizer, under this extension's own featureId. See the notes on the entry
-    # above for why the keys are version-free and why the objects are public-read.
+    # above for why the keys are version-free, why the objects are public-read, and
+    # why this three-region set is not widened from scripts/aws-release.sh.
     regions:
       us-west-2:
         sellerBucket: aws-ml-blog-us-west-2

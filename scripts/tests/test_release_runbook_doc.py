@@ -4,7 +4,7 @@
 """Keep ``docs/release-runbook.md`` honest about ``scripts/aws-release.sh``.
 
 The runbook documents the one irreversible step this project has: publishing
-artifacts to the four public ``aws-ml-blog-*`` buckets. It is read under pressure,
+artifacts to the four public release buckets. It is read under pressure,
 by someone who may be doing it for the first time, and it is trusted literally. A
 runbook that describes a release the script no longer performs is worse than none.
 

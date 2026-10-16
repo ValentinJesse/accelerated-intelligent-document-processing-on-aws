@@ -729,10 +729,12 @@ class TestParseTags:
 class TestTemplateUrlTable:
     """The regions with a published template, one entry each.
 
-    Every entry is checked rather than a representative one: the values differ
-    only by the region substring, which appears twice in each, so a duplicated
-    line is a perfectly valid URL that deploys the wrong region's artifact or
-    fails with a cross-region S3 error that names neither the CLI nor this table.
+    Every entry is checked rather than a representative one: the region appears
+    twice in each value — in the host and in the bucket — and the bucket basename
+    is not the same in every region, so a line copied from its neighbour is a
+    perfectly valid URL that deploys the wrong region's artifact, or names a
+    bucket that does not exist, or fails with a cross-region S3 error that names
+    neither the CLI nor this table.
     """
 
     def test_exactly_the_published_regions_are_listed(self):
