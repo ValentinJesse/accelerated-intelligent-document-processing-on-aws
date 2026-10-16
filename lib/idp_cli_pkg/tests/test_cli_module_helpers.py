@@ -50,7 +50,9 @@ with one of the three blocked, which records the behaviour without disturbing th
 import builtins
 import importlib.util
 import json
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -724,7 +726,7 @@ class TestParseTags:
 
 
 class TestTemplateUrlTable:
-    """The three regions with a published template, one entry each.
+    """The regions with a published template, one entry each.
 
     Every entry is checked rather than a representative one: the values differ
     only by the region substring, which appears twice in each, so a duplicated
@@ -732,8 +734,41 @@ class TestTemplateUrlTable:
     fails with a cross-region S3 error that names neither the CLI nor this table.
     """
 
-    def test_exactly_the_three_published_regions_are_listed(self):
-        assert set(TEMPLATE_URLS) == {"us-west-2", "us-east-1", "eu-central-1"}
+    def test_exactly_the_published_regions_are_listed(self):
+        assert set(TEMPLATE_URLS) == {
+            "us-west-2",
+            "us-east-1",
+            "eu-central-1",
+            "ca-central-1",
+        }
+
+    def test_the_table_matches_what_the_release_script_publishes(self):
+        """The dict and ``scripts/aws-release.sh`` are two halves of one claim.
+
+        Derived rather than pinned, because the failure is one-sided and silent
+        in both directions: a Region published but absent here is refused by the
+        ``--govcloud`` path while the README's Launch Stack button still offers
+        it, and a Region here but never published serves a 404 to ``idp-cli
+        deploy``. Pinning only the set above would let the two drift apart with
+        this file still green.
+        """
+        script = Path(__file__).resolve().parents[3] / "scripts" / "aws-release.sh"
+        if not script.is_file():  # pragma: no cover - packaged install
+            pytest.skip(f"{script} is not present in this checkout")
+
+        published = set(
+            re.findall(r"--region\s+(\S+)", script.read_text(encoding="utf-8"))
+        )
+        assert published, f"no --region arguments found in {script}"
+        assert published == set(TEMPLATE_URLS), (
+            "scripts/aws-release.sh and TEMPLATE_URLS disagree about which "
+            "Regions carry a published template.\n"
+            f"  published but not in TEMPLATE_URLS: {sorted(published - set(TEMPLATE_URLS))}\n"
+            f"  in TEMPLATE_URLS but not published: {sorted(set(TEMPLATE_URLS) - published)}\n"
+            "Add the Region to both, plus the Launch Stack tables in README.md "
+            "and docs/deployment.md and the Templates block in "
+            ".claude/skills/cut-release-changelog.md."
+        )
 
     @pytest.mark.parametrize("region", sorted(TEMPLATE_URLS))
     def test_each_url_names_its_own_region_in_both_places(self, region):

@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 # Release Runbook
 
 This is the operational procedure for publishing a release of the GenAI IDP Accelerator to
-its three public S3 regions. It covers what must be true before you start, the ordered
+its four public S3 regions. It covers what must be true before you start, the ordered
 steps, what success looks like at each step, the failure and recovery paths that actually
 exist, what is not automated, and how to verify the release afterwards.
 
@@ -35,7 +35,7 @@ verification therefore covers *what the code does*, not *what happens when it ru
 
 ## What a release physically is
 
-✅ `scripts/aws-release.sh` runs `idp-cli publish` three times, once per region, each with
+✅ `scripts/aws-release.sh` runs `idp-cli publish` four times, once per region, each with
 `--public`:
 
 ```sh
@@ -45,20 +45,34 @@ set -x
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region us-west-2 --public
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region us-east-1 --public
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region eu-central-1 --public
+idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region ca-central-1 --public
 ```
 
 ✅ The bucket for each region is `<bucket-basename>-<region>` — the region suffix is
 appended by the publisher, not written in the script
-(`lib/idp_sdk/idp_sdk/_core/publish.py`, `setup_environment`). So the three buckets are
-`aws-ml-blog-us-west-2`, `aws-ml-blog-us-east-1` and `aws-ml-blog-eu-central-1`, all under
-prefix `artifacts/genai-idp`.
+(`lib/idp_sdk/idp_sdk/_core/publish.py`, `setup_environment`). So the four buckets are
+`aws-ml-blog-us-west-2`, `aws-ml-blog-us-east-1`, `aws-ml-blog-eu-central-1` and
+`aws-ml-blog-ca-central-1`, all under prefix `artifacts/genai-idp`.
 
-⚠️ **Why those three regions** is not recorded anywhere in the repository. The same three
-are used for the extensions marketplace (`config_library/extensions-marketplace.yaml`) and
-for every historical `## Templates` block in `CHANGELOG.md`, so the set is at least
-consistent — but the rationale (customer demand, EU data-residency coverage, model
-availability) is not written down. Do not add or drop a region on the strength of this
-document.
+⚠️ **Why those regions** is recorded for one of the four and not for the other three. The
+rationale for `ca-central-1` is Canada-specific model routing and data residency, built out
+in #1373 and documented in `docs/canada-region-model-support.md`. For `us-west-2`,
+`us-east-1` and `eu-central-1` the rationale (customer demand, EU data-residency coverage,
+model availability) is not written down anywhere in the repository. Do not add or drop a
+region on the strength of this document.
+
+⚠️ **The publish set is asserted in two places and they must agree.**
+`scripts/aws-release.sh` is the script above; `TEMPLATE_URLS` in
+`lib/idp_cli_pkg/idp_cli/cli.py` is what `idp-cli deploy` serves. The failure is one-sided
+and silent in each direction — a region published but missing from the dict is refused by
+the `--govcloud` path while the Launch Stack buttons still offer it, and a region in the
+dict that was never published serves a 404. `TestTemplateUrlTable` in
+`lib/idp_cli_pkg/tests/test_cli_module_helpers.py` derives the script's region list and
+fails naming the mismatch, so adding a region means both files plus the Launch Stack tables
+in `README.md` and `docs/deployment.md` and the `## Templates` block in
+`.claude/skills/cut-release-changelog.md`. The extensions marketplace
+(`config_library/extensions-marketplace.yaml`) is a **separate** set and is not covered by
+that test — it still carries three regions.
 
 ### What lands in each bucket
 
@@ -67,7 +81,7 @@ read from `./VERSION` relative to the process working directory.
 
 | Key | Mutability | What reads it |
 |---|---|---|
-| `artifacts/genai-idp/idp-main.yaml` | **Overwritten every release** | the "Launch Stack" buttons in `README.md` and `docs/deployment.md`; a third set of Launch Stack buttons in `workshop/amazon-quick-integration-workshop.md`; **and `idp-cli` itself** — `lib/idp_cli_pkg/idp_cli/cli.py` hardcodes this key for all three regions in its `TEMPLATE_URLS` dict, used at three call sites on the `deploy` command's create and update paths, so `idp-cli deploy` serves whatever this key currently holds |
+| `artifacts/genai-idp/idp-main.yaml` | **Overwritten every release** | the "Launch Stack" buttons in `README.md` and `docs/deployment.md`; a third set of Launch Stack buttons in `workshop/amazon-quick-integration-workshop.md`; **and `idp-cli` itself** — `lib/idp_cli_pkg/idp_cli/cli.py` hardcodes this key for all four regions in its `TEMPLATE_URLS` dict, used at three call sites on the `deploy` command's create and update paths, so `idp-cli deploy` serves whatever this key currently holds |
 | `artifacts/genai-idp/idp-main_<VERSION>.yaml` | write-once per version | the `## Templates` block in `CHANGELOG.md`; every release-validation and benchmark record |
 | `artifacts/genai-idp/idp-main-latest.json` | **Overwritten every release** | the Web UI "update available" indicator, via the version-check resolver (`src/lambda/version_check_resolver/index.py`) |
 | `artifacts/genai-idp/<VERSION>/layers/idp-common-<name>-<hash>.zip` | content-addressed | the deployed stack's Lambda layers |
@@ -98,8 +112,8 @@ cannot collide (`config_library/extensions-marketplace.yaml`).
 
 A consequence worth internalising: **each region's artifacts are region-local and not
 interchangeable.** A stack created from the `us-east-1` template pulls code from
-`aws-ml-blog-us-east-1`. Publishing two of three regions does not give you a
-two-thirds-working release; it gives you one region of customers who cannot deploy.
+`aws-ml-blog-us-east-1`. Publishing three of four regions does not give you a
+three-quarters-working release; it gives you one region of customers who cannot deploy.
 
 ## 1. Preconditions
 
@@ -120,7 +134,7 @@ two-thirds-working release; it gives you one region of customers who cannot depl
   `##@ Version Management`). Never hand-edit `VERSION`.
 - 📄 `CHANGELOG.md` must have the `[Unreleased]` section already **pruned** to
   net-since-release content in three subsections (`.claude/skills/prepare-changelog.md`),
-  and then **cut** to `## [<VERSION>]` with the three-region `## Templates` block appended
+  and then **cut** to `## [<VERSION>]` with the four-region `## Templates` block appended
   (`.claude/skills/cut-release-changelog.md`). Those URLs are written *before* the publish
   and 404 until it lands — that is expected and is stated in the skill.
 - The working tree must be clean and at the commit you intend to tag. ✅ The publish reads
@@ -201,7 +215,11 @@ tribal knowledge that this document cannot supply.
 ✅ **Object ACLs are load-bearing: these buckets do *not* carry a prefix-wide anonymous-read
 bucket policy over `artifacts/genai-idp/`.** Earlier revisions of this runbook marked that
 question undetermined, and several statements here turned on the answer. It was settled by
-measurement on 2026-09-18 — a credential-free `GetObject` against all three release regions:
+measurement on 2026-09-18 — a credential-free `GetObject` against every release region as
+the set then stood. `ca-central-1` was added afterwards and is **not** covered by these
+readings; re-run the same probe against it on its first release rather than assuming the
+result carries over, since the conclusion below turns on an ACL the publisher sets per
+object:
 
 | Key | us-east-1 | us-west-2 | eu-central-1 |
 |---|---|---|---|
@@ -265,15 +283,15 @@ the authority — read it rather than trusting the count here, and
 
 📄 Follow `.claude/skills/prepare-changelog.md` then
 `.claude/skills/cut-release-changelog.md`. The result: `## [Unreleased]` becomes
-`## [<x.y.z>]` (no date), followed by a `## Templates` block with the three region URLs.
+`## [<x.y.z>]` (no date), followed by a `## Templates` block with the four region URLs.
 
 ```bash
 grep -n "^## \[" CHANGELOG.md | head -5              # exactly one section for the new version
-grep -n "idp-main_$(cat VERSION).yaml" CHANGELOG.md  # three hits, one per region
+grep -n "idp-main_$(cat VERSION).yaml" CHANGELOG.md  # four hits, one per region
 grep -nE " +$" CHANGELOG.md                          # no trailing whitespace
 ```
 
-**Success:** three URLs, all carrying the new version, all with the region appearing twice
+**Success:** four URLs, all carrying the new version, all with the region appearing twice
 in each URL (host *and* bucket name). The URLs 404 at this point — expected.
 
 ### Step 3 — Publish the artifacts
@@ -416,7 +434,7 @@ code:
 checksum cache is known to miss data-only edits, leaving the deployed stack on the old
 default (`.claude/skills/live-eval-and-cost.md`, and the same warning appears in the
 project's memory of a real occurrence). `scripts/aws-release.sh` does not pass
-`--clean-build`; add it by hand for that case, or run the three `idp-cli publish` commands
+`--clean-build`; add it by hand for that case, or run the four `idp-cli publish` commands
 individually with the flag.
 
 **The window you should care about.** ✅ `idp-main.yaml` (the floating key the README Launch
@@ -463,7 +481,7 @@ cat VERSION                       # must read <PREV>
 bash scripts/aws-release.sh
 ```
 
-✅ That rewrites `idp-main.yaml` and `idp-main-latest.json` in all three regions to point at
+✅ That rewrites `idp-main.yaml` and `idp-main-latest.json` in all four regions to point at
 `<PREV>`, while `<PREV>`'s versioned artifacts under `artifacts/genai-idp/<PREV>/` are
 already there (so it is mostly a template re-upload plus per-region rebuild time). Then
 publish a patch release with the fix.
@@ -615,11 +633,11 @@ Done by hand, in order:
 ## 5. Post-release verification checklist
 
 All of these are unauthenticated HTTP requests, which is the point: if they succeed without
-credentials, the objects are genuinely public. Run them for **all three regions**.
+credentials, the objects are genuinely public. Run them for **all four regions**.
 
 ```bash
 V=$(cat VERSION)
-for R in us-west-2 us-east-1 eu-central-1; do
+for R in us-west-2 us-east-1 eu-central-1 ca-central-1; do
   B="https://s3.$R.amazonaws.com/aws-ml-blog-$R/artifacts/genai-idp"
   echo "== $R"
   curl -sI  "$B/idp-main_$V.yaml"     -o /dev/null -w '  versioned  %{http_code}\n'
@@ -629,10 +647,10 @@ for R in us-west-2 us-east-1 eu-central-1; do
 done
 ```
 
-- [ ] Versioned template returns **200** in all three regions.
-- [ ] Floating `idp-main.yaml` returns **200** in all three regions.
+- [ ] Versioned template returns **200** in all four regions.
+- [ ] Floating `idp-main.yaml` returns **200** in all four regions.
 - [ ] `idp-main-latest.json` reads `{"version": "<VERSION>", "templateUrl": …}` with the
-      **region-local** bucket in `templateUrl`, in all three regions. ✅ A failure to *write*
+      **region-local** bucket in `templateUrl`, in all four regions. ✅ A failure to *write*
       this pointer is non-fatal to the publish — it prints a yellow warning and continues —
       so its content is still a check the publish will not make for you. Its anonymous
       *readability* is now checked: `verify_public_readability` fails a `--public` publish if
@@ -642,7 +660,7 @@ done
       a credential in scope can read a private object and mask exactly the defect #962 was.
 - [ ] The `Description:` line of the versioned template ends `(v<VERSION>)`. 📄 The
       release-validation skill makes the same check its preflight step 4.
-- [ ] The three `## Templates` URLs in `CHANGELOG.md` resolve:
+- [ ] The four `## Templates` URLs in `CHANGELOG.md` resolve:
       ```bash
       grep -oE "https://s3[^\`]*idp-main_$(cat VERSION)\.yaml" CHANGELOG.md \
         | xargs -n1 -I{} curl -sI {} -o /dev/null -w '%{http_code} {}\n'
@@ -653,7 +671,7 @@ done
       and afterwards holds only the last region:
       ```bash
       V=$(cat VERSION)
-      for R in us-west-2 us-east-1 eu-central-1; do
+      for R in us-west-2 us-east-1 eu-central-1 ca-central-1; do
         B="https://s3.$R.amazonaws.com/aws-ml-blog-$R/artifacts/genai-idp"
         Z=$(curl -s "$B/idp-main_$V.yaml" | grep -om1 'idp-common-base-[0-9a-f]*\.zip')
         curl -sI "$B/$V/layers/$Z" -o /dev/null -w "  $R  %{http_code}  $Z\n"
@@ -689,7 +707,13 @@ Collected so they are not buried:
    recoverable by any means other than re-publishing. One part of this is now **closed**:
    whether a prefix-wide anonymous-read bucket policy exists. It does not; object ACLs are
    load-bearing, measured 2026-09-18 (see §1).
-3. ⚠️ **Why these three regions**, and what it would take to add a fourth.
+3. ⚠️ **Why the three original regions** (`us-west-2`, `us-east-1`, `eu-central-1`). Adding
+   `ca-central-1` established what the *mechanics* of a new region cost — the publish
+   script, `TEMPLATE_URLS`, two Launch Stack tables, the workshop's third table and the
+   `## Templates` block, with `TestTemplateUrlTable` holding the first two together — but
+   the selection criterion for the original three is still unwritten, and the bucket in a
+   new region has to exist with the right Object Ownership and Public Access Block before
+   the first publish can succeed.
 4. ⚠️ **How the GitHub Release is created.** The outcome is observable; the command is not.
 5. ⚠️ **Whether the tag goes to both remotes**, and whether the GitLab tag is used for
    anything.

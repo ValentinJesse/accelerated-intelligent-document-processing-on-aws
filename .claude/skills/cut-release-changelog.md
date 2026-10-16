@@ -65,19 +65,24 @@ bullet) and before the next `## [x.y.z]` heading, add:
    - us-west-2: `https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp-main_0.6.4.yaml`
    - us-east-1: `https://s3.us-east-1.amazonaws.com/aws-ml-blog-us-east-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
    - eu-central-1: `https://s3.eu-central-1.amazonaws.com/aws-ml-blog-eu-central-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
+   - ca-central-1: `https://s3.ca-central-1.amazonaws.com/aws-ml-blog-ca-central-1/artifacts/genai-idp/idp-main_0.6.4.yaml`
 ```
 
 Conventions to match exactly — copy the previous release's block and change the
-three version numbers rather than retyping it:
+four version numbers rather than retyping it:
 
 - `## Templates` is an `h2`, deliberately **not** nested under the release
   heading; that is the existing file's shape.
 - Each URL line is indented **three spaces** before the `-`.
-- Three regions only, in this order: `us-west-2`, `us-east-1`, `eu-central-1`.
-  The bucket name embeds the region (`aws-ml-blog-<region>`) *and* the host does
-  too — a copy-paste that updates one but not the other is the classic error
-  here.
-- **No trailing whitespace** on any line — the `eu-central-1` line ends at the
+- Four regions only, in this order: `us-west-2`, `us-east-1`, `eu-central-1`,
+  `ca-central-1`. The bucket name embeds the region (`aws-ml-blog-<region>`)
+  *and* the host does too — a copy-paste that updates one but not the other is
+  the classic error here.
+  ⚠️ **Releases up to and including 0.6.11 carry three regions**, because
+  `ca-central-1` was added afterwards (`scripts/aws-release.sh` publishes it from
+  0.6.12 on). Do not back-fill the older blocks: a URL for an artifact that was
+  never published to that bucket is worse than its absence.
+- **No trailing whitespace** on any line — the `ca-central-1` line ends at the
   closing backtick — then exactly one blank line before the next `## [x.y.z]`.
   No block in the file carries trailing spaces; don't add them.
 - The filename is `idp-main_<version>.yaml` — the version-pinned artifact, not
@@ -88,7 +93,7 @@ three version numbers rather than retyping it:
 ```bash
 # Exactly one section for the new version, no Unreleased left behind
 grep -n "^## \[" CHANGELOG.md | head -5
-# All three URLs carry the new version, and no stale one slipped in
+# All four URLs carry the new version, and no stale one slipped in
 grep -n "idp-main_$(cat VERSION).yaml" CHANGELOG.md
 # No trailing whitespace crept into the new block
 grep -nE " +$" CHANGELOG.md
