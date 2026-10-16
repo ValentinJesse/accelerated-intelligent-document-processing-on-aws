@@ -41,6 +41,17 @@ const logger = new ConsoleLogger('VisualEditorModal');
 type ExtendedBoxProps = BoxProps & React.HTMLAttributes<HTMLDivElement>;
 const ExtBox = Box as React.ComponentType<ExtendedBoxProps>;
 
+/**
+ * Vertical space the field pane's own chrome takes above its scrolling content:
+ * the Cloudscape Container header, which carries Expand All, Collapse All and the
+ * filter select, plus the content padding.
+ *
+ * Subtracted from the row height so the scroll box cannot extend past the bottom
+ * of a row that clips it. Deliberately one named figure rather than two tuned
+ * ones, so the two heights below cannot drift apart.
+ */
+const FIELD_PANE_CHROME_PX = 120;
+
 
 
 interface VisualEditorModalProps {
@@ -1090,8 +1101,23 @@ const VisualEditorModal = ({
                         overflowX: 'hidden',
                         padding: '16px',
                         boxSizing: 'border-box',
-                        maxHeight: '550px',
-                        minHeight: '350px',
+                        /* Derived from the row's own height, not a fixed figure.
+                           The row above is `height: calc(100vh - 300px)` capped at
+                           700px and clipped with `overflow: hidden`, and the
+                           Cloudscape Container between it and this box is not a
+                           flex container — so `flex: 1` resolves against nothing
+                           and the effective height was the hard 550px below. On any
+                           viewport where the Container's header plus 550px exceeds
+                           the row, the bottom of this box sat inside the clipped
+                           region: it scrolled to its own end with the last rows
+                           never becoming visible, which reads as a field list that
+                           simply stops — and on a document whose last rows are
+                           nested list items, as a missing control.
+                           Subtracting the header and padding from the same
+                           expressions the row uses keeps this box inside the
+                           visible area at every viewport height. */
+                        maxHeight: `min(calc(100vh - ${300 + FIELD_PANE_CHROME_PX}px), ${700 - FIELD_PANE_CHROME_PX}px)`,
+                        minHeight: `${450 - FIELD_PANE_CHROME_PX}px`,
                       }}
                     >
                       <ExtBox style={{ minHeight: 'fit-content' }}>
