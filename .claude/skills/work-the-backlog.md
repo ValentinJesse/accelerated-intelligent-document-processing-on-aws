@@ -556,7 +556,8 @@ So two questions go into ranking, and both are cheap:
 
 This is not an argument against gate work — three of the highest-value items in that same
 run were gates, because each one shielded a live finding (a suppression that pre-approved
-future findings; a ratchet that read one tree of nine and passed; a gate whose green run
+future findings; a ratchet that compared a single tree against a registry holding many
+and passed; a gate whose green run
 could not see the call site it was written for). The distinction is **present finding
 versus prospective reach**, not product code versus infrastructure.
 
@@ -1729,7 +1730,8 @@ permanent, and in the state file, which is resumable.
   gates discover their inputs **by content**, not by filename, and an untracked file
   is still a file: `scripts/discover_templates.sh` finds anything declaring
   `AWSTemplateFormatVersion`, so a byte-identical copy of `template.yaml` kept under
-  the worktree as a restore-point took template discovery from 31 to **32** and
+  the worktree as a restore-point added **one** to the count of templates discovery
+  finds — content discovery cannot tell a restore-point copy from a template — and
   produced **seven red tests in suites the PR never touched** — three
   well-architected counting tests, two log-group tests, the markdown-link gate and
   the exemption-registry discovery test. Being untracked does not help, because
