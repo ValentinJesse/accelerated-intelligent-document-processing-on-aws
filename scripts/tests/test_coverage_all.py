@@ -11,8 +11,9 @@ at all*, the ones that decide whether a failed run is distinguishable from a cle
 the one that decides whether a report describes the subprocesses the suite started.
 
 Most of these tests run no pytest: `subprocess.run` is replaced, and what is asserted is
-the command line that would have been issued. Running the nine real suites here would take
-minutes and would assert nothing about the command construction that is the point. The
+the command line that would have been issued. Running the real suite of every tree in
+the registry here would take minutes and would assert nothing about the command
+construction that is the point. The
 exception is the subprocess-instrumentation class at the end, which runs a real pytest over
 a purpose-built probe package, because the property there is what a child process inherits
 and no command line shows it.
@@ -27,7 +28,8 @@ success would let a partial report be recorded as a measurement.
 **A tree whose tests failed is named.** Its report still exists and still parses, and its
 numbers will be uniformly and inexplicably low, because the tests that would have covered
 those lines never ran. That has been mistaken for a real regression before, so the run says
-which trees to distrust rather than printing nine figures that all look equally solid.
+which trees to distrust rather than printing per-tree figures that all look equally
+solid.
 """
 
 from __future__ import annotations

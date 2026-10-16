@@ -107,12 +107,13 @@ checkout and neither restores `test-reports/` from a cache or an artifact — bu
 tree keeps whatever the last run wrote. A blanket age limit is the wrong fix: after
 `make coverage-all`, one tree failing its suite makes `--write` refuse everything, and the
 correct recovery is to re-run that one tree and record again, which depends on the other
-eight reports still being accepted an hour later. Freshness therefore has to be something
+trees' reports still being accepted an hour later. Freshness therefore has to be something
 a caller asks for, not a deadline the gate imposes.
 
-Partial measurement is still a pass: one tree measured and eight unmeasured exits 0 and
-names the eight, which is the ordinary local case (`make test-cicd -C lib/idp_common_pkg`
-measures `idp_common` alone) and the CI case as well.
+Partial measurement is still a pass: one tree measured and the rest unmeasured exits 0
+and names the unmeasured ones, which is the ordinary local case
+(`make test-cicd -C lib/idp_common_pkg` measures `idp_common` alone) and the CI case as
+well.
 
 ## What it is not
 
