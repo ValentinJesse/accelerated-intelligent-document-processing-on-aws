@@ -299,28 +299,22 @@ const FieldComparisonTable = ({
       };
     });
 
+    // Whether this evaluation carries any box at all, taken BEFORE the filter.
+    // The filtered set is the wrong basis: with mismatches-only on and no
+    // mismatched field happening to be located, a flag over the visible rows
+    // would claim the document has no bounding boxes and blame
+    // `extraction.geometry.mode` — false, and unfalsifiable from the screen.
+    const anyLocated = items.some((item) => item.geometry);
+
     // Filter to mismatches only if requested
     if (showMismatchesOnly) {
       items = items.filter((item) => !item.isMatch);
     }
 
-    return items;
+    return { rows: items, anyLocated };
   }, [expectedData, predictedData, explainabilityInfo, corrections, showMismatchesOnly]);
 
-  /**
-   * Whether this evaluation carries any boxes at all.
-   *
-   * Decided across the table rather than per row, because with none anywhere the
-   * cause is the configuration (`extraction.geometry.mode`) and the same on every
-   * row — so a per-field explanation would tell the reader to check each value
-   * against the page for something no amount of checking would reveal.
-   *
-   * `showMismatchesOnly` filters `comparisonData`, so this reads the rows in hand;
-   * a filter that hid every located field would make the table say boxes were
-   * never produced. That is the narrow cost of not having the unfiltered set here,
-   * and it is bounded: the rows on screen are the rows being explained.
-   */
-  const anyFieldLocatable = comparisonData.some((item) => item.geometry);
+  const { rows: comparisonRows, anyLocated: anyFieldLocatable } = comparisonData;
 
   // Start editing a field
   const handleStartEdit = (pathString: string, source: string, currentValue: unknown) => {
@@ -511,6 +505,11 @@ const FieldComparisonTable = ({
           value={item.predictedValue}
           geometry={item.geometry}
           geometryAvailable={anyFieldLocatable}
+          /* Same signal the field renderer passes: no confidence means no
+             assessment entry for this field, which is a different cause from a
+             box that was looked for and not found. Omitting it defaulted every
+             such row to "unmatched". */
+          hasFieldData={item.confidence !== undefined && item.confidence !== null}
           onLocate={() => handleRowClick(item)}
         />
       ),
@@ -518,8 +517,8 @@ const FieldComparisonTable = ({
     },
   ];
 
-  const mismatchCount = comparisonData.filter((item) => !item.isMatch).length;
-  const totalCount = comparisonData.length;
+  const mismatchCount = comparisonRows.filter((item) => !item.isMatch).length;
+  const totalCount = comparisonRows.length;
 
   return (
     <Box>
@@ -538,7 +537,7 @@ const FieldComparisonTable = ({
 
         <Table
           columnDefinitions={columnDefinitions}
-          items={comparisonData}
+          items={comparisonRows}
           sortingDisabled
           wrapLines
           stripedRows

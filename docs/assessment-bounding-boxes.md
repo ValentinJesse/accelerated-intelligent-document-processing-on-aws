@@ -12,8 +12,10 @@ under `extraction.geometry.*`. What moved:
 
 - **The four geometry modes** — `ocr_only` (default), `llm_grounded`, `llm`
   (discouraged), and `off`.
-- **What the viewers show** — which fields can be located on the page, and the two
-  reasons a field cannot be.
+- **What the viewers show** — which fields have a bounding box, and which of the
+  four reasons applies when one does not. See
+  [What the viewers show](extraction-and-confidence.md#what-the-viewers-show),
+  which enumerates them.
 - **OCR grounding via `pageData.json`** — matching extracted values to real OCR lines, format-aware matching, repeated-value disambiguation, and `geometry_source` / `ocr_confidence` provenance.
 - **LLM-estimated boxes** — coordinate conversion (0–1000 → 0–1) and the UI-compatible `geometry` output format.
 
