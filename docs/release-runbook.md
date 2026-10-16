@@ -81,14 +81,22 @@ fails naming the mismatch, so adding a region means both files plus **three** La
 tables — `README.md`, `docs/deployment.md` and
 `workshop/amazon-quick-integration-workshop.md`, the third being the one easiest to miss —
 the `## Templates` block in `.claude/skills/cut-release-changelog.md`, the upgrade-test
-region list in `.claude/skills/test-upgrade.md`, `IDP_REGIONS` in
-`lib/idp_sdk/idp_sdk/_core/cleanup_orphaned.py` (the default scan for
-`remove-deleted-stack-resources`, so a region absent there leaks the orphaned resources of
-every deleted stack in it), and any per-region page such as
+region list in `.claude/skills/test-upgrade.md`, the **two** "update an existing stack"
+template URL lists (`README.md` and `docs/deployment.md`, which are separate from those
+pages' Launch Stack tables), the runbook descriptions in `docs/README.md` and
+`docs/release-validation/README.md`, `IDP_REGIONS` in
+`lib/idp_sdk/idp_sdk/_core/cleanup_orphaned.py`, and any per-region page such as
 `docs/canada-region-model-support.md`. ✅ The two source files **and all three Launch Stack
 tables** are held together by that test, so omitting a table fails a gate rather than
-shipping quietly. What nothing checks is the rest of the list — the two skills,
-`IDP_REGIONS` and the per-region pages. The extensions marketplace
+shipping quietly. What nothing checks is the rest of the list.
+
+⚠️ **`IDP_REGIONS` is the SDK default only.** `discover_idp_stacks` falls back to it when
+its caller names no regions, but `idp-cli remove-deleted-stack-resources` declares its own
+`--check-stack-regions` default of three regions and always passes it, so adding a region
+to `IDP_REGIONS` does **not** widen what the CLI sweeps. A deleted Canada stack's orphaned
+resources are skipped unless `ca-central-1` is named explicitly. Aligning the two would
+widen a deletion command's default blast radius from three regions to seven, which is a
+decision rather than a tidy-up. The extensions marketplace
 (`config_library/extensions-marketplace.yaml`) is a **separate** set and is not covered by
 that test — it still carries three regions.
 

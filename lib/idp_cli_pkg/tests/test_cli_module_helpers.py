@@ -34,8 +34,9 @@ by everything below it, so each of them is wrong for every command at once:
     non-federated stack, or when the caller chose a value.
 
 ``_parse_tags`` and ``TEMPLATE_URLS``
-    A parser whose input comes straight from a shell argument, and a three-entry
-    table where a copy-paste slip is invisible unless every entry is checked.
+    A parser whose input comes straight from a shell argument, and a table of
+    published-release template URLs where a copy-paste slip is invisible unless
+    every entry is checked against the publish script.
 
 The one test that is not about a helper is the tier-1 import guard at the top of
 the module. ``click``, ``boto3`` and ``rich`` are used by the decorators at module

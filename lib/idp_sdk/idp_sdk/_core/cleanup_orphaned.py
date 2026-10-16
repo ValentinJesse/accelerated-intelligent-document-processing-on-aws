@@ -28,10 +28,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 logger = logging.getLogger(__name__)
 console = Console()
 
-# Regions to check for IDP stacks. A superset of the Regions releases are
-# published to (`scripts/aws-release.sh`), because a customer can deploy from
-# source anywhere — but every published Region belongs here, or the orphaned
-# resources of a deleted stack in it are skipped by default and leak.
+# Regions to check for IDP stacks when the caller names none. A superset of the
+# Regions releases are published to (`scripts/aws-release.sh`), because a customer
+# can deploy from source anywhere — but every published Region belongs here, or
+# the orphaned resources of a deleted stack in it are skipped and leak.
+#
+# ⚠️ This is the *SDK* default, reached only when `regions is None`. The
+# `idp-cli remove-deleted-stack-resources` option carries its own, narrower
+# default (three Regions) and always passes it, so adding a Region here does not
+# change what the CLI scans.
 IDP_REGIONS = [
     "us-east-1",
     "us-west-2",
