@@ -248,6 +248,15 @@ describe('summariseGeometryCoverage', () => {
     });
   });
 
+  it('counts the entry the renderer draws, not any entry that happens to be valid', () => {
+    // The renderer takes `geometry[0]` and the overlay draws that. Counting with
+    // `some()` would mark this field located while its row offers no control,
+    // which is the caption and the rows disagreeing — the state this count
+    // exists to prevent.
+    const firstUnusable = [{ Field: { confidence: 0.9, geometry: [{ page: 1 }, { boundingBox: { left: 0 }, page: 1 }] } }];
+    expect(summariseGeometryCoverage({ Field: 'v' }, firstUnusable)).toEqual({ located: 0, total: 1 });
+  });
+
   it('reports the fields with none located rather than nothing at all', () => {
     // total 0 means "no fields displayed", which the caller uses to omit the
     // line entirely. A section with fields but no geometry is a different

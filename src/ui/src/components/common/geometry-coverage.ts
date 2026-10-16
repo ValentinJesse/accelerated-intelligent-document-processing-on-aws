@@ -98,9 +98,17 @@ export const isDrawableGeometry = (entry: unknown): boolean => {
   return Boolean(record.boundingBox) && record.page !== undefined;
 };
 
-/** Whether a field's whole `geometry` value holds at least one drawable box. */
-export const hasDrawableGeometry = (geometry: unknown): boolean =>
-  Array.isArray(geometry) ? geometry.some(isDrawableGeometry) : isDrawableGeometry(geometry);
+/**
+ * Whether a field's `geometry` value yields a box this viewer will draw.
+ *
+ * ⚠️ The **first** entry only, because that is the one the renderer takes
+ * (`fieldInfo.geometry[0]`) and the overlay draws. `some()` reads as the more
+ * generous and therefore safer choice and is the wrong one here: a field whose
+ * first entry lacks a `boundingBox` while a later entry has one would be counted
+ * in the caption and offered no control on its row — the caption and the rows
+ * disagreeing, which is the one thing this count exists to avoid.
+ */
+export const hasDrawableGeometry = (geometry: unknown): boolean => isDrawableGeometry(Array.isArray(geometry) ? geometry[0] : geometry);
 
 /**
  * What the viewer can say about one field.
