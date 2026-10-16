@@ -788,17 +788,31 @@ class TestTemplateUrlTable:
             pytest.skip(f"{path} is not present in this checkout")
 
         text = path.read_text(encoding="utf-8")
+        buckets = self._published_buckets()
+        # Each Region's own bucket, not any path-style S3 URL: an illustrative
+        # Launch Stack link pointing at a customer's own bucket is not a claim
+        # about the published set and must not fail this. Keyed on the bucket
+        # rather than built from the Region, because the basename differs by
+        # Region.
         offered = {
+            region
+            for region, bucket in buckets.items()
+            if f"templateURL=https://s3.{region}.amazonaws.com/{bucket}/" in text
+        }
+        wrong_bucket = {
             region
             for region in re.findall(
                 r"templateURL=https://s3\.([a-z0-9-]+)\.amazonaws\.com/", text
             )
-        }
-        published = self._published_regions()
-        assert offered == published, (
+            if region in buckets
+        } - offered
+        published = set(buckets)
+        assert offered == published and not wrong_bucket, (
             f"{page}'s Launch Stack table and scripts/aws-release.sh disagree.\n"
             f"  published with no button: {sorted(published - offered)}\n"
-            f"  button with no published artifact: {sorted(offered - published)}"
+            f"  button with no published artifact: {sorted(offered - published)}\n"
+            "  button pointing at a bucket the script does not publish to: "
+            f"{sorted(wrong_bucket)}"
         )
 
     @staticmethod
@@ -807,26 +821,55 @@ class TestTemplateUrlTable:
 
     @classmethod
     def _published_regions(cls) -> set[str]:
+        return set(cls._published_buckets())
+
+    @classmethod
+    def _published_buckets(cls) -> dict[str, str]:
+        """Region -> bucket name, read off each publish line in the script.
+
+        The basename is **per line**, not global: three Regions publish to
+        ``aws-ml-blog`` and ``ca-central-1`` to ``aws-bigdata-blog-replica``, so
+        anything deriving a bucket from the Region alone is wrong for Canada.
+        Comments are stripped first, the way
+        ``scripts/tests/test_release_runbook_doc.py`` reads the same script: a
+        commented-out publish line is not a published Region.
+        """
         script = cls._repo_root() / "scripts" / "aws-release.sh"
         if not script.is_file():  # pragma: no cover - packaged install
             pytest.skip(f"{script} is not present in this checkout")
 
-        published = set(
-            re.findall(r"--region\s+(\S+)", script.read_text(encoding="utf-8"))
+        buckets: dict[str, str] = {}
+        for line in script.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            region = re.search(r"--region\s+(\S+)", line)
+            basename = re.search(r"--bucket-basename\s+(\S+)", line)
+            if region and basename:
+                buckets[region.group(1)] = f"{basename.group(1)}-{region.group(1)}"
+
+        assert buckets, (
+            f"no publish lines with --region and --bucket-basename in {script}"
         )
-        assert published, f"no --region arguments found in {script}"
-        return published
+        return buckets
 
     @pytest.mark.parametrize("region", sorted(TEMPLATE_URLS))
-    def test_each_url_names_its_own_region_in_both_places(self, region):
-        url = TEMPLATE_URLS[region]
-        assert url == (
-            f"https://s3.{region}.amazonaws.com/aws-ml-blog-{region}"
+    def test_each_url_names_its_own_region_and_its_own_bucket(self, region):
+        """The host and the bucket both have to be this Region's.
+
+        The bucket is taken from the publish script rather than built from the
+        Region, because the basename is per Region: ``aws-ml-blog`` for three
+        and ``aws-bigdata-blog-replica`` for ``ca-central-1``. Building it here
+        would re-make the mistake this asserts against.
+        """
+        bucket = self._published_buckets().get(region)
+        assert bucket, f"{region} is in TEMPLATE_URLS but not published"
+        assert TEMPLATE_URLS[region] == (
+            f"https://s3.{region}.amazonaws.com/{bucket}"
             "/artifacts/genai-idp/idp-main.yaml"
         )
         for other in TEMPLATE_URLS:
             if other != region:
-                assert other not in url
+                assert other not in TEMPLATE_URLS[region]
 
     def test_the_urls_are_distinct(self):
         assert len(set(TEMPLATE_URLS.values())) == len(TEMPLATE_URLS)

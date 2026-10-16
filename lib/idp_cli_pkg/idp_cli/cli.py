@@ -382,7 +382,8 @@ TEMPLATE_URLS = {
     "us-west-2": "https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp-main.yaml",
     "us-east-1": "https://s3.us-east-1.amazonaws.com/aws-ml-blog-us-east-1/artifacts/genai-idp/idp-main.yaml",
     "eu-central-1": "https://s3.eu-central-1.amazonaws.com/aws-ml-blog-eu-central-1/artifacts/genai-idp/idp-main.yaml",
-    "ca-central-1": "https://s3.ca-central-1.amazonaws.com/aws-ml-blog-ca-central-1/artifacts/genai-idp/idp-main.yaml",
+    # Canada publishes to a different bucket basename; see scripts/aws-release.sh.
+    "ca-central-1": "https://s3.ca-central-1.amazonaws.com/aws-bigdata-blog-replica-ca-central-1/artifacts/genai-idp/idp-main.yaml",
 }
 
 

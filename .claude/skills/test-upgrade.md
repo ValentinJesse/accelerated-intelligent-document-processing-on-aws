@@ -58,8 +58,10 @@ https://s3.us-west-2.amazonaws.com/aws-ml-blog-us-west-2/artifacts/genai-idp/idp
 ```
 Also available in `us-east-1` and `eu-central-1` (swap the region in both the
 host and the `aws-ml-blog-<region>` bucket), and in `ca-central-1` for releases
-after 0.6.11 — ⚠️ an upgrade test that spans that boundary cannot run in Canada,
-because the FROM release has no artifacts in `aws-ml-blog-ca-central-1`. The
+after 0.6.11 — where ⚠️ **the bucket is `aws-bigdata-blog-replica-ca-central-1`,
+not `aws-ml-blog-ca-central-1`**, which does not exist, so the swap-the-region
+rule does not produce Canada's URL. An upgrade test that spans that boundary
+cannot run in Canada at all, because the FROM release has no artifacts there. The
 grep above is the reliable answer for a given pair: a release whose `## Templates`
 block carries three URLs is one of those.
 

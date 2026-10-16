@@ -45,14 +45,21 @@ set -x
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region us-west-2 --public
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region us-east-1 --public
 idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region eu-central-1 --public
-idp-cli publish --source-dir . --bucket-basename aws-ml-blog --prefix artifacts/genai-idp --region ca-central-1 --public
+idp-cli publish --source-dir . --bucket-basename aws-bigdata-blog-replica --prefix artifacts/genai-idp --region ca-central-1 --public
 ```
 
 ✅ The bucket for each region is `<bucket-basename>-<region>` — the region suffix is
 appended by the publisher, not written in the script
 (`lib/idp_sdk/idp_sdk/_core/publish.py`, `setup_environment`). So the four buckets are
 `aws-ml-blog-us-west-2`, `aws-ml-blog-us-east-1`, `aws-ml-blog-eu-central-1` and
-`aws-ml-blog-ca-central-1`, all under prefix `artifacts/genai-idp`.
+`aws-bigdata-blog-replica-ca-central-1`, all under prefix `artifacts/genai-idp`.
+
+⚠️ **The basename is not the same in every region.** Three use `aws-ml-blog`; `ca-central-1`
+uses `aws-bigdata-blog-replica`, so its bucket is `aws-bigdata-blog-replica-ca-central-1`
+and **not** `aws-ml-blog-ca-central-1`, which does not exist. Any snippet, URL or
+`for`-loop that builds a bucket name from the region alone is wrong for Canada; the loops
+in §5 below carry the region-to-basename pairs for that reason. Where this page says
+`aws-ml-blog-*` it is talking about the three that share that basename.
 
 ⚠️ **Why those regions** is recorded for one of the four and not for the other three. The
 rationale for `ca-central-1` is Canada-specific model routing and data residency, built out
@@ -66,16 +73,22 @@ region on the strength of this document.
 `scripts/aws-release.sh` is the script above; `TEMPLATE_URLS` in
 `lib/idp_cli_pkg/idp_cli/cli.py` is what `idp-cli deploy` serves. The failure is one-sided
 and silent in each direction — a region published but missing from the dict is refused by
-the `--govcloud` path while the Launch Stack buttons still offer it, and a region in the
-dict that was never published serves a 404. `TestTemplateUrlTable` in
-`lib/idp_cli_pkg/tests/test_cli_module_helpers.py` derives the script's region list and
+**all three** deploy paths that read it (`--govcloud`, `--headless` and the plain `idp-cli
+deploy`, the last being the one most people hit) while the Launch Stack buttons still offer
+it, and a region in the dict that was never published serves a 404. `TestTemplateUrlTable`
+in `lib/idp_cli_pkg/tests/test_cli_module_helpers.py` derives the script's region list and
 fails naming the mismatch, so adding a region means both files plus **three** Launch Stack
 tables — `README.md`, `docs/deployment.md` and
 `workshop/amazon-quick-integration-workshop.md`, the third being the one easiest to miss —
 the `## Templates` block in `.claude/skills/cut-release-changelog.md`, the upgrade-test
-region list in `.claude/skills/test-upgrade.md`, and any per-region page such as
-`docs/canada-region-model-support.md`. Only the first two are covered by a test; the rest
-are on this list because nothing checks them. The extensions marketplace
+region list in `.claude/skills/test-upgrade.md`, `IDP_REGIONS` in
+`lib/idp_sdk/idp_sdk/_core/cleanup_orphaned.py` (the default scan for
+`remove-deleted-stack-resources`, so a region absent there leaks the orphaned resources of
+every deleted stack in it), and any per-region page such as
+`docs/canada-region-model-support.md`. ✅ The two source files **and all three Launch Stack
+tables** are held together by that test, so omitting a table fails a gate rather than
+shipping quietly. What nothing checks is the rest of the list — the two skills,
+`IDP_REGIONS` and the per-region pages. The extensions marketplace
 (`config_library/extensions-marketplace.yaml`) is a **separate** set and is not covered by
 that test — it still carries three regions.
 
@@ -107,7 +120,8 @@ cannot collide (`config_library/extensions-marketplace.yaml`).
 - `<VERSION>` → the `VERSION` file's contents. This is why the published template's
   `Description` line reads `AWS GenAI IDP Accelerator (uksb-r8evguc4p9) (SO9027) (v0.6.8)`
   — checking that string is the cheapest way to confirm *which* build an object is.
-- `<ARTIFACT_BUCKET_TOKEN>` / `<ARTIFACT_PREFIX_TOKEN>` → `aws-ml-blog-<region>` and
+- `<ARTIFACT_BUCKET_TOKEN>` / `<ARTIFACT_PREFIX_TOKEN>` → that region's bucket
+  (`<bucket-basename>-<region>`, so `aws-bigdata-blog-replica-ca-central-1` in Canada) and
   `artifacts/genai-idp/<VERSION>`. The deployed stack fetches its own code from the region
   it was published to.
 - `<PUBLIC_ARTIFACTS_BUCKET_TOKEN>` / `<PUBLIC_ARTIFACTS_PREFIX_TOKEN>` → the bucket and
@@ -199,13 +213,14 @@ issue against the same bucket:
   prints `Could not verify/apply the EnforceSSLOnly bucket policy on the existing bucket —
   add it manually` and **continues**. It is not fatal.
 - `s3:CreateBucket` / `s3:PutBucketVersioning` — only on the 404 path, i.e. only if the
-  bucket does not exist. For the `aws-ml-blog-*` buckets this path is not taken: all four,
-  `aws-ml-blog-ca-central-1` included, answer an unauthenticated request with `403
-  AccessDenied` rather than `404 NoSuchBucket`, which only an existing bucket does
-  (measured 2026-10-16; a name that does not exist was probed as a control and answered
-  `404 NoSuchBucket`). ⚠️ That establishes existence and **nothing about configuration** —
-  whether the Canada bucket has ACLs enabled is unread, and `--public` depends on it, so
-  see the ACL note below.
+  bucket does not exist. For the release buckets this path is not taken: all four,
+  `aws-bigdata-blog-replica-ca-central-1` included, answer an unauthenticated request with
+  `403 AccessDenied` rather than `404 NoSuchBucket`, which only an existing bucket does
+  (measured 2026-10-16, with two controls — a name that does not exist answered `404
+  NoSuchBucket`, and so did the unsuffixed `aws-bigdata-blog-replica`, confirming the
+  publisher's `<basename>-<region>` suffixing is what names the real one). ⚠️ That
+  establishes existence and **nothing about configuration** — whether the Canada bucket has
+  ACLs enabled is unread, and `--public` depends on it, so see the ACL note below.
 - `cloudformation:ValidateTemplate`
 
 ✅ `--public` works by setting **object ACLs** (`ACL=public-read`) on every object under
@@ -214,7 +229,7 @@ template keys and `idp-main-latest.json`. That requires the bucket to have ACLs 
 (Object Ownership not set to *bucket owner enforced*) and `BlockPublicAcls` off in its Public
 Access Block configuration.
 
-⚠️ **Which AWS account owns the `aws-ml-blog-*` buckets, which role or profile the releaser
+⚠️ **Which AWS account owns the release buckets, which role or profile the releaser
 assumes, and how that credential is obtained are not recorded anywhere in this
 repository.** Nor is the buckets' Object Ownership / Public Access Block / versioning
 configuration. This is the single largest gap in this runbook and the one most responsible
@@ -309,6 +324,15 @@ in each URL (host *and* bucket name). The URLs 404 at this point — expected.
 
 Preconditions from §1 all satisfied, credentials confirmed, on the release commit with a
 clean tree.
+
+⚠️ **The first Canada publish is the one new failure mode here, and it lands late.**
+`--public` works by setting object ACLs, so if `aws-bigdata-blog-replica-ca-central-1` carries
+`BucketOwnerEnforced` Object Ownership or a Public Access Block that refuses public ACLs,
+`set_public_acls` raises and the release fails **after** the other three regions are
+already live — the "one region of customers who cannot deploy" state, reached from the
+opposite direction and not something the recovery paths below were written for. The bucket
+exists (§1), but its Object Ownership is unread. Confirm it before the first Canada
+release, or expect to re-run that one region after fixing the bucket.
 
 ```bash
 cd <repo root>            # required: publish reads ./VERSION relative to cwd
@@ -503,9 +527,9 @@ the Canada Launch Stack button then serves a release whose own `## Templates` bl
 no Canada URL. Expect the Canada leg to take as long as a first publish.
 
 ⚠️ **Do not assume you can recover the previous `idp-main.yaml` bytes from S3 object
-versioning.** `publish.py` enables versioning only on buckets it creates; the
-`aws-ml-blog-*` buckets pre-exist, so they take the `head_bucket` success path and their
-versioning state is whatever the account configured. This document could not determine it.
+versioning.** `publish.py` enables versioning only on buckets it creates; all four release
+buckets pre-exist, so they take the `head_bucket` success path and their versioning state
+is whatever the account configured. This document could not determine it.
 
 If you must move the floating pointer without a rebuild, note the trap: a server-side copy
 of the previous versioned template over `idp-main.yaml` fixes the Launch Stack buttons —
@@ -522,7 +546,9 @@ what grants the anonymous read, so a hand-written pointer with no ACL is invisib
 customer:
 
 ```bash
-aws s3api put-object-acl --bucket aws-ml-blog-<region> \
+# <bucket> is <basename>-<region>: aws-ml-blog-<region> for the three, and
+# aws-bigdata-blog-replica-ca-central-1 for Canada.
+aws s3api put-object-acl --bucket <bucket> \
   --key artifacts/genai-idp/idp-main-latest.json --acl public-read --region <region>
 ```
 
@@ -653,8 +679,10 @@ credentials, the objects are genuinely public. Run them for **all four regions**
 
 ```bash
 V=$(cat VERSION)
-for R in us-west-2 us-east-1 eu-central-1 ca-central-1; do
-  B="https://s3.$R.amazonaws.com/aws-ml-blog-$R/artifacts/genai-idp"
+for RB in us-west-2:aws-ml-blog us-east-1:aws-ml-blog eu-central-1:aws-ml-blog \
+          ca-central-1:aws-bigdata-blog-replica; do
+  R="${RB%%:*}"; BASE="${RB##*:}"
+  B="https://s3.$R.amazonaws.com/$BASE-$R/artifacts/genai-idp"
   echo "== $R"
   curl -sI  "$B/idp-main_$V.yaml"     -o /dev/null -w '  versioned  %{http_code}\n'
   curl -sI  "$B/idp-main.yaml"        -o /dev/null -w '  floating   %{http_code}\n'
@@ -687,8 +715,10 @@ done
       and afterwards holds only the last region:
       ```bash
       V=$(cat VERSION)
-      for R in us-west-2 us-east-1 eu-central-1 ca-central-1; do
-        B="https://s3.$R.amazonaws.com/aws-ml-blog-$R/artifacts/genai-idp"
+      for RB in us-west-2:aws-ml-blog us-east-1:aws-ml-blog eu-central-1:aws-ml-blog \
+                ca-central-1:aws-bigdata-blog-replica; do
+        R="${RB%%:*}"; BASE="${RB##*:}"
+        B="https://s3.$R.amazonaws.com/$BASE-$R/artifacts/genai-idp"
         Z=$(curl -s "$B/idp-main_$V.yaml" | grep -om1 'idp-common-base-[0-9a-f]*\.zip')
         curl -sI "$B/$V/layers/$Z" -o /dev/null -w "  $R  %{http_code}  $Z\n"
       done
@@ -718,7 +748,7 @@ done
 Collected so they are not buried:
 
 1. ⚠️ **The release credential.** Account, role, and how to assume it. Not in the repo.
-2. ⚠️ **The `aws-ml-blog-*` bucket configuration.** Object Ownership, Public Access Block,
+2. ⚠️ **The release buckets' configuration.** Object Ownership, Public Access Block,
    and versioning — the last of which determines whether a bad `idp-main.yaml` is
    recoverable by any means other than re-publishing. One part of this is now **closed**:
    whether a prefix-wide anonymous-read bucket policy exists. It does not; object ACLs are
