@@ -690,11 +690,15 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* `confidence` is the per-field assessment entry's own
-                         value, so its absence is how this row knows nothing was
-                         recorded for the field — as distinct from a box that was
-                         looked for and not found. */
-                      hasFieldData={confidence !== undefined && confidence !== null}
+                      /* From the SAME lookup that renders the confidence on this
+                         row, never from the `confidence` prop. The prop is passed
+                         by whichever parent happened to derive it, and
+                         `getFieldConfidenceInfo` navigates differently — so where
+                         the two disagree the row showed "Confidence: 87.0% /
+                         Threshold: 80.0%" beside an explanation that the
+                         assessment step had skipped the field. One source means
+                         the reason cannot contradict the number above it. */
+                      hasFieldData={confidenceInfo.hasConfidenceInfo}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -915,11 +919,15 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* `confidence` is the per-field assessment entry's own
-                         value, so its absence is how this row knows nothing was
-                         recorded for the field — as distinct from a box that was
-                         looked for and not found. */
-                      hasFieldData={confidence !== undefined && confidence !== null}
+                      /* From the SAME lookup that renders the confidence on this
+                         row, never from the `confidence` prop. The prop is passed
+                         by whichever parent happened to derive it, and
+                         `getFieldConfidenceInfo` navigates differently — so where
+                         the two disagree the row showed "Confidence: 87.0% /
+                         Threshold: 80.0%" beside an explanation that the
+                         assessment step had skipped the field. One source means
+                         the reason cannot contradict the number above it. */
+                      hasFieldData={confidenceInfo.hasConfidenceInfo}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1150,11 +1158,15 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* `confidence` is the per-field assessment entry's own
-                         value, so its absence is how this row knows nothing was
-                         recorded for the field — as distinct from a box that was
-                         looked for and not found. */
-                      hasFieldData={confidence !== undefined && confidence !== null}
+                      /* From the SAME lookup that renders the confidence on this
+                         row, never from the `confidence` prop. The prop is passed
+                         by whichever parent happened to derive it, and
+                         `getFieldConfidenceInfo` navigates differently — so where
+                         the two disagree the row showed "Confidence: 87.0% /
+                         Threshold: 80.0%" beside an explanation that the
+                         assessment step had skipped the field. One source means
+                         the reason cannot contradict the number above it. */
+                      hasFieldData={confidenceInfo.hasConfidenceInfo}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>
@@ -1615,11 +1627,15 @@ const FormFieldRenderer = memo<Record<string, any>>(
                       value={value}
                       geometry={geometry}
                       geometryAvailable={geometryAvailable}
-                      /* `confidence` is the per-field assessment entry's own
-                         value, so its absence is how this row knows nothing was
-                         recorded for the field — as distinct from a box that was
-                         looked for and not found. */
-                      hasFieldData={confidence !== undefined && confidence !== null}
+                      /* From the SAME lookup that renders the confidence on this
+                         row, never from the `confidence` prop. The prop is passed
+                         by whichever parent happened to derive it, and
+                         `getFieldConfidenceInfo` navigates differently — so where
+                         the two disagree the row showed "Confidence: 87.0% /
+                         Threshold: 80.0%" beside an explanation that the
+                         assessment step had skipped the field. One source means
+                         the reason cannot contradict the number above it. */
+                      hasFieldData={confidenceInfo.hasConfidenceInfo}
                       onLocate={handleClick}
                     />
                   </SpaceBetween>

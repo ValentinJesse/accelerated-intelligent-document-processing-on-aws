@@ -21,6 +21,9 @@
  * given two facts and no way to choose between them.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
@@ -155,6 +158,25 @@ describe('a section that can only partly be shown on the page', () => {
     renderSection({ explainabilityInfo: null });
 
     expect(screen.getByText(/0 of 10 fields have a bounding box/)).toBeInTheDocument();
+  });
+
+  it('takes the skipped-field verdict from the same lookup that renders the confidence', () => {
+    // Reported from a deployed build: a row showed "Confidence: 87.0% /
+    // Threshold: 80.0%" beside "the assessment step skipped this field". Those
+    // came from two different lookups — the number from
+    // getFieldConfidenceInfo(fieldKey, explainabilityInfo, filteredPath, …),
+    // the verdict from a `confidence` prop a parent derives with the raw path.
+    // `filteredPath` strips structural keys, so the two can disagree.
+    //
+    // ⚠️ Asserted at source level deliberately. The shape that makes them
+    // disagree is not reproduced here — both recursive call sites pass the prop,
+    // so every payload tried gives the same answer either way, and a rendered
+    // test over those shapes passes against the broken wiring too (measured).
+    // What is pinned instead is the single source, which removes the class:
+    // the reason cannot contradict the number when both read the same lookup.
+    const source = readFileSync(join(__dirname, '..', '..', 'document-viewer', 'FormFieldRenderer.tsx'), 'utf-8');
+    expect(source).toContain('hasFieldData={confidenceInfo.hasConfidenceInfo}');
+    expect(source).not.toMatch(/hasFieldData=\{confidence !== undefined/);
   });
 
   it('omits the count when the section displays no fields at all', () => {
