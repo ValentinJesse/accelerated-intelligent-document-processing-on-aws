@@ -27,10 +27,12 @@ source binding. It retains the complete Docling representation, body and table
 Markdown, and item/cell source anchors. A page-specific hook response exposes
 normalized coordinates to the **unchanged** upstream OCR artifact consumer.
 Missing confidence stays missing. DOCX structural references are retained without
-inventing page coordinates. Conversion, actual MIME detection, source-byte hash
-verification, worker time/memory limits, and tenant authorization belong to the
-calling reader and remain required before activation. The adapter bounds the
-serialized result and validates page geometry; it is not a document reader.
+inventing page coordinates. `reader.read_evidence` now invokes local Docling
+after source-byte hash and signature checks. It bounds file/archive sizes, page
+counts/dimensions and output, rejects partial conversion, and preserves body text
+and tables. The adapter bounds serialized results and validates page geometry.
+Tenant authorization and hard worker time/memory/network limits remain the
+caller’s responsibility and are required before activation.
 
 The source binding is an identity assertion by the authorized caller, not proof
 of authorization. Never use data from the document itself to choose a tenant,
@@ -46,7 +48,7 @@ Lambda request/transport adapter and CRM candidate delivery are not implemented.
 
 Use Python 3.12 and the pinned `requirements.txt`. Install the first-party package
 from this checkout's `lib/idp_common_pkg`, never an unrelated package of the same
-name from PyPI. Run `pytest samples/docling-evidence-adapter/test_adapter.py`.
+name from PyPI. Run `pytest samples/docling-evidence-adapter`.
 The test suite is registered in the upstream test runner and package-test recipe;
 its Docling core dependency is declared in the test extra.
 Tests call the actual upstream OCR artifact and page-data consumers without
@@ -58,3 +60,24 @@ Page block IDs resolve through `blockAnchors` to original structural references.
 tables. Their complete evidence remains available; callers must not claim that
 the page hooks alone cover those items. Upstream labels a block as a line; the
 envelope retains the true text-item or table-cell granularity for reviewers.
+
+## Native reader qualification
+
+`reader.read_evidence(data, source, models=absolute_models_path)` accepts PDF and
+DOCX bytes. Its policy is `ReadLimits`; limits cannot be disabled. Unsupported
+formats, MIME/hash mismatches, encrypted or oversized archives, excessive PDF
+pages/dimensions, conversion errors and partial output fail explicitly. Pages
+without anchored text and empty documents require reading review. No OCR fallback
+or financial acceptance is enabled.
+
+Docling's conversion timeout is cooperative, so an isolated supervisor must also
+enforce a hard deadline and memory limit. Use network denial and offline model
+settings, with a pre-provisioned model directory and no provider credentials.
+`reader-requirements-macos-arm64.txt` records the measured Python 3.12 qualification
+environment; it is not a qualified Linux production image. No document-model API
+is required for native reading. Full-reader tests against private sources run
+separately from the small offline contract/preflight suite.
+
+The CRM's existing normalization v1 allow-list cannot store this full envelope.
+A versioned contract migration and acceptance support for structural anchors must
+precede delivery. Do not flatten away tables/anchors to bypass that boundary.
