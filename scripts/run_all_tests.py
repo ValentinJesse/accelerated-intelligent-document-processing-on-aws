@@ -189,6 +189,7 @@ RUN_ROOTS = [
     "nested/api-resolvers/src/lambda/reprocess_document_resolver",
     "nested/api-resolvers/src/lambda/upload_resolver",
     "nested/bedrockkb/src/start_ingestion_job_custom_resource",
+    "samples/docling-evidence-adapter",
     "samples/lambda-hook-inference/GENAIIDP-cohere-parse-hook",
     "samples/lambda-hook-inference/GENAIIDP-mistral-ocr-hook",
     # Registered rather than quarantined: it was excluded on the stated ground

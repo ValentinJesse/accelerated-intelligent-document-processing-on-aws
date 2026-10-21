@@ -957,6 +957,7 @@ test-packages-cicd: ## CI-safe: run the package/Lambda suites NOT covered by idp
 	cd feature-platform/sample-health-insurance-review/ui-deployer && $(PYTEST_HERMETIC) tests -q -p no:cacheprovider
 	@echo "Running the Lambda hook-inference sample suites..."
 	@# Own invocation each: all three define a module named ``index``.
+	cd samples/docling-evidence-adapter && $(PYTEST_HERMETIC) -q -p no:cacheprovider
 	cd samples/lambda-hook-inference/GENAIIDP-cohere-parse-hook && $(PYTEST_HERMETIC) -q -p no:cacheprovider
 	cd samples/lambda-hook-inference/GENAIIDP-mistral-ocr-hook && $(PYTEST_HERMETIC) -q -p no:cacheprovider
 	cd samples/lambda-hook-inference/GENAIIDP-w2-copy-consistency && $(PYTEST_HERMETIC) -q -p no:cacheprovider

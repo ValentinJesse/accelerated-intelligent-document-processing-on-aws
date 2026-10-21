@@ -214,6 +214,7 @@ docs_service = [
 
 # Testing dependencies
 test = [
+  "docling-core==2.103.1",         # Offline Docling evidence adapter contract tests
   "pytest>=9.0.3",
   "pytest-cov>=4.1.0",
   "pytest-xdist>=3.3.1",            # For parallel test execution
