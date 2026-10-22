@@ -56,6 +56,24 @@ def test_archive_expansion_and_entry_count_are_bounded():
         inspect_source(data, binding(data), ReadLimits(archive_entries=1))
 
 
+@pytest.mark.parametrize(
+    "mime", ["application/octet-stream", "application/zip", "application/x-zip-compressed"]
+)
+def test_generic_metadata_does_not_hide_a_verified_docx(mime):
+    data = docx_bytes()
+    source = binding(data, mime)
+    assert inspect_source(data, source, ReadLimits()) == DOCX
+    assert source.mime_type == mime  # Preserve the provider's original metadata.
+    with pytest.raises(ReaderRejected, match="archive_limit"):
+        inspect_source(data, source, ReadLimits(archive_entries=1))
+
+
+def test_generic_mime_does_not_bypass_byte_detection():
+    data = b"not a supported document"
+    with pytest.raises(ReaderRejected, match="unsupported_detected_mime"):
+        inspect_source(data, binding(data, "application/octet-stream"), ReadLimits())
+
+
 def test_source_limit_precedes_converter(monkeypatch, tmp_path):
     def forbidden(*args):
         pytest.fail("Converter must not run for rejected bytes")

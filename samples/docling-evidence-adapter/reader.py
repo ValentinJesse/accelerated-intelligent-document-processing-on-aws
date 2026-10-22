@@ -56,7 +56,11 @@ def inspect_source(data: bytes, source: SourceBinding, limits: ReadLimits) -> st
     detected = filetype.guess_mime(data)
     if detected not in (PDF, DOCX):
         raise ReaderRejected("unsupported_detected_mime")
-    if detected != source.mime_type:
+    generic_mime = source.mime_type == "application/octet-stream" or (
+        source.mime_type in ("application/zip", "application/x-zip-compressed")
+        and detected == DOCX
+    )
+    if detected != source.mime_type and not generic_mime:
         raise ReaderRejected("source_mime_mismatch")
     if detected == DOCX:
         started = time.monotonic()

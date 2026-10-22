@@ -70,6 +70,12 @@ pages/dimensions, conversion errors and partial output fail explicitly. Pages
 without anchored text and empty documents require reading review. No OCR fallback
 or financial acceptance is enabled.
 
+Generic `application/octet-stream` metadata can be resolved to PDF/DOCX by byte
+detection. ZIP metadata can resolve to DOCX only after its container checks pass.
+The original declared MIME remains in the source binding; `reading.detectedMime`
+records the detected type. A conflicting specific MIME still fails. This uses no
+company names, paths or filename conventions.
+
 Docling's conversion timeout is cooperative, so an isolated supervisor must also
 enforce a hard deadline and memory limit. Use network denial and offline model
 settings, with a pre-provisioned model directory and no provider credentials.
