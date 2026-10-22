@@ -94,10 +94,9 @@ A Python 3.12.14/Linux ARM64 disposable container read the 11 pilot originals
 and two generic-MIME variants successfully. The stricter run took 64.4 seconds
 wall time / 81.3 process CPU seconds, with 1,937,805,312 bytes peak container
 memory (1.81 GiB). This is a small native-reading pilot, not throughput or
-independent accuracy acceptance. Linux AMD64 and scanned-document OCR remain
-unqualified. An existing 1 GiB worker cannot host this measured reader unchanged.
+independent accuracy acceptance. Linux AMD64 is measured below; scanned-document OCR remains unqualified. An existing 1 GiB worker cannot host this measured reader unchanged.
 
-`reader-requirements-linux-arm64.txt` freezes the measured native-reader packages.
+`reader-requirements-linux-cpu.txt` freezes the measured native-reader packages.
 It does not contain the first-party upstream package needed by adapter integration
 tests; install that package from this fork as described above. Use a separate
 Python 3.12 environment. Select the CPU wheels explicitly before resolving the
@@ -105,7 +104,7 @@ remaining reader dependencies:
 
 ```sh
 python -m pip install --no-deps --index-url https://download.pytorch.org/whl/cpu torch==2.14.1+cpu torchvision==0.29.1+cpu
-python -m pip install -r samples/docling-evidence-adapter/reader-requirements-linux-arm64.txt
+python -m pip install -r samples/docling-evidence-adapter/reader-requirements-linux-cpu.txt
 python -m pip check
 ```
 
@@ -127,3 +126,17 @@ two variants). Agreement between readers/platforms is not a labeled accuracy
 benchmark. Private samples and result payloads are kept outside this public fork.
 No AWS resources, paid API, existing-service restart or production reader
 activation was involved.
+
+## Linux AMD64 native-reader measurement
+
+The same 13 inputs also pass in an isolated Python 3.12.14/Linux AMD64 container:
+39.9 seconds wall time, 62.0 process CPU seconds and 1,698,930,688 bytes peak
+container memory (1.58 GiB). Limits, read-only mounts, offline environment and
+network denial match the ARM64 run; the supervisor enforces the hard deadline.
+The reader verifies all 66 pre-provisioned model-file hashes before conversion.
+CPU package freezes are identical on both platforms, so one Linux CPU lock is
+retained. The existing 1 GiB worker limit is insufficient on both architectures.
+
+All 13 AMD64 outputs preserve the retained body/table text. This remains a native
+pilot, not OCR accuracy, production concurrency, or workflow acceptance. No
+running CRM service or reader policy was changed by this qualification.

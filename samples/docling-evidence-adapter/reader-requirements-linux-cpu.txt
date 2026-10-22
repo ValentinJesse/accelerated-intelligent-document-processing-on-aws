@@ -1,6 +1,6 @@
-# Measured native-reader environment: Python 3.12.14, Linux ARM64, CPU only.
+# Measured native-reader environment: Python 3.12.14, Linux ARM64 and AMD64, CPU only.
 # Install CPU torch/torchvision from the official CPU index first; see README.
-# This is reader qualification, not an AMD64 production image or full workflow.
+# This is native-reader qualification, not a deployed image or full workflow.
 accelerate==1.15.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
