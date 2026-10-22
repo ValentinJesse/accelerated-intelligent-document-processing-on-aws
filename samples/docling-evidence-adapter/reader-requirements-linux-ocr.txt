@@ -1,0 +1,7 @@
+# Optional offline OCR candidate, measured on Python 3.12.14/Linux ARM64 only.
+# Keep the native lock unchanged; install its CPU torch wheels first (README).
+# This overlay does not qualify production OCR or financial publication.
+-r reader-requirements-linux-cpu.txt
+flatbuffers==25.12.19
+onnxruntime==1.31.0
+protobuf==7.36.2

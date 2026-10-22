@@ -35,6 +35,7 @@ def invoke(monkeypatch, data, **changes):
             "--models",
             "/models",
         ]
+        + changes.pop("flags", [])
     )
 
 
@@ -55,6 +56,29 @@ def test_cli_passes_bound_identity_bytes_and_limits(monkeypatch, capsys):
     assert source.sha256 == hashlib.sha256(data).hexdigest()
     assert kwargs["limits"].source_bytes == 104857600
     assert kwargs["limits"].conversion_seconds == 240
+    assert "ocr" not in kwargs
+
+
+def test_cli_forwards_explicit_ocr_without_fallback(monkeypatch, capsys):
+    calls = []
+
+    def read(data, source, **kwargs):
+        calls.append(kwargs["ocr"])
+        raise RuntimeError("private OCR exception")
+
+    monkeypatch.setattr(reader, "read_evidence", read)
+    assert (
+        invoke(
+            monkeypatch,
+            b"PDF bytes",
+            flags=["--ocr-language", "latin", "--ocr-mode", "full_page"],
+        )
+        == 1
+    )
+    assert calls == [reader.LocalOcr("latin", "full_page")]
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err == "reader_execution_failed\n"
 
 
 @pytest.mark.parametrize("size", [0, 104857601, 2, 4])

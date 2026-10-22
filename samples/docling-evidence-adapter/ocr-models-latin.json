@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Offline Latin-script OCR benchmark; not production qualification",
+  "doclingVersion": "2.141.0",
+  "rapidocrVersion": "3.10.0",
+  "backend": "onnxruntime",
+  "language": "latin",
+  "artifactsSubdirectory": "RapidOcr",
+  "models": [
+    {
+      "file": "ch_PP-OCRv5_det_mobile.onnx",
+      "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx",
+      "bytes": 4819576,
+      "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae"
+    },
+    {
+      "file": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+      "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+      "bytes": 585532,
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
+    },
+    {
+      "file": "latin_PP-OCRv5_rec_mobile.onnx",
+      "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile.onnx",
+      "bytes": 7904513,
+      "sha256": "b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a"
+    }
+  ]
+}

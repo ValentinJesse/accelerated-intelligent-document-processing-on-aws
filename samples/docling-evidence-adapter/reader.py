@@ -3,10 +3,11 @@
 
 import hashlib
 import io
+import re
 import time
 import zipfile
 from dataclasses import dataclass
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import filetype
@@ -18,6 +19,32 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 class ReaderRejected(ValueError):
     """Stable accounting code, without document text, filenames or library logs."""
+
+
+@dataclass(frozen=True)
+class LocalOcr:
+    """Explicit offline OCR candidate; it conveys no publication qualification."""
+
+    language: str
+    mode: str = "pdf_aware_layout_regions"
+
+    def __post_init__(self):
+        if (
+            not isinstance(self.language, str)
+            or not re.fullmatch(r"(?:iso:)?[A-Za-z][A-Za-z0-9_-]{0,47}", self.language)
+            or self.mode not in ("pdf_aware_layout_regions", "full_page")
+        ):
+            raise ValueError("Invalid local OCR settings")
+
+    def identity(self):
+        return {
+            "engine": "rapidocr",
+            "backend": "onnxruntime",
+            "language": self.language,
+            "mode": self.mode,
+            "rapidocrVersion": version("rapidocr"),
+            "onnxruntimeVersion": version("onnxruntime"),
+        }
 
 
 @dataclass(frozen=True)
@@ -93,7 +120,7 @@ def inspect_source(data: bytes, source: SourceBinding, limits: ReadLimits) -> st
     return detected
 
 
-def _make_converter(models: Path, limits: ReadLimits):
+def _make_converter(models: Path, limits: ReadLimits, ocr: LocalOcr | None = None):
     # Lazy imports let preflight reject malformed/unsupported bytes before ML load.
     from docling.datamodel.accelerator_options import (
         AcceleratorDevice,
@@ -114,6 +141,16 @@ def _make_converter(models: Path, limits: ReadLimits):
             num_threads=2, device=AcceleratorDevice.CPU
         ),
     )
+    if ocr is not None:
+        from docling.datamodel.pipeline_options import OcrMode, RapidOcrOptions
+
+        options.do_ocr = True
+        options.ocr_options = RapidOcrOptions(
+            backend="onnxruntime",
+            lang=[ocr.language],
+            mode=OcrMode(ocr.mode),
+            print_verbose=False,
+        )
     return DocumentConverter(
         allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
@@ -136,6 +173,7 @@ def read_evidence(
     *,
     models: Path,
     limits: ReadLimits = ReadLimits(),
+    ocr: LocalOcr | None = None,
 ) -> dict:
     """Bind exact immutable bytes to complete reader evidence, without accepting it.
 
@@ -144,7 +182,11 @@ def read_evidence(
     function uses local models without fallback; the caller owns persistence.
     """
     started = time.monotonic()
+    if ocr is not None and not isinstance(ocr, LocalOcr):
+        raise ValueError("Invalid local OCR settings")
     detected = inspect_source(data, source, limits)
+    if ocr is not None and detected != PDF:
+        raise ReaderRejected("ocr_unsupported_detected_mime")
     if not models.is_absolute() or not models.is_dir():
         raise ReaderRejected("local_models_unavailable")
     page_count = None
@@ -169,7 +211,13 @@ def read_evidence(
 
     from docling.datamodel.base_models import DocumentStream
 
-    converter = _make_converter(models, limits)
+    # Preserve native defaults and require installed OCR dependencies explicitly.
+    ocr_identity = ocr.identity() if ocr is not None else None
+    converter = (
+        _make_converter(models, limits, ocr)
+        if ocr is not None
+        else _make_converter(models, limits)
+    )
     result = converter.convert(
         DocumentStream(
             name="source.pdf" if detected == PDF else "source.docx",
@@ -202,7 +250,7 @@ def read_evidence(
     evidence["reading"] = {
         "detectedMime": detected,
         "byteSize": len(data),
-        "ocrEnabled": False,
+        "ocrEnabled": ocr is not None,
         "sourceHashVerified": True,
         "conversionStatus": result.status.value,
         "pagesWithoutAnchoredText": unrepresented_pages,
@@ -210,6 +258,8 @@ def read_evidence(
         "seconds": round(time.monotonic() - started, 3),
         "limits": dict(limits.__dict__),
     }
+    if ocr_identity is not None:
+        evidence["reading"]["ocr"] = ocr_identity
     # Metadata is part of the same envelope budget.
     import json
 
@@ -232,7 +282,19 @@ def main(argv=None):
     parser.add_argument("--source-json")
     parser.add_argument("--expected-size", type=int)
     parser.add_argument("--models", type=Path)
+    parser.add_argument("--ocr-language")
+    parser.add_argument("--ocr-mode", choices=("pdf_aware_layout_regions", "full_page"))
     args = parser.parse_args(argv)
+    if args.ocr_mode and not args.ocr_language:
+        parser.error("OCR mode requires an explicit language")
+    try:
+        ocr = (
+            LocalOcr(args.ocr_language, args.ocr_mode or "pdf_aware_layout_regions")
+            if args.ocr_language
+            else None
+        )
+    except ValueError:
+        parser.error("Invalid local OCR settings")
     limits = ReadLimits(
         source_bytes=100 * 1024 * 1024,
         output_bytes=8 * 1024 * 1024,
@@ -244,15 +306,22 @@ def main(argv=None):
             v is not None for v in (args.source_json, args.expected_size, args.models)
         ):
             parser.error("Describe does not accept source inputs")
+        try:
+            reader_version = version("docling")
+            ocr_identity = ocr.identity() if ocr is not None else None
+        except PackageNotFoundError:
+            print("reader_dependencies_unavailable", file=sys.stderr)
+            return 1
         print(
             json.dumps(
                 {
                     "reader": "docling",
-                    "version": version("docling"),
+                    "version": reader_version,
                     "maxSourceBytes": limits.source_bytes,
                     "maxPages": limits.pages,
                     "maxOutputBytes": limits.output_bytes,
-                    "ocrEnabled": False,
+                    "ocrEnabled": ocr is not None,
+                    **({"ocr": ocr_identity} if ocr is not None else {}),
                 }
             )
         )
@@ -269,7 +338,13 @@ def main(argv=None):
         data = sys.stdin.buffer.read(args.expected_size + 1)
         if len(data) != args.expected_size:
             raise ValueError("Source byte length changed")
-        evidence = read_evidence(data, source, models=args.models, limits=limits)
+        evidence = read_evidence(
+            data,
+            source,
+            models=args.models,
+            limits=limits,
+            **({"ocr": ocr} if ocr is not None else {}),
+        )
         wire = json.dumps(evidence, ensure_ascii=False, allow_nan=False)
         if len(wire.encode()) > limits.output_bytes:
             raise ReaderRejected("output_byte_limit")

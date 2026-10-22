@@ -155,3 +155,52 @@ container with a separate hard deadline and resource limits. Exit 2 reports a
 fixed reader-rejection code; exit 1 gives a content-free execution failure.
 Neither exit 0 nor the envelope grants financial acceptance. This command does
 not deploy AWS infrastructure or replace the upstream workflow.
+
+## Explicit local OCR candidate
+
+Native reading remains the default. For a demonstrated scanned-PDF gap, the same
+reader accepts `ocr=LocalOcr("latin", "full_page")`, or the CLI flags
+`--ocr-language latin --ocr-mode full_page`. Omitting the mode selects
+`pdf_aware_layout_regions`, which retains Docling's PDF-aware region selection.
+OCR requires an explicit single language and a supported mode. This option is
+PDF-only; it does not imply image-file, DOCX OCR or arbitrary-language support.
+The output records `reading.ocrEnabled=true` and the engine, backend, requested
+language/mode and installed RapidOCR/ONNX Runtime versions. Native output retains
+`ocrEnabled=false`. Missing dependencies/models or conversion failures fail the
+run; there is no silent native, remote or alternate-engine fallback.
+
+This uses Docling's maintained RapidOCR integration with PaddleOCR PP-OCR models
+through ONNX Runtime, **not the full PaddleOCR framework or a paid API**.
+See [Docling's OCR contract](https://docling-project.github.io/docling/concepts/OCR/).
+Language resolution and default recognition settings are pinned by the recorded
+Docling version. Qualify each intended language/model combination separately.
+
+`reader-requirements-linux-ocr.txt` overlays the unchanged native lock with pinned
+ONNX Runtime, FlatBuffers and Protobuf. `ocr-models-latin.json` records the three
+public artifact URLs, sizes and SHA-256 values used in the Latin-script experiment.
+Provision and verify these under `models/RapidOcr` before a run, include them in
+the supervisor's sealed model manifest, and deny runtime network access. The
+[RapidOCR code](https://github.com/RapidAI/RapidOCR/blob/main/LICENSE) and
+[PaddleOCR recognition model](https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec)
+publish Apache-2.0 licensing; retain upstream notices when distributing artifacts.
+Adding a language requires its own artifact and license inventory.
+
+One private single-page scan was measured with frozen expected values before OCR.
+Full-page OCR through `read_evidence` recovered all 13 selected critical values
+and all three product-row associations, while missing transport-type text.
+The isolated ARM64 run took 125.26 seconds wall time (108.57 seconds inside the
+reader), with 2,213,388,288 bytes peak container memory. An earlier direct Docling
+run on the same bytes took 28.58 seconds total, so latency is variable and neither
+result establishes capacity. PDF-aware OCR on the same source recovered the same
+selected values/rows and missed the same transport text, taking 79.12 seconds
+total (37.15 seconds in the reader) with 1,662,734,336 bytes peak container memory.
+The two modes were specified before comparison; this does not select an output
+because its financial amounts look preferable. All runs used 2 CPUs, 3 GiB RAM, no swap, a 300-second
+supervisor deadline, no network or provider credentials, and read-only inputs.
+A native control on the same image/bytes recovered none of the 13 selected values
+and retained the required empty-reading hold. This is a regression sample, not a
+held-out accuracy score or financial acceptance.
+AMD64 OCR, broad scan/table/language coverage, cost and recurring publication remain
+unqualified. No customer original or extracted text is included here. The CRM's
+current complete-evidence contract deliberately refuses OCR-enabled envelopes;
+qualifying and versioning that contract is separate work before activation.
