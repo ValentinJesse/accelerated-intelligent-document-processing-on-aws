@@ -87,3 +87,43 @@ separately from the small offline contract/preflight suite.
 The CRM's existing normalization v1 allow-list cannot store this full envelope.
 A versioned contract migration and acceptance support for structural anchors must
 precede delivery. Do not flatten away tables/anchors to bypass that boundary.
+
+## Linux ARM64 native-reader measurement
+
+A Python 3.12.14/Linux ARM64 disposable container read the 11 pilot originals
+and two generic-MIME variants successfully. The stricter run took 64.4 seconds
+wall time / 81.3 process CPU seconds, with 1,937,805,312 bytes peak container
+memory (1.81 GiB). This is a small native-reading pilot, not throughput or
+independent accuracy acceptance. Linux AMD64 and scanned-document OCR remain
+unqualified. An existing 1 GiB worker cannot host this measured reader unchanged.
+
+`reader-requirements-linux-arm64.txt` freezes the measured native-reader packages.
+It does not contain the first-party upstream package needed by adapter integration
+tests; install that package from this fork as described above. Use a separate
+Python 3.12 environment. Select the CPU wheels explicitly before resolving the
+remaining reader dependencies:
+
+```sh
+python -m pip install --no-deps --index-url https://download.pytorch.org/whl/cpu torch==2.14.1+cpu torchvision==0.29.1+cpu
+python -m pip install -r samples/docling-evidence-adapter/reader-requirements-linux-arm64.txt
+python -m pip check
+```
+
+The [official CPU wheel index](https://download.pytorch.org/whl/cpu/torch/) supplies
+the CPU build; the default wheel selection pulled unnecessary GPU dependencies
+in the first install attempt. Dependency installation had no customer files or
+credentials mounted. Reading used only pre-provisioned models, offline environment
+settings, and Docker networking disabled. Root, code, dependencies, sources and
+models were read-only; only output and a 512 MiB temporary filesystem were writable.
+The supervisor imposed a 300-second deadline, 2 CPUs, 3 GiB RAM, no swap, 128 PIDs,
+an unprivileged UID, dropped capabilities and no privilege escalation. Runtime
+checks verified cgroup limits and mounts. Inactive tunnel interfaces may exist
+with Docker networking disabled; they must not be mistaken for active network
+access. The run had no active non-loopback interface or IPv4 route.
+
+All 13 results preserved the retained macOS body/table text and passed CRM
+complete-evidence validation on PostgreSQL 15 and 17 (995 blocks including the
+two variants). Agreement between readers/platforms is not a labeled accuracy
+benchmark. Private samples and result payloads are kept outside this public fork.
+No AWS resources, paid API, existing-service restart or production reader
+activation was involved.
