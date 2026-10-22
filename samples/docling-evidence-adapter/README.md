@@ -140,3 +140,18 @@ retained. The existing 1 GiB worker limit is insufficient on both architectures.
 All 13 AMD64 outputs preserve the retained body/table text. This remains a native
 pilot, not OCR accuracy, production concurrency, or workflow acceptance. No
 running CRM service or reader policy was changed by this qualification.
+
+### Supervised command interface
+
+`python reader.py --describe` reports the installed native-reader version and
+limits. A trusted supervisor can pass `--source-json` (the six `SourceBinding`
+fields), `--expected-size` and `--models /read-only/models`, and stream the exact
+source bytes on stdin. The command returns the complete evidence envelope.
+Source metadata must come from the authorized caller, never from document text.
+
+The command enforces 100 MiB input, 100 pages, 8 MiB output and a 240-second
+cooperative conversion bound. Run it inside a network-disabled, unprivileged
+container with a separate hard deadline and resource limits. Exit 2 reports a
+fixed reader-rejection code; exit 1 gives a content-free execution failure.
+Neither exit 0 nor the envelope grants financial acceptance. This command does
+not deploy AWS infrastructure or replace the upstream workflow.

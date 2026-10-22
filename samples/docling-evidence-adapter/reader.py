@@ -219,3 +219,70 @@ def read_evidence(
     ):
         raise ReaderRejected("output_byte_limit")
     return evidence
+
+
+def main(argv=None):
+    """Credential-free CLI for a supervising caller; source authority stays outside."""
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--describe", action="store_true")
+    parser.add_argument("--source-json")
+    parser.add_argument("--expected-size", type=int)
+    parser.add_argument("--models", type=Path)
+    args = parser.parse_args(argv)
+    limits = ReadLimits(
+        source_bytes=100 * 1024 * 1024,
+        output_bytes=8 * 1024 * 1024,
+        pages=100,
+        conversion_seconds=240,
+    )
+    if args.describe:
+        if any(
+            v is not None for v in (args.source_json, args.expected_size, args.models)
+        ):
+            parser.error("Describe does not accept source inputs")
+        print(
+            json.dumps(
+                {
+                    "reader": "docling",
+                    "version": version("docling"),
+                    "maxSourceBytes": limits.source_bytes,
+                    "maxPages": limits.pages,
+                    "maxOutputBytes": limits.output_bytes,
+                    "ocrEnabled": False,
+                }
+            )
+        )
+        return 0
+    try:
+        if not args.source_json or len(args.source_json.encode()) > 16384:
+            raise ValueError("Invalid source descriptor")
+        if (
+            args.expected_size is None
+            or not 0 < args.expected_size <= limits.source_bytes
+        ):
+            raise ValueError("Invalid source size")
+        source = SourceBinding(**json.loads(args.source_json))
+        data = sys.stdin.buffer.read(args.expected_size + 1)
+        if len(data) != args.expected_size:
+            raise ValueError("Source byte length changed")
+        evidence = read_evidence(data, source, models=args.models, limits=limits)
+        wire = json.dumps(evidence, ensure_ascii=False, allow_nan=False)
+        if len(wire.encode()) > limits.output_bytes:
+            raise ReaderRejected("output_byte_limit")
+        print(wire)
+        return 0
+    except ReaderRejected as error:
+        # Library-defined fixed codes only; no document content or path is logged.
+        print(json.dumps({"state": "reader_rejected", "reason": str(error)}))
+        return 2
+    except Exception:
+        print("reader_execution_failed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
