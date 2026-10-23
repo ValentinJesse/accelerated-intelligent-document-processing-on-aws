@@ -15,6 +15,8 @@ from adapter import SourceBinding, build_evidence
 
 PDF = "application/pdf"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+HTML = "text/html"
+CONTENT_FORMATS = "docling-input-format.v1"
 
 
 class ReaderRejected(ValueError):
@@ -74,20 +76,24 @@ class ReadLimits:
                 raise ValueError("Invalid reader limits")
 
 
-def inspect_source(data: bytes, source: SourceBinding, limits: ReadLimits) -> str:
+def inspect_source(
+    data: bytes, source: SourceBinding, limits: ReadLimits, *, content_formats=False
+) -> str | None:
     """Inspect bytes, not extension or product/company-specific naming patterns."""
     if not isinstance(data, bytes) or not 0 < len(data) <= limits.source_bytes:
         raise ReaderRejected("source_byte_limit")
     if hashlib.sha256(data).hexdigest() != source.sha256:
         raise ReaderRejected("source_hash_mismatch")
     detected = filetype.guess_mime(data)
-    if detected not in (PDF, DOCX):
+    # filetype has no HTML detector. In the explicit content-format route only,
+    # let Docling's maintained stream detector decide unrecognized text bytes.
+    if detected not in (PDF, DOCX) and not (content_formats and detected is None):
         raise ReaderRejected("unsupported_detected_mime")
     generic_mime = source.mime_type == "application/octet-stream" or (
         source.mime_type in ("application/zip", "application/x-zip-compressed")
         and detected == DOCX
     )
-    if detected != source.mime_type and not generic_mime:
+    if detected != source.mime_type and not generic_mime and not content_formats:
         raise ReaderRejected("source_mime_mismatch")
     if detected == DOCX:
         started = time.monotonic()
@@ -120,7 +126,14 @@ def inspect_source(data: bytes, source: SourceBinding, limits: ReadLimits) -> st
     return detected
 
 
-def _make_converter(models: Path, limits: ReadLimits, ocr: LocalOcr | None = None):
+def _make_converter(
+    models: Path,
+    limits: ReadLimits,
+    ocr: LocalOcr | None = None,
+    *,
+    content_formats=False,
+    detected_format=None,
+):
     # Lazy imports let preflight reject malformed/unsupported bytes before ML load.
     from docling.datamodel.accelerator_options import (
         AcceleratorDevice,
@@ -151,10 +164,28 @@ def _make_converter(models: Path, limits: ReadLimits, ocr: LocalOcr | None = Non
             mode=OcrMode(ocr.mode),
             print_verbose=False,
         )
-    return DocumentConverter(
-        allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
-    )
+    formats = [InputFormat.PDF, InputFormat.DOCX]
+    format_options = {InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+    if content_formats:
+        from docling.datamodel.backend_options import HTMLBackendOptions
+        from docling.document_converter import HTMLFormatOption
+
+        # Unknown text may use HTML only. Never let a second detector launch
+        # PDF/DOCX conversion before their byte/page/archive preflight checks.
+        formats = [
+            {PDF: InputFormat.PDF, DOCX: InputFormat.DOCX}.get(
+                detected_format, InputFormat.HTML
+            )
+        ]
+        format_options[InputFormat.HTML] = HTMLFormatOption(
+            backend_options=HTMLBackendOptions(
+                render_page=False,
+                fetch_images=False,
+                enable_local_fetch=False,
+                enable_remote_fetch=False,
+            )
+        )
+    return DocumentConverter(allowed_formats=formats, format_options=format_options)
 
 
 def validate_conversion(result, expected_pages: int | None) -> None:
@@ -174,6 +205,7 @@ def read_evidence(
     models: Path,
     limits: ReadLimits = ReadLimits(),
     ocr: LocalOcr | None = None,
+    content_formats: bool = False,
 ) -> dict:
     """Bind exact immutable bytes to complete reader evidence, without accepting it.
 
@@ -184,7 +216,9 @@ def read_evidence(
     started = time.monotonic()
     if ocr is not None and not isinstance(ocr, LocalOcr):
         raise ValueError("Invalid local OCR settings")
-    detected = inspect_source(data, source, limits)
+    if type(content_formats) is not bool or content_formats and ocr is not None:
+        raise ValueError("Content format and OCR routes must be qualified separately")
+    detected = inspect_source(data, source, limits, content_formats=content_formats)
     if ocr is not None and detected != PDF:
         raise ReaderRejected("ocr_unsupported_detected_mime")
     if not models.is_absolute() or not models.is_dir():
@@ -209,24 +243,47 @@ def read_evidence(
         except pypdfium2.PdfiumError as exc:
             raise ReaderRejected("unreadable_pdf") from exc
 
-    from docling.datamodel.base_models import DocumentStream
+    from docling.datamodel.base_models import DocumentStream, InputFormat
 
     # Preserve native defaults and require installed OCR dependencies explicitly.
     ocr_identity = ocr.identity() if ocr is not None else None
     converter = (
-        _make_converter(models, limits, ocr)
-        if ocr is not None
-        else _make_converter(models, limits)
+        _make_converter(models, limits, content_formats=True, detected_format=detected)
+        if content_formats
+        else (
+            _make_converter(models, limits, ocr)
+            if ocr is not None
+            else _make_converter(models, limits)
+        )
     )
     result = converter.convert(
         DocumentStream(
-            name="source.pdf" if detected == PDF else "source.docx",
+            # A supplied .pdf extension overrides Docling's HTML byte detection.
+            # This internal stream name never replaces the original source binding.
+            name="source"
+            if content_formats
+            else "source.pdf"
+            if detected == PDF
+            else "source.docx",
             stream=io.BytesIO(data),
         ),
         raises_on_error=False,
         max_num_pages=limits.pages,
         max_file_size=limits.source_bytes,
     )
+    if content_formats:
+        actual = {
+            InputFormat.PDF: PDF,
+            InputFormat.DOCX: DOCX,
+            InputFormat.HTML: HTML,
+        }.get(result.input.format)
+        if actual is None:
+            raise ReaderRejected("unsupported_detected_mime")
+        if (detected is None and actual != HTML) or (
+            detected is not None and actual != detected
+        ):
+            raise ReaderRejected("detected_format_conflict")
+        detected = actual
     validate_conversion(result, page_count)
     evidence = build_evidence(
         result.document,
@@ -260,6 +317,11 @@ def read_evidence(
     }
     if ocr_identity is not None:
         evidence["reading"]["ocr"] = ocr_identity
+    if content_formats:
+        evidence["reading"].update(
+            formatDetection=CONTENT_FORMATS,
+            mimeConflict=detected != source.mime_type,
+        )
     # Metadata is part of the same envelope budget.
     import json
 
@@ -284,9 +346,12 @@ def main(argv=None):
     parser.add_argument("--models", type=Path)
     parser.add_argument("--ocr-language")
     parser.add_argument("--ocr-mode", choices=("pdf_aware_layout_regions", "full_page"))
+    parser.add_argument("--content-formats", action="store_true")
     args = parser.parse_args(argv)
     if args.ocr_mode and not args.ocr_language:
         parser.error("OCR mode requires an explicit language")
+    if args.content_formats and args.ocr_language:
+        parser.error("Content format and OCR routes must be qualified separately")
     try:
         ocr = (
             LocalOcr(args.ocr_language, args.ocr_mode or "pdf_aware_layout_regions")
@@ -322,6 +387,11 @@ def main(argv=None):
                     "maxOutputBytes": limits.output_bytes,
                     "ocrEnabled": ocr is not None,
                     **({"ocr": ocr_identity} if ocr is not None else {}),
+                    **(
+                        {"formatDetection": CONTENT_FORMATS}
+                        if args.content_formats
+                        else {}
+                    ),
                 }
             )
         )
@@ -344,6 +414,7 @@ def main(argv=None):
             models=args.models,
             limits=limits,
             **({"ocr": ocr} if ocr is not None else {}),
+            **({"content_formats": True} if args.content_formats else {}),
         )
         wire = json.dumps(evidence, ensure_ascii=False, allow_nan=False)
         if len(wire.encode()) > limits.output_bytes:

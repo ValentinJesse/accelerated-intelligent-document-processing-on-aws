@@ -204,3 +204,23 @@ AMD64 OCR, broad scan/table/language coverage, cost and recurring publication re
 unqualified. No customer original or extracted text is included here. The CRM's
 current complete-evidence contract deliberately refuses OCR-enabled envelopes;
 qualifying and versioning that contract is separate work before activation.
+
+### Explicit content-format route
+
+`reader.py --content-formats` opts into `docling-input-format.v1`; native and
+OCR defaults retain their prior behavior. Original `SourceBinding` MIME, hash
+and revision are never rewritten. `reading.detectedMime` records conversion
+format, `reading.formatDetection` versions detection, and `reading.mimeConflict`
+compares detected and declared MIME exactly (including generic declarations).
+This route supports preflight-verified PDF/DOCX and Docling-detected HTML.
+
+Signature-unknown input is passed to an **HTML-only** converter with an
+extensionless internal stream name. It cannot initialize PDF/Office conversion
+without their existing page/dimension/archive preflight. Docling HTML rendering,
+image retrieval, local fetch and remote fetch are explicitly disabled. The
+supervisor must still enforce network denial, filesystem isolation, wall time,
+memory, input and output bounds. HTML retains complete structural text/tables;
+it has no physical page geometry or invented page anchors. This is technical
+reading evidence, not document classification or financial approval. Resource
+canaries, malformed inputs and metadata conflicts are tested separately from
+reader accuracy and production qualification.
