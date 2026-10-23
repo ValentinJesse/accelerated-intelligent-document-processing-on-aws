@@ -123,3 +123,45 @@ def test_describe_requires_no_source_and_reports_installed_version(monkeypatch, 
     assert json.loads(capsys.readouterr().out)["version"] == "2.141.0"
     with pytest.raises(SystemExit):
         reader.main(["--describe", "--expected-size", "1"])
+
+
+def test_conversion_diagnostics_cannot_corrupt_json_or_erase_reading_warning(
+    monkeypatch, capsys
+):
+    import logging
+
+    def read(*_args, **_kwargs):
+        print("upstream conversion diagnostic")
+        logging.getLogger("reader-conversion-test").warning("conversion table warning")
+        return {
+            "reading": {"requiresReadingReview": False},
+            "document": {"body": "complete"},
+        }
+
+    monkeypatch.setattr(reader, "read_evidence", read)
+    assert invoke(monkeypatch, b"PDF bytes") == 0
+    captured = capsys.readouterr()
+    value = json.loads(captured.out)
+    assert value["reading"] == {"requiresReadingReview": True, "warningCount": 1}
+    assert "upstream conversion diagnostic" in captured.err
+    assert "conversion table warning" in captured.err
+
+
+def test_failed_conversion_keeps_stdout_empty_and_restores_logging(monkeypatch, capsys):
+    import logging
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+
+    def fail(*_args, **_kwargs):
+        logging.getLogger("reader-conversion-test").warning("conversion failed warning")
+        raise RuntimeError("private exception body")
+
+    monkeypatch.setattr(reader, "read_evidence", fail)
+    assert invoke(monkeypatch, b"PDF bytes") == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "conversion failed warning" in captured.err
+    assert "reader_execution_failed" in captured.err
+    assert "private exception body" not in captured.err
+    assert root.handlers == original_handlers

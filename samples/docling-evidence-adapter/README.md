@@ -158,6 +158,13 @@ not deploy AWS infrastructure or replace the upstream workflow.
 
 ## Explicit local OCR candidate
 
+The isolated reader CLI reserves stdout for its JSON envelope. Python conversion
+diagnostics are redirected to stderr; propagated warning/error records add an
+optional `reading.warningCount` and force `reading.requiresReadingReview=true`.
+This preserves possible table loss instead of treating successful conversion as
+complete reading. Supervisors must bound and privately retain stderr. A zero or
+absent count does not clear other limitations or establish extraction accuracy.
+
 Native reading remains the default. For a demonstrated scanned-PDF gap, the same
 reader accepts `ocr=LocalOcr("latin", "full_page")`, or the CLI flags
 `--ocr-language latin --ocr-mode full_page`. Omitting the mode selects

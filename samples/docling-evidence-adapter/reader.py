@@ -336,7 +336,9 @@ def read_evidence(
 def main(argv=None):
     """Credential-free CLI for a supervising caller; source authority stays outside."""
     import argparse
+    import contextlib
     import json
+    import logging
     import sys
 
     parser = argparse.ArgumentParser()
@@ -408,14 +410,38 @@ def main(argv=None):
         data = sys.stdin.buffer.read(args.expected_size + 1)
         if len(data) != args.expected_size:
             raise ValueError("Source byte length changed")
-        evidence = read_evidence(
-            data,
-            source,
-            models=args.models,
-            limits=limits,
-            **({"ocr": ocr} if ocr is not None else {}),
-            **({"content_formats": True} if args.content_formats else {}),
-        )
+
+        class Diagnostics(logging.StreamHandler):
+            def __init__(self):
+                super().__init__(sys.stderr)
+                self.setLevel(logging.WARNING)
+                self.warning_count = 0
+
+            def emit(self, record):
+                self.warning_count += 1
+                super().emit(record)
+
+        diagnostics = Diagnostics()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(diagnostics)
+        try:
+            # Upstream conversion may print diagnostics or initialize a logger
+            # with stdout as its stream. Stdout is exclusively our JSON protocol.
+            # Imports happen lazily inside this context in the isolated CLI.
+            with contextlib.redirect_stdout(sys.stderr):
+                evidence = read_evidence(
+                    data,
+                    source,
+                    models=args.models,
+                    limits=limits,
+                    **({"ocr": ocr} if ocr is not None else {}),
+                    **({"content_formats": True} if args.content_formats else {}),
+                )
+        finally:
+            root_logger.removeHandler(diagnostics)
+        if diagnostics.warning_count:
+            evidence["reading"]["warningCount"] = diagnostics.warning_count
+            evidence["reading"]["requiresReadingReview"] = True
         wire = json.dumps(evidence, ensure_ascii=False, allow_nan=False)
         if len(wire.encode()) > limits.output_bytes:
             raise ReaderRejected("output_byte_limit")
